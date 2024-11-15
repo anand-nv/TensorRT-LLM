@@ -1,0 +1,9 @@
+--extra-index-url https://pypi.nvidia.com
+torch>=2.4.0
+nemo2riva
+nemo>=1.23.0
+soundfile
+safetensors
+kaldialign
+tensorrt_llm==0.13.0
+datasets
