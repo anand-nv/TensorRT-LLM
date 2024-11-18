@@ -543,20 +543,6 @@ def collate_wrapper(batch):
         ids.append(item["id"])
     return speeches, durations, labels, ids
 
-def decode_manifest(
-        model,
-        manifest_file,
-        batch_size=1,
-        num_beams=1,
-        sample_rate=16000):
-
-    with open(manifest_file,'r') as manifest:
-        for line in manifest:
-            data=json.loads(line)
-        data['text']
-
-
-
 def decode_dataset(
         model,
         dataset,
