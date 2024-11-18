@@ -37,6 +37,7 @@ from tensorrt_llm._utils import (str_dtype_to_torch, str_dtype_to_trt,
 from tensorrt_llm.bindings import GptJsonConfig, KVCacheType
 from tensorrt_llm.runtime import PYTHON_BINDINGS, ModelConfig, SamplingConfig
 from tensorrt_llm.runtime.session import Session, TensorInfo
+from string import punctuation
 
 from utils import MelFilterBankFeats, pad_or_trim, store_transcripts, Pathlike, N_SAMPLES, write_error_stats
 
@@ -513,7 +514,6 @@ class CanaryTRTLLM(object):
 
 
 
-        print(f"{text_prefix=}, {decoder_input_ids=}")
         output_ids = self.decoder.generate(decoder_input_ids,
                                            encoder_output,
                                            encoder_max_input_length,
@@ -524,6 +524,7 @@ class CanaryTRTLLM(object):
         texts = []
         for i in range(len(output_ids)):
             text = self.tokenizer.decode(output_ids[i][0]).strip()
+            text=text.lstrip(punctuation)
             texts.append(text)
         return texts
 
@@ -542,7 +543,6 @@ def decode_wav_file(
     predictions = model.process_batch([waveform]*batch_size,[len(waveform)]*batch_size, text_prefix,
                                       num_beams)
 
-    print(predictions)
     prediction = predictions[0]
 
     # remove all special tokens in the prediction
@@ -566,14 +566,14 @@ def batch_manifest(manifest_file, batch_size):
                 waveform = waveform.astype(np.float32)
                 waveform = torch.from_numpy(waveform)
                 prompt={'task':data.get('taskname','transcribe'),
-                        'pnc': data.get('pnc','no')=='yes',
+                        'pnc': data.get('pnc','yes')=='no',
                         'source_language': data.get('source_language','en-US'),
                         'target_language': data.get('source_language','en-US'),
                         }
-
+                print(prompt)
                 prompts_cfg.append(prompt)
                 labels.append(data['text'])
-                ids.append(data['text'])
+                ids.append(data['audio_filepath'])
                 durations.append(duration)
                 waveforms.append(waveform)
                 count += 1
@@ -586,8 +586,8 @@ def batch_manifest(manifest_file, batch_size):
 
 
 def decode_manifest(
-        model,
         manifest_file,
+        model,
         batch_size=1,
         num_beams=1,
         sample_rate=16000,
@@ -599,7 +599,7 @@ def decode_manifest(
     for waveforms, durations, texts, ids, prompt_cfg in batch_manifest(manifest_file, batch_size):
         total_duration += sum(durations) / sample_rate
         predictions = model.process_batch(waveforms, durations,
-                                          num_beams=num_beams, sample_rate=sample_rate, prompt_cfg=prompt_cfg)
+                                          num_beams=num_beams, prompts_cfg=prompt_cfg)
         for wav_id, label, prediction, cfg in zip(ids, texts, predictions, prompt_cfg):
             # remove all special tokens in the prediction
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
@@ -611,9 +611,9 @@ def decode_manifest(
                   'pnc': 'no' if cfg['pnc']=='yes' else 'yes',
                   'task': cfg['task']
             }
-            results.append(data)
+            results.append((ids,texts,prompt_cfg))
             if output_manifest is not None:
-                output_manifest.append(ids,texts,prompt_cfg)
+                output_manifest.append(data)
 
     return results, total_duration
 
@@ -730,23 +730,26 @@ if __name__ == '__main__':
                 ofp.write(f"{json.dumps(data)}\n")
 
 
+    s=""
 
-    with open(f"{args.results_dir}/errs-{args.name}.txt", "w") as f:
-        total_error_rate = write_error_stats(f,
-                                             "test-set",
-                                             results,
-                                             enable_log=True)
-        if args.accuracy_check and args.dataset == "hf-internal-testing/librispeech_asr_dummy" and not args.input_file:
-            assert total_error_rate <= 2.8, f"Word Error rate using canary model should be 2.40%, but got {total_error_rate}"
+    if output_manifest is  None and args.input_file is None:
+        with open(f"{args.results_dir}/errs-{args.name}.txt", "w") as f:
+            total_error_rate = write_error_stats(f,
+                                                 "test-set",
+                                                 results,
+                                                 enable_log=True)
+            if args.accuracy_check and args.dataset == "hf-internal-testing/librispeech_asr_dummy" and not args.input_file:
+                assert total_error_rate <= 2.8, f"Word Error rate using canary model should be 2.40%, but got {total_error_rate}"
+            s = f"total error rate: {total_error_rate:.2f}%\n"
 
     rtf = total_duration/elapsed
-    s = f"RTF: {rtf:.4f}\n"
+    s += f"RTF: {rtf:.4f}\n"
     s += f"total_duration: {total_duration:.3f} seconds\n"
     s += f"({total_duration/3600:.2f} hours)\n"
     s += f"processing time: {elapsed:.3f} seconds " f"({elapsed/3600:.2f} hours)\n"
     s += f"batch size: {args.batch_size}\n"
     s += f"num_beams: {args.num_beams}\n"
-    s += f"total error rate: {total_error_rate:.2f}%\n"
+
     print(s)
 
     with open(f"{args.results_dir}/rtf-{args.name}.txt", "w") as f:
