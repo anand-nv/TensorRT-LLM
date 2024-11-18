@@ -270,16 +270,30 @@ class CanaryEncoder:
             engine_buffer = f.read()
         logger.info(f"Creating session from engine {engine_path}")
         self.session_conformer = Session.from_serialized_engine(engine_buffer)
-        self.device = torch.device("cuda") if torch.cuda.is_available() else "cpu"
+        self.device = torch.device("cuda:0") if torch.cuda.is_available() else "cpu"
 
-    def infer(self,audio_signal, length, stream):
+    @staticmethod
+    def get_masked_emb(enc_outputs):
+        enc_emb = enc_outputs['outputs']
+        enc_len = enc_outputs['encoded_lengths']
+        batch_size = enc_len.shape[0]
+        max_length = enc_emb.shape[2]
+
+        mask = torch.arange(max_length, device='cuda').unsqueeze(0).expand(batch_size, max_length) < enc_len.unsqueeze(
+            1
+        )
+        enc_mask = torch.where(mask.unsqueeze(1), enc_emb, 0.0).permute(0, 2, 1)
+
+        return enc_mask,enc_len
+
+    def infer(self,audio_signal, length, stream, audio_file=""):
         audio_inputs={'audio_signal': audio_signal, 'length': length}
         outputs_info= self.session_conformer.infer_shapes([TensorInfo("audio_signal", trt.DataType.FLOAT, audio_signal.shape),
                                                            TensorInfo("length", trt.DataType.INT64, length.shape)])
         enc_outputs = {
             t.name: torch.empty(tuple(t.shape),
                                 dtype=trt_dtype_to_torch(t.dtype),
-                                device="cuda")
+                                device="cuda:0")
             for t in outputs_info
         }
 
@@ -288,11 +302,9 @@ class CanaryEncoder:
         assert is_ok, "Runtime execution failed for Conformer Encoder session"
         stream.synchronize()
 
-        enc_emb = enc_outputs['outputs'].permute(0, 2, 1)
-        emb_len = enc_outputs['encoded_lengths']
+        enc_mask, emb_len=self.get_masked_emb(enc_outputs)
 
-
-        return enc_emb, emb_len
+        return enc_mask, emb_len
 
 
 
@@ -356,28 +368,26 @@ class CanaryDecoding:
                  encoder_input_lengths,
                  max_new_tokens=40,
                  num_beams=1):
-        batch_size = decoder_input_ids.shape[0]
-        decoder_input_lengths = torch.tensor([
-            decoder_input_ids.shape[-1]
-            for _ in range(decoder_input_ids.shape[0])
-        ],
-                                             dtype=torch.int32,
-                                             device='cuda')
-        decoder_max_input_length = torch.max(decoder_input_lengths).item()
         encoder_outputs=encoder_outputs.to(dtype=self.dtype)
-        cross_attention_mask = self.get_x_attention_mask(encoder_input_lengths, encoder_max_input_length).int().cuda()
 
+        decoder_input_lengths = torch.tensor(
+            [decoder_input_ids.shape[-1] for _ in range(decoder_input_ids.shape[0])], dtype=torch.int32, device='cuda'
+        )
+        decoder_max_input_length = torch.max(decoder_input_lengths).item()
+
+        cross_attention_mask = torch.ones([encoder_outputs.shape[0], 1, encoder_outputs.shape[1]]).int().cuda()
 
         # generation config
-        sampling_config = SamplingConfig(end_id=self.tokenizer.eos_id,
-                                         pad_id=self.tokenizer.pad_id,
-                                         num_beams=num_beams)
+        sampling_config = SamplingConfig(
+            end_id=self.tokenizer.eos_id, pad_id=self.tokenizer.pad_id, num_beams=num_beams
+        )
         self.decoder_generation_session.setup(
             decoder_input_lengths.size(0),
             decoder_max_input_length,
             max_new_tokens,
             beam_width=num_beams,
-            encoder_max_input_length=encoder_max_input_length)
+            encoder_max_input_length=encoder_outputs.shape[1],
+        )
 
         torch.cuda.synchronize()
 
@@ -386,13 +396,14 @@ class CanaryDecoding:
             decoder_input_ids = remove_tensor_padding(
                 decoder_input_ids, pad_value=self.tokenizer.pad_id)
             if encoder_outputs.dim() == 3:
-                encoder_output_lens = torch.full((encoder_outputs.shape[0], ),
+                encoder_input_lengths = torch.full((encoder_outputs.shape[0], ),
                                                  encoder_outputs.shape[1],
                                                  dtype=torch.int32,
                                                  device='cuda')
 
                 encoder_outputs = remove_tensor_padding(encoder_outputs,
-                                                        encoder_output_lens)
+                                                        encoder_input_lengths)
+
         output_ids = self.decoder_generation_session.decode(
             decoder_input_ids,
             decoder_input_lengths,
@@ -413,8 +424,10 @@ class CanaryTRTLLM(object):
     def __init__(self,
                  engine_dir,
                  debug_mode=False,
-                 assets_dir=None,
+                 device="cuda:0",
                  use_py_session=False):
+
+        self.device=device
         world_size = 1
         runtime_rank = tensorrt_llm.mpi_rank()
         runtime_mapping = tensorrt_llm.Mapping(world_size, runtime_rank)
@@ -428,7 +441,7 @@ class CanaryTRTLLM(object):
         self.num_feats = preprocessor_config['features']
         self.n_fft = preprocessor_config['n_fft']
         mel_basis_file = engine_dir / "preprocessor/mel_basis.pt"
-        self.mel_basis = torch.load(mel_basis_file, weights_only=True,map_location=torch.device('cuda'))
+        self.mel_basis = torch.load(mel_basis_file, weights_only=True,map_location=torch.device(self.device))
         window_size=preprocessor_config.get('window_size',0.025)
         window_stride = preprocessor_config.get('window_stride',0.010)
         window_type = preprocessor_config.get('window','hann')
@@ -458,16 +471,20 @@ class CanaryTRTLLM(object):
         prompt_id = self.tokenizer.encode(text_prefix)
         prompt_id = torch.tensor(prompt_id)
         batch_size = len(audio_input_lengths)
-        decoder_input_ids= torch.nn.utils.rnn.pad_sequence(
-            [prompt_id]*batch_size, batch_first=True, padding_value=self.decoder.tokenizer.blank_id
-        ).to('cuda')
+
         stream=torch.cuda.current_stream('cuda')
 
 
         mel,mel_input_lengths = self.preprocessor.get_feats(audio, audio_input_lengths)
         encoder_output, encoder_output_lengths = self.encoder.infer(
             mel, mel_input_lengths, stream)
-        encoder_max_input_length = torch.max(encoder_output_lengths).item()
+
+        encoder_max_input_length = encoder_output.shape[2]
+        batch_size = len(encoder_output_lengths)
+
+
+        decoder_input_ids = prompt_id.repeat(batch_size, 1)
+
 
         output_ids = self.decoder.generate(decoder_input_ids,
                                            encoder_output,
@@ -488,20 +505,24 @@ def decode_wav_file(
         model,
         batch_size=1,
         text_prefix="<|startoftranscript|> <|en|> <|transcribe|> <|en|> <|pnc|>",
-        num_beams=1,
-        normalizer=None):
+        num_beams=1):
+
 
 
     waveform, sample_rate = soundfile.read(input_file_path)
     total_duration=waveform.shape[0]/sample_rate
+    waveform=torch.from_numpy(waveform).to(dtype=torch.float32,  device="cuda:0")
+
+
     predictions = model.process_batch([waveform]*batch_size,[len(waveform)]*batch_size, text_prefix,
                                       num_beams)
+
+    print(predictions)
     prediction = predictions[0]
 
     # remove all special tokens in the prediction
     prediction = re.sub(r'<\|.*?\|>', '', prediction)
-    if normalizer:
-        prediction = normalizer(prediction)
+
     print(f"prediction: {prediction}")
     results = [(0, [""], prediction.split())]
     return results, total_duration*batch_size
@@ -525,10 +546,9 @@ def collate_wrapper(batch):
 def decode_dataset(
         model,
         dataset,
-        text_prefix="<|startoftranscript|> <|en|> <|transcribe|> <|en|> <|pnc|>",
+        text_prefix="<|startoftranscript|> <|en|> <|transcribe|> <|en|> <|nopnc|>",
         batch_size=1,
         num_beams=1,
-        normalizer=None,
         sample_rate=16000):
     librispeech_dummy = load_dataset(dataset, "clean", split="validation")
 
@@ -552,25 +572,23 @@ def decode_dataset(
         for wav_id, label, prediction in zip(ids, texts, predictions):
             # remove all special tokens in the prediction
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
-            if normalizer:
-                prediction, label = normalizer(prediction), normalizer(label)
+
             print(f"wav_id: {wav_id}, label: {label}, prediction: {prediction}")
-            results.append((wav_id, label.split(), prediction.split()))
+            results.append((wav_id, label.lower().split(), prediction.lower().split()))
     return results, total_duration
 
 
 if __name__ == '__main__':
     args = parse_arguments()
     tensorrt_llm.logger.set_level(args.log_level)
-    model = CanaryTRTLLM(args.engine_dir, args.debug, args.assets_dir,
-                          args.use_py_session)
+    model = CanaryTRTLLM(args.engine_dir, debug_mode=args.debug, device="cuda:0",
+                          use_py_session=args.use_py_session)
     if args.enable_warmup:
         results, total_duration = decode_dataset(
             model,
             "hf-internal-testing/librispeech_asr_dummy",
             batch_size=args.batch_size,
-            num_beams=args.num_beams,
-            mel_filters_dir=args.assets_dir)
+            num_beams=args.num_beams)
     start_time = time.time()
     if args.input_file:
         results, total_duration = decode_wav_file(
