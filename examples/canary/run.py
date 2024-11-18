@@ -685,7 +685,7 @@ if __name__ == '__main__':
             text_prefix=args.prompt_text,
             batch_size=args.batch_size,
             num_beams=args.num_beams,)
-    if args.manifest_file:
+    elif args.manifest_file:
         start_time = time.time()
 
         results, total_duration = decode_manifest(
