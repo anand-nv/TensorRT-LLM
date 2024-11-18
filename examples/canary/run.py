@@ -54,6 +54,8 @@ def parse_arguments():
     parser.add_argument('--prompt_text', type=str,
                         default="<|startoftranscript|> <|en-US|> <|translate|> <|en-US|> <|pnc|>")
     parser.add_argument('--manifest_file', type=str, default=None)
+    parser.add_argument('--results_manifest', type=str, default=None)
+
     parser.add_argument('--dataset',
                         type=str,
                         default="hf-internal-testing/librispeech_asr_dummy")
@@ -588,7 +590,8 @@ def decode_manifest(
         manifest_file,
         batch_size=1,
         num_beams=1,
-        sample_rate=16000):
+        sample_rate=16000,
+        output_manifest=None):
 
     results = []
     total_duration = 0
@@ -597,12 +600,21 @@ def decode_manifest(
         total_duration += sum(durations) / sample_rate
         predictions = model.process_batch(waveforms, durations,
                                           num_beams=num_beams, sample_rate=sample_rate, prompt_cfg=prompt_cfg)
-        for wav_id, label, prediction in zip(ids, texts, predictions):
+        for wav_id, label, prediction, cfg in zip(ids, texts, predictions, prompt_cfg):
             # remove all special tokens in the prediction
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
 
             print(f"wav_id: {wav_id}, label: {label}, prediction: {prediction}")
-            results.append((wav_id, label.lower().split(), prediction.lower().split()))
+            data={'audio_filepath': wav_id, 'prediction': prediction,
+                  'source_lang': cfg['source_language'],
+                  'target_lang': cfg['target_language'],
+                  'pnc': 'no' if cfg['pnc']=='yes' else 'yes',
+                  'task': cfg['task']
+            }
+            results.append(data)
+            if output_manifest is not None:
+                output_manifest.append(ids,texts,prompt_cfg)
+
     return results, total_duration
 
 
@@ -662,7 +674,10 @@ if __name__ == '__main__':
     tensorrt_llm.logger.set_level(args.log_level)
     model = CanaryTRTLLM(args.engine_dir, debug_mode=args.debug, device="cuda:0",
                           use_py_session=args.use_py_session)
-
+    if args.results_manifest is not None:
+        output_manifest = []
+    else:
+        output_manifest = None
     if args.enable_warmup:
         results, total_duration = decode_dataset(
             model,
@@ -692,7 +707,8 @@ if __name__ == '__main__':
             args.manifest_file,
             model,
             batch_size=args.batch_size,
-            num_beams=args.num_beams
+            num_beams=args.num_beams,
+            output_manifest=output_manifest
         )
 
     else:
@@ -707,6 +723,13 @@ if __name__ == '__main__':
     Path(args.results_dir).mkdir(parents=True, exist_ok=True)
     store_transcripts(filename=f"{args.results_dir}/recogs-{args.name}.txt",
                       texts=results)
+
+    if output_manifest is not None:
+        with open(args.results_manifest, 'w') as ofp:
+            for data in output_manifest:
+                ofp.write(f"{json.dumps(data)}\n")
+
+
 
     with open(f"{args.results_dir}/errs-{args.name}.txt", "w") as f:
         total_error_rate = write_error_stats(f,
