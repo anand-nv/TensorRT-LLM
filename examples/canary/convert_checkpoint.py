@@ -248,21 +248,21 @@ class CanaryModel:
             model_params.update(self.model.log_softmax.state_dict())
             assert torch.equal(model_params['mlp.layer0.weight'],model_params['_embedding.token_embedding.weight'])
 
-            weights['embedding.vocab_embedding.weight'] = model_params['mlp.layer0.weight'].clone()
-            weights['lm_head.weight'] = model_params['mlp.layer0.weight']
-            weights['lm_head.bias'] = model_params['mlp.layer0.bias']
-            weights['embedding.position_embedding.weight'] = model_params['_embedding.position_embedding.pos_enc']
-            weights['embedding.embedding_layernorm.weight'] = model_params['_embedding.layer_norm.weight']
-            weights['embedding.embedding_layernorm.bias'] = model_params['_embedding.layer_norm.bias']
+            weights['embedding.vocab_embedding.weight'] = model_params['mlp.layer0.weight'].contiguous().clone()
+            weights['lm_head.weight'] = model_params['mlp.layer0.weight'].contiguous()
+            weights['lm_head.bias'] = model_params['mlp.layer0.bias'].contiguous()
+            weights['embedding.position_embedding.weight'] = model_params['_embedding.position_embedding.pos_enc'].contiguous()
+            weights['embedding.embedding_layernorm.weight'] = model_params['_embedding.layer_norm.weight'].contiguous()
+            weights['embedding.embedding_layernorm.bias'] = model_params['_embedding.layer_norm.bias'].contiguous()
 
             for i in range(self.model_config['transf_decoder']['config_dict']['num_layers']):
 
                 #layer_norm_1 aka self_attention_layernorm
                 weights[f'decoder_layers.{i}.self_attention_layernorm.weight'] =  \
-                    model_params[f'_decoder.layers.{i}.layer_norm_1.weight']
+                    model_params[f'_decoder.layers.{i}.layer_norm_1.weight'].contiguous()
                 weights[
                     f'decoder_layers.{i}.self_attention_layernorm.bias'] = \
-                    model_params[f'_decoder.layers.{i}.layer_norm_1.bias']
+                    model_params[f'_decoder.layers.{i}.layer_norm_1.bias'].contiguous()
 
                 #first_sub_layer
                 t = torch.cat(
@@ -272,7 +272,7 @@ class CanaryModel:
                         model_params[f'_decoder.layers.{i}.first_sub_layer.value_net.weight'],
                     ],
                     dim=0,
-                )
+                ).contiguous()
                 dst = weights[f'decoder_layers.{i}.self_attention.qkv.weight'] = t
                 t=model_params[f'_decoder.layers.{i}.first_sub_layer.out_projection.weight'].contiguous()
                 dst = weights[f'decoder_layers.{i}.self_attention.dense.weight'] = t
@@ -283,17 +283,17 @@ class CanaryModel:
                         model_params[f'_decoder.layers.{i}.first_sub_layer.key_net.bias'],
                         model_params[f'_decoder.layers.{i}.first_sub_layer.value_net.bias'],
                     ],
-                    dim=0)
+                    dim=0).contiguous()
 
                 weights[f'decoder_layers.{i}.self_attention.dense.bias'] =  \
-                    model_params[f'_decoder.layers.{i}.first_sub_layer.out_projection.bias']
+                    model_params[f'_decoder.layers.{i}.first_sub_layer.out_projection.bias'].contiguous()
 
                 #layer_norm_2 aka cross_attention_layernorm
                 weights[f'decoder_layers.{i}.cross_attention_layernorm.weight'] = \
-                    model_params[f'_decoder.layers.{i}.layer_norm_2.weight']
+                    model_params[f'_decoder.layers.{i}.layer_norm_2.weight'].contiguous()
                 weights[
                     f'decoder_layers.{i}.cross_attention_layernorm.bias'] = \
-                    model_params[f'_decoder.layers.{i}.layer_norm_2.bias']
+                    model_params[f'_decoder.layers.{i}.layer_norm_2.bias'].contiguous()
 
                 #second_sub_layer
                 t = torch.cat(
@@ -303,7 +303,7 @@ class CanaryModel:
                         model_params[f'_decoder.layers.{i}.second_sub_layer.value_net.weight'],
                     ],
                     dim=0,
-                )
+                ).contiguous()
 
                 dst = weights[f'decoder_layers.{i}.cross_attention.qkv.weight'] = t
 
@@ -317,31 +317,31 @@ class CanaryModel:
                         model_params[f'_decoder.layers.{i}.second_sub_layer.key_net.bias'],
                         model_params[f'_decoder.layers.{i}.second_sub_layer.value_net.bias'],
                     ],
-                    dim=0)
+                    dim=0).contiguous()
                 weights[f'decoder_layers.{i}.cross_attention.qkv.bias'] = cross_attn_qkv_bias
                 weights[f'decoder_layers.{i}.cross_attention.dense.bias'] = \
-                    model_params[f'_decoder.layers.{i}.second_sub_layer.out_projection.bias']
+                    model_params[f'_decoder.layers.{i}.second_sub_layer.out_projection.bias'].contiguous()
 
 
                 #layer_norm_3
                 weights[f'decoder_layers.{i}.mlp_layernorm.weight'] = \
-                    model_params[f'_decoder.layers.{i}.layer_norm_3.weight']
+                    model_params[f'_decoder.layers.{i}.layer_norm_3.weight'].contiguous()
                 weights[f'decoder_layers.{i}.mlp_layernorm.bias'] = \
-                    model_params[f'_decoder.layers.{i}.layer_norm_3.bias']
+                    model_params[f'_decoder.layers.{i}.layer_norm_3.bias'].contiguous()
 
                 #third_sub_layer
-                t = model_params[f'_decoder.layers.{i}.third_sub_layer.dense_in.weight']
+                t = model_params[f'_decoder.layers.{i}.third_sub_layer.dense_in.weight'].contiguous()
                 weights[f'decoder_layers.{i}.mlp.fc.weight'] = t
-                t = model_params[f'_decoder.layers.{i}.third_sub_layer.dense_out.weight']
+                t = model_params[f'_decoder.layers.{i}.third_sub_layer.dense_out.weight'].contiguous()
                 weights[f'decoder_layers.{i}.mlp.proj.weight'] = t
 
                 weights[f'decoder_layers.{i}.mlp.fc.bias'] = \
-                    model_params[f'_decoder.layers.{i}.third_sub_layer.dense_in.bias']
+                    model_params[f'_decoder.layers.{i}.third_sub_layer.dense_in.bias'].contiguous()
                 weights[f'decoder_layers.{i}.mlp.proj.bias'] = \
-                    model_params[f'_decoder.layers.{i}.third_sub_layer.dense_out.bias']
+                    model_params[f'_decoder.layers.{i}.third_sub_layer.dense_out.bias'].contiguous()
 
-            weights['final_layernorm.weight'] = model_params['_decoder.final_layer_norm.weight']
-            weights['final_layernorm.bias'] = model_params['_decoder.final_layer_norm.bias']
+            weights['final_layernorm.weight'] = model_params['_decoder.final_layer_norm.weight'].contiguous()
+            weights['final_layernorm.bias'] = model_params['_decoder.final_layer_norm.bias'].contiguous()
 
         except Exception as e:
             raise e
@@ -410,7 +410,6 @@ class CanaryModel:
             'hidden_size': self.config['hidden_size'],
             'norm_epsilon': 1e-5,
             'vocab_size': self.config['vocab_size'],
-            'type_vocab_size': None,
             'hidden_act': self.config['hidden_act'],
             'use_parallel_embedding': False,
             'embedding_sharding_dim': 0,
@@ -425,7 +424,7 @@ class CanaryModel:
             'has_lm_head_bias': True,
             'has_model_final_layernorm': True,
             'has_embedding_layernorm': True,
-            'has_embedding_scale': True,
+            'has_embedding_scale': False,
             'ffn_hidden_size': self.config['ff_expansion_factor'] * self.config['d_model'],
             'q_scaling': 1.0,
             'relative_attention': False,
