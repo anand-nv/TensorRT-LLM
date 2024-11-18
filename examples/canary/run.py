@@ -52,7 +52,7 @@ def parse_arguments():
     parser.add_argument('--assets_dir', type=str, default='./assets')
     parser.add_argument('--input_file', type=str, default=None)
     parser.add_argument('--prompt_text', type=str,
-                        default="<|startoftranscript|> <|en-US|> <|translate|> <|ar-AR|> <|pnc|>")
+                        default="<|startoftranscript|> <|en-US|> <|translate|> <|en-US|> <|pnc|>")
     parser.add_argument('--manifest_file', type=str, default=None)
     parser.add_argument('--dataset',
                         type=str,
