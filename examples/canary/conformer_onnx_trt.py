@@ -58,8 +58,7 @@ class ConformerTRT:
             config.set_flag(trt.BuilderFlag.BF16)
         elif self.dtype=="float16":
             config.set_flag(trt.BuilderFlag.FP16)
-        else:
-            config.set_flag(trt.BuilderFlag.FP32)
+
         #config.flags = config.flags
         parser = trt.OnnxParser(network, logger)
 

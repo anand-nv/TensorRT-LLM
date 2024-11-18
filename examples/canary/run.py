@@ -51,6 +51,7 @@ def parse_arguments():
     parser.add_argument('--results_dir', type=str, default='tmp')
     parser.add_argument('--assets_dir', type=str, default='./assets')
     parser.add_argument('--input_file', type=str, default=None)
+    parser.add_argument('--manifest_file', type=str, default=None)
     parser.add_argument('--dataset',
                         type=str,
                         default="hf-internal-testing/librispeech_asr_dummy")
@@ -541,6 +542,19 @@ def collate_wrapper(batch):
         labels.append(item["text"])
         ids.append(item["id"])
     return speeches, durations, labels, ids
+
+def decode_manifest(
+        model,
+        manifest_file,
+        batch_size=1,
+        num_beams=1,
+        sample_rate=16000):
+
+    with open(manifest_file,'r') as manifest:
+        for line in manifest:
+            data=json.loads(line)
+        data['text']
+
 
 
 def decode_dataset(
