@@ -27,11 +27,13 @@ import torch.nn.functional as F
 import logging
 import os
 
+from torch.xpu import device
+
 Pathlike = Union[str, Path]
 
 CONSTANT = 1e-5
 SAMPLE_RATE = 16000
-CHUNK_LENGTH = 30
+CHUNK_LENGTH = 29
 
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples in a 30-second chunk
 
@@ -281,6 +283,7 @@ class MelFilterBankFeats:
 
 
     def stft(self, audio):
+
         return torch.stft(audio, n_fft=self.nfft,
                           hop_length=self.window_stride,
                           win_length=self.window_size,
@@ -356,8 +359,9 @@ class MelFilterBankFeats:
             seq_len=[len(a) for a in audio]
 
         seq_len=torch.Tensor(seq_len).to(dtype=torch.int32, device=self.device)
+        if type(audio)==list:
+            audio=torch.nn.utils.rnn.pad_sequence(audio, batch_first=True, padding_value=0.0).to(device=self.device)
 
-        audio=torch.stack([torch.from_numpy(a).to(dtype=torch.float32,  device=self.device) for a in audio])
 
 
         if self.preemp is not None:
