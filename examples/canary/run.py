@@ -566,11 +566,14 @@ def batch_manifest(manifest_file, batch_size):
                 waveform = waveform.astype(np.float32)
                 waveform = torch.from_numpy(waveform)
                 prompt={'task':data.get('taskname','transcribe'),
-                        'pnc': data.get('pnc','yes')=='no',
+                        'pnc': data.get('pnc','no')=='yes',
                         'source_language': data.get('source_language','en-US'),
                         'target_language': data.get('source_language','en-US'),
                         }
-                print(prompt)
+                if 'text' in data:
+                    prompt['text'] = data['text']
+                if 'answer' in data:
+                    prompt['answer'] = data['answer']
                 prompts_cfg.append(prompt)
                 labels.append(data['text'])
                 ids.append(data['audio_filepath'])
@@ -605,12 +608,17 @@ def decode_manifest(
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
 
             print(f"wav_id: {wav_id}, label: {label}, prediction: {prediction}")
-            data={'audio_filepath': wav_id, 'prediction': prediction,
+            data={'audio_filepath': wav_id,
                   'source_lang': cfg['source_language'],
                   'target_lang': cfg['target_language'],
                   'pnc': 'no' if cfg['pnc']=='yes' else 'yes',
-                  'task': cfg['task']
+                  'task': cfg['task'],
+                  'prediction': prediction,
+                  'answer':cfg.get('answer','na'),
+                  'text':cfg.get('text','na')
+
             }
+
             results.append((ids,texts,prompt_cfg))
             if output_manifest is not None:
                 output_manifest.append(data)
