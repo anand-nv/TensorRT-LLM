@@ -123,8 +123,8 @@ class ConformerTRT:
 @click.option("--min_BS", default=1, type=int, help="Minimum batch size")
 @click.option("--opt_BS", default=None, type=int, help="Optimum batch size")
 @click.option("--max_BS", default=4, type=int, help="Maximum batch size")
-@click.argument("onnx_file", required=True)
-@click.argument("engine_dir", required=True)
+@click.argument("onnx_file", type=click.Path(exists=True),required=True)
+@click.argument("engine_dir", type=str, required=True)
 def main(onnx_file, engine_dir, config_file, min_bs, opt_bs, max_bs):
     if config_file == 'None':
         config_file = os.path.join(os.path.dirname(onnx_file), 'config.json')
