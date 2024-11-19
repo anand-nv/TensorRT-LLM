@@ -26,6 +26,9 @@ from tensorrt_llm.models.convert_utils import weight_only_quantize_dict
 from tensorrt_llm.quantization import QuantAlgo
 from safetensors.torch import save_file
 
+import onnx
+import onnx_graphsurgeon as gs
+
 import yaml
 import json
 
@@ -172,6 +175,7 @@ class CanaryModel:
                 #encoder.export(export_file, onnx_opset_version=17)
 
                 self.model.encoder.export(export_file, onnx_opset_version=17)
+
                 with open(os.path.join(encoder_path, "config.json"), 'w') as encoder_config_file:
                     json.dump(encoder_config, encoder_config_file)
 
@@ -207,16 +211,7 @@ class CanaryModel:
                                                                                 'max_generation_delta': 50}
                                                                        )
 
-        config = dict({k: self.model_config[k] for k in keys_required})
-        config['decoder'] = {
-            'transf_decoder': self.model_config['transf_decoder'],
-            'transf_encoder': self.model_config['transf_encoder'],
-            'vocabulary': self.export_vocab(),
-            'num_classes': self.model_config['head']['num_classes'],
-            'feat_in': self.model_config['model_defaults']['asr_enc_hidden'],
-            'n_layers': self.model_config['transf_decoder']['config_dict']['num_layers'],
-        }
-        config['target'] = 'trtllm.canary'
+
 
 
         model_metadata = {
@@ -245,17 +240,19 @@ class CanaryModel:
             weights = {}
             self.model.transf_decoder.to(dtype=TORCH_DTYPES[self.dtype])
             model_params = self.model.transf_decoder.state_dict()
-            model_params.update(self.model.log_softmax.state_dict())
-            assert torch.equal(model_params['mlp.layer0.weight'],model_params['_embedding.token_embedding.weight'])
+            lm_head=self.model.log_softmax.state_dict()
+            #model_params.update(self.model.log_softmax.state_dict())
 
-            weights['embedding.vocab_embedding.weight'] = model_params['mlp.layer0.weight'].contiguous().clone()
-            weights['lm_head.weight'] = model_params['mlp.layer0.weight'].contiguous()
-            weights['lm_head.bias'] = model_params['mlp.layer0.bias'].contiguous()
+            assert torch.equal(lm_head['mlp.layer0.weight'],model_params['_embedding.token_embedding.weight'])
+
+            weights['embedding.vocab_embedding.weight'] = model_params['_embedding.token_embedding.weight'].contiguous().clone()
+            weights['lm_head.weight'] = lm_head['mlp.layer0.weight'].contiguous()
+            weights['lm_head.bias'] = lm_head['mlp.layer0.bias'].contiguous()
             weights['embedding.position_embedding.weight'] = model_params['_embedding.position_embedding.pos_enc'].contiguous()
             weights['embedding.embedding_layernorm.weight'] = model_params['_embedding.layer_norm.weight'].contiguous()
             weights['embedding.embedding_layernorm.bias'] = model_params['_embedding.layer_norm.bias'].contiguous()
 
-            for i in range(self.model_config['transf_decoder']['config_dict']['num_layers']):
+            for i in range(self.config['decoder_layers']):
 
                 #layer_norm_1 aka self_attention_layernorm
                 weights[f'decoder_layers.{i}.self_attention_layernorm.weight'] =  \
@@ -351,9 +348,8 @@ class CanaryModel:
         os.makedirs(component_save_dir, exist_ok=True)
         os.makedirs(vocab_dir, exist_ok=True)
 
-        weights = weight_only_quantize_dict(weights,
-                                         quant_algo=self.quant_algo,
-                                         plugin=True)
+
+        # weights = weight_only_quantize_dict(weights,quant_algo=self.quant_algo, plugin=True)
 
 
         save_file(weights, os.path.join(component_save_dir,
@@ -440,6 +436,7 @@ class CanaryModel:
                 'quant_algo': self.quant_algo
             },
         }
+
 
 
 if __name__ == '__main__':

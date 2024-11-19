@@ -65,9 +65,15 @@ trtllm-build  --checkpoint_dir ${checkpoint_dir}/decoder \
 ### Run
 
 ```bash
+# decode a single wav file
 python3 run.py --name single_wav_test --input_file assets/1221-135766-0002.wav
+
 # decode a whole dataset
 python3 run.py --dataset hf-internal-testing/librispeech_asr_dummy --enable_warmup --name librispeech_dummy_large_v3
-```
+
+# decode with a manifest file and save to manifest. 
+# {"audio_path":<audio_file>, "source_lang": <source_lang>, "target_lang": <target_lang>, "pnc": "<yes|no>", "task": "<ast|asr|tramscribe|translate>"}
+python3 run.py ---manifest_file <path_to_manifest_file>  --results_manifest=<path_to_save_results>  --name librispeech_dummy_large_v3
+
 
 ```
