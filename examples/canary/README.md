@@ -40,13 +40,13 @@ checkpoint_dir=tllm_checkpoint
 python3 convert_checkpoint.py \
                 --dtype=bfloat16 \
                 --logits_dtype=float16 \
-                $engine_dir
+                ${engine_dir}
 
 # Build the canary encoder model using conformer_onnx_trt.py
 python3 conformer_onnx_trt.py \
         --max_BS 8 \
         tllm_checkpoint/encoder/encoder.onnx \
-        $engine_dir
+        ${engine_dir}
 
 
 # Build the canary decoder  using trtllm-build
@@ -68,14 +68,14 @@ trtllm-build  --checkpoint_dir ${checkpoint_dir}/decoder \
 
 ```bash
 # decode a single wav file
-python3 run.py --name single_wav_test --input_file assets/1221-135766-0002.wav
+python3 run.py --engine_dir ${engine_dir}--name single_wav_test --input_file assets/1221-135766-0002.wav
 
 # decode a whole dataset
-python3 run.py --dataset hf-internal-testing/librispeech_asr_dummy --enable_warmup --name librispeech_dummy_large_v3
+python3 run.py ${engine_dir} --dataset hf-internal-testing/librispeech_asr_dummy --enable_warmup --name librispeech_dummy_large_v3
 
 # decode with a manifest file and save to manifest. 
 # {"audio_path":<audio_file>, "source_lang": <source_lang>, "target_lang": <target_lang>, "pnc": "<yes|no>", "task": "<ast|asr|tramscribe|translate>"}
-python3 run.py ---manifest_file <path_to_manifest_file>  --results_manifest=<path_to_save_results>  --name librispeech_dummy_large_v3
+python3 run.py ${engine_dir} ---manifest_file <path_to_manifest_file>  --results_manifest=<path_to_save_results>  --name librispeech_dummy_large_v3
 
 
 ```
