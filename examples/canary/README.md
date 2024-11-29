@@ -32,24 +32,26 @@ INFERENCE_PRECISION=bfloat16
 WEIGHT_ONLY_PRECISION=int8
 MAX_BEAM_WIDTH=4
 MAX_BATCH_SIZE=8
+engine_dir="engine"
+checkpoint_dir=tllm_checkpoint
 
 
 # Export the canary model TensorRT-LLM format.
 python3 convert_checkpoint.py \
                 --dtype=bfloat16 \
                 --logits_dtype=float16 \
-                engine
+                $engine_dir
 
 # Build the canary encoder model using conformer_onnx_trt.py
 python3 conformer_onnx_trt.py \
         --max_BS 8 \
         tllm_checkpoint/encoder/encoder.onnx \
-        engine
+        $engine_dir
 
 
 # Build the canary decoder  using trtllm-build
 trtllm-build  --checkpoint_dir ${checkpoint_dir}/decoder \
-              --output_dir ${output_dir}/decoder \
+              --output_dir ${engine_dir}/decoder \
               --moe_plugin disable \
               --enable_xqa disable \
               --max_beam_width ${MAX_BEAM_WIDTH} \
