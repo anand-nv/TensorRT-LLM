@@ -17,6 +17,7 @@ from typing import Tuple
 from ..functional import conv1d, conv2d, conv_transpose2d
 from ..module import Module
 from ..parameter import Parameter
+import torch.nn.functional as F
 
 
 class Conv2d(Module):
@@ -168,7 +169,6 @@ class ConvTranspose2d(Module):
                                 self.stride, self.padding, output_padding,
                                 self.dilation, self.groups)
 
-
 class Conv1d(Module):
 
     def __init__(
@@ -182,6 +182,7 @@ class Conv1d(Module):
             groups: int = 1,
             bias: bool = True,
             padding_mode: str = 'zeros',  # TODO: refine this type
+            is_causal: bool = False,
             dtype=None) -> None:
         super().__init__()
         if groups <= 0:
@@ -199,16 +200,24 @@ class Conv1d(Module):
         self.dilation = dilation
         self.groups = groups
         self.padding_mode = padding_mode
+        self.is_causal = is_causal
 
         self.weight = Parameter(shape=(out_channels, in_channels // groups,
                                        kernel_size, 1),
                                 dtype=dtype)
+        if is_causal:
+            self.causal_padding = ((kernel_size - 1) * dilation, 0)
+            padding = 0
+
         if bias:
             self.bias = Parameter(shape=(out_channels, ), dtype=dtype)
         else:
             self.register_parameter('bias', None)
 
     def forward(self, input):
+        if self.is_causal:
+            input = F.pad(input, self.causal_padding)
+
         return conv1d(input, self.weight.value,
                       None if self.bias is None else self.bias.value,
                       self.stride, self.padding, self.dilation, self.groups)
