@@ -1,0 +1,1241 @@
+T5TTS_Model(
+  (audio_embeddings): ModuleList(
+    (0-7): 8 x Embedding(2048, 768)
+  )
+  (text_embedding): Embedding(106339, 768)
+  (t5_encoder): Transformer(
+    (dropout): Dropout(p=0.1, inplace=False)
+    (norm_out): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+    (layers): ModuleList(
+      (0-5): 6 x TransformerLayer(
+        (norm_self): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+        (self_attention): SelfAttention(
+          (o_net): Linear(in_features=768, out_features=768, bias=False)
+          (dropout): Dropout(p=0.1, inplace=False)
+          (qkv_net): Linear(in_features=768, out_features=2304, bias=False)
+        )
+        (norm_pos_ff): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+        (pos_ff): PositionwiseConvFF(
+          (non_linearity): GELU(approximate='tanh')
+          (proj): ConvolutionLayer(
+            (conv): Conv1d(768, 3072, kernel_size=(3,), stride=(1,), padding=(1,), bias=False)
+          )
+          (o_net): ConvolutionLayer(
+            (conv): Conv1d(3072, 768, kernel_size=(3,), stride=(1,), padding=(1,), bias=False)
+          )
+          (dropout): Dropout(p=0.1, inplace=False)
+        )
+      )
+    )
+    (position_embeddings): Embedding(2048, 768)
+  )
+  (t5_decoder): Transformer(
+    (dropout): Dropout(p=0.1, inplace=False)
+    (norm_out): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+    (layers): ModuleList(
+      (0-11): 12 x TransformerLayer(
+        (norm_self): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+        (self_attention): SelfAttention(
+          (o_net): Linear(in_features=768, out_features=768, bias=False)
+          (dropout): Dropout(p=0.1, inplace=False)
+          (qkv_net): Linear(in_features=768, out_features=2304, bias=False)
+        )
+        (norm_xattn_query): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+        (cross_attention): CrossAttention(
+          (o_net): Linear(in_features=768, out_features=768, bias=False)
+          (dropout): Dropout(p=0.1, inplace=False)
+          (q_net): Linear(in_features=768, out_features=768, bias=False)
+          (kv_net): Linear(in_features=768, out_features=1536, bias=False)
+        )
+        (norm_xattn_memory): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+        (norm_pos_ff): LayerNorm((768,), eps=1e-05, elementwise_affine=True)
+        (pos_ff): PositionwiseConvFF(
+          (non_linearity): GELU(approximate='tanh')
+          (proj): ConvolutionLayer(
+            (conv): Conv1d(768, 3072, kernel_size=(1,), stride=(1,), bias=False)
+          )
+          (o_net): ConvolutionLayer(
+            (conv): Conv1d(3072, 768, kernel_size=(1,), stride=(1,), bias=False)
+          )
+          (dropout): Dropout(p=0.1, inplace=False)
+        )
+      )
+    )
+    (position_embeddings): Embedding(2048, 768)
+  )
+  (final_proj): Linear(in_features=768, out_features=16384, bias=True)
+  (_codec_model): AudioCodecModel(
+    (audio_encoder): HiFiGANEncoder(
+      (pre_conv): Conv1dNorm(
+        (conv): Conv1d(1, 48, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+      )
+      (activations): ModuleList(
+        (0-4): 5 x CodecActivation(
+          (activation): LeakyReLU(negative_slope=0.01)
+        )
+      )
+      (down_sample_conv_layers): ModuleList(
+        (0): Conv1dNorm(
+          (conv): Conv1d(48, 96, kernel_size=(4,), stride=(2,), padding=(1,), padding_mode=reflect)
+        )
+        (1): Conv1dNorm(
+          (conv): Conv1d(96, 192, kernel_size=(4,), stride=(2,), padding=(1,), padding_mode=reflect)
+        )
+        (2): Conv1dNorm(
+          (conv): Conv1d(192, 384, kernel_size=(8,), stride=(4,), padding=(2,), padding_mode=reflect)
+        )
+        (3): Conv1dNorm(
+          (conv): Conv1d(384, 768, kernel_size=(16,), stride=(8,), padding=(4,), padding_mode=reflect)
+        )
+        (4): Conv1dNorm(
+          (conv): Conv1d(768, 1536, kernel_size=(16,), stride=(8,), padding=(4,), padding_mode=reflect)
+        )
+      )
+      (res_layers): ModuleList(
+        (0): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(48, 48, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(48, 48, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(48, 48, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(48, 48, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(48, 48, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(48, 48, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (1): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(96, 96, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(96, 96, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(96, 96, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(96, 96, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(96, 96, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(96, 96, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (2): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(192, 192, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(192, 192, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(192, 192, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(192, 192, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(192, 192, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(192, 192, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (3): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(384, 384, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(384, 384, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(384, 384, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(384, 384, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(384, 384, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(384, 384, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (4): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(768, 768, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(768, 768, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(768, 768, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(768, 768, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(768, 768, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(768, 768, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+      (post_activation): CodecActivation(
+        (activation): LeakyReLU(negative_slope=0.01)
+      )
+      (post_conv): Conv1dNorm(
+        (conv): Conv1d(1536, 32, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+      )
+    )
+    (vector_quantizer): GroupFiniteScalarQuantizer(
+      (fsqs): ModuleList(
+        (0-7): 8 x FiniteScalarQuantizer()
+      )
+    )
+    (audio_decoder): HiFiGANDecoder(
+      (pre_conv): Conv1dNorm(
+        (conv): Conv1d(32, 1024, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+      )
+      (activations): ModuleList(
+        (0-4): 5 x CodecActivation(
+          (activation): LeakyReLU(negative_slope=0.01)
+        )
+      )
+      (up_sample_conv_layers): ModuleList(
+        (0): ConvTranspose1dNorm(
+          (conv): ConvTranspose1d(1024, 512, kernel_size=(16,), stride=(8,), padding=(4,))
+        )
+        (1): ConvTranspose1dNorm(
+          (conv): ConvTranspose1d(512, 256, kernel_size=(16,), stride=(8,), padding=(4,))
+        )
+        (2): ConvTranspose1dNorm(
+          (conv): ConvTranspose1d(256, 128, kernel_size=(8,), stride=(4,), padding=(2,))
+        )
+        (3): ConvTranspose1dNorm(
+          (conv): ConvTranspose1d(128, 64, kernel_size=(4,), stride=(2,), padding=(1,))
+        )
+        (4): ConvTranspose1dNorm(
+          (conv): ConvTranspose1d(64, 32, kernel_size=(4,), stride=(2,), padding=(1,))
+        )
+      )
+      (res_layers): ModuleList(
+        (0): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(3,), stride=(1,), padding=(3,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(3,), stride=(1,), padding=(5,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(7,), stride=(1,), padding=(9,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(7,), stride=(1,), padding=(15,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(11,), stride=(1,), padding=(15,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(11,), stride=(1,), padding=(25,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(512, 512, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (1): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(3,), stride=(1,), padding=(3,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(3,), stride=(1,), padding=(5,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(7,), stride=(1,), padding=(9,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(7,), stride=(1,), padding=(15,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(11,), stride=(1,), padding=(15,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(11,), stride=(1,), padding=(25,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(256, 256, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (2): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(3,), stride=(1,), padding=(3,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(3,), stride=(1,), padding=(5,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(7,), stride=(1,), padding=(9,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(7,), stride=(1,), padding=(15,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(11,), stride=(1,), padding=(15,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(11,), stride=(1,), padding=(25,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(128, 128, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (3): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(3,), stride=(1,), padding=(3,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(3,), stride=(1,), padding=(5,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(7,), stride=(1,), padding=(9,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(7,), stride=(1,), padding=(15,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(11,), stride=(1,), padding=(15,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(11,), stride=(1,), padding=(25,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(64, 64, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+        (4): HiFiGANResLayer(
+          (res_blocks): ModuleList(
+            (0): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(3,), stride=(1,), padding=(3,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(3,), stride=(1,), padding=(5,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (1): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(7,), stride=(1,), padding=(9,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(7,), stride=(1,), padding=(15,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(7,), stride=(1,), padding=(3,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+            (2): HiFiGANResBlock(
+              (res_blocks): ModuleList(
+                (0): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (1): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(11,), stride=(1,), padding=(15,), dilation=(3,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+                (2): ResidualBlock(
+                  (input_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (skip_activation): CodecActivation(
+                    (activation): LeakyReLU(negative_slope=0.01)
+                  )
+                  (dropout): Dropout(p=0.0, inplace=False)
+                  (input_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(11,), stride=(1,), padding=(25,), dilation=(5,), padding_mode=reflect)
+                  )
+                  (skip_conv): Conv1dNorm(
+                    (conv): Conv1d(32, 32, kernel_size=(11,), stride=(1,), padding=(5,), padding_mode=reflect)
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+      (post_activation): CodecActivation(
+        (activation): LeakyReLU(negative_slope=0.01)
+      )
+      (post_conv): Conv1dNorm(
+        (conv): Conv1d(32, 1, kernel_size=(3,), stride=(1,), padding=(1,), padding_mode=reflect)
+      )
+      (out_activation): Tanh()
+    )
+    (mel_loss_fn): MultiResolutionMelLoss(
+      (l1_loss_fn): MaskedMAELoss(
+        (loss_fn): L1Loss()
+      )
+      (l2_loss_fn): MaskedMSELoss(
+        (loss_fn): MSELoss()
+      )
+      (mel_features): ModuleList(
+        (0-6): 7 x FilterbankFeatures()
+      )
+    )
+    (stft_loss_fn): MultiResolutionSTFTLoss(
+      (loss_fns): ModuleList(
+        (0-6): 7 x STFTLoss(
+          (loss_fn): MaskedMAELoss(
+            (loss_fn): L1Loss()
+          )
+        )
+      )
+    )
+    (time_domain_loss_fn): TimeDomainLoss(
+      (loss_fn): MaskedMAELoss(
+        (loss_fn): L1Loss()
+      )
+    )
+    (si_sdr_loss_fn): SISDRLoss()
+    (gen_loss_fn): GeneratorSquaredLoss()
+    (disc_loss_fn): DiscriminatorSquaredLoss()
+    (feature_loss_fn): FeatureMatchingLoss()
+  )
+  (context_text_embedding): Embedding(32000, 768)
+  (cross_entropy_loss): CrossEntropyLoss()
+  (alignment_loss): ForwardSumLoss(
+    (log_softmax): LogSoftmax(dim=-1)
+    (ctc_loss): CTCLoss()
+  )
+)
+
