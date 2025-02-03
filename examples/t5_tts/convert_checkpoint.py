@@ -12,18 +12,11 @@ import torch
 
 import safetensors
 
-#from examples.redrafter.convert_checkpoint import convert_and_save
-from helper import convert_weight_to_dtype, fuse_qkv_one_layer, reshape, split
-from transformers import (AutoModelForSeq2SeqLM, Blip2ForConditionalGeneration,
-                          MBartForConditionalGeneration,
-                          Pix2StructForConditionalGeneration,
-                          T5ForConditionalGeneration, VisionEncoderDecoderModel)
+
 
 from tensorrt_llm.functional import (LayerNormPositionType, LayerNormType,
                                      MLPType)
-from tensorrt_llm.models import PretrainedConfig
-from tensorrt_llm.models.convert_utils import weight_only_quantize_dict
-from tensorrt_llm.quantization import QuantAlgo
+
 
 
 dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -114,7 +107,7 @@ def parse_model_config(args, ):
     config["decoder"]["num_heads"] = "12"
     config["decoder"]['d_model'] = "768" #hidden_size
     config["decoder"]['d_ffn'] = "3072" #ffn_hidden_size
-    config["decoder"]['vocab_size'] = "106339"
+    config["decoder"]['vocab_size'] = "16384"
     config["decoder"]['n_positions'] = "2048"
     config["decoder"]['has_position_embedding'] = "true"
     #config["decoder"]['has_token_type_embedding'] =
@@ -206,7 +199,7 @@ def parse_model_config(args, ):
                 'has_lm_head_bias',
                 fallback=False)
             component_config.relative_attention = config.getboolean(
-                component, 'relative_attention', fallback=True)
+                component, 'relative_attention', fallback=False)
             component_config.rescale_before_lm_head = config.getboolean(
                 component, 'tie_word_embeddings', fallback=True,
             )  # default is True (for T5), but False for Flan-T5
@@ -295,10 +288,13 @@ def convert_t5tts_decoder(config, model_dict, quant_algo: str = None,):
             f't5_decoder.layers.{i}.cross_attention.o_net.weight'].contiguous()
         weights[f'decoder_layers.{i}.ff_layernorm.weight'] = model_dict[
             f't5_decoder.layers.{i}.norm_pos_ff.weight'].contiguous()
+        weights[f'decoder_layers.{i}.cross_attention_memnorm.weight'] = model_dict[
+            f't5_decoder.layers.{i}.norm_xattn_memory.weight'].contiguous()
         weights[f'decoder_layers.{i}.ff.proj.weight'] = model_dict[
             f't5_decoder.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(3).contiguous()
         weights[f'decoder_layers.{i}.ff.o_net.weight'] = model_dict[
             f't5_decoder.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(3).contiguous()
+
 
     weights['final_layernorm.weight'] = model_dict[
         f't5_decoder.norm_out.weight'].contiguous()
