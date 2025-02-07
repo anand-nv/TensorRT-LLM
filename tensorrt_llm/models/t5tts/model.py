@@ -20,12 +20,13 @@ import tensorrt as trt
 import torch
 
 from tensorrt_llm._common import default_net
-from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch
+from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch, fp32_array
 from tensorrt_llm.functional import (LayerNormPositionType, LayerNormType,
                                      MLPType, PositionEmbeddingType, Tensor,
                                      assertion, cast, gather_last_token_logits,
                                      gelu, maximum, minimum, recv, send, shape,
-                                     slice, transpose, conv1d, unsqueeze, ACT2FN, squeeze)
+                                     slice, transpose, conv1d, unsqueeze, ACT2FN,
+                                     squeeze, constant, expand_dims, concat, expand)
 from tensorrt_llm.layers import (Attention, AttentionMaskType,
                                  AttentionParams, BertAttention, ColumnLinear,
                                  Conv1d, Embedding,
@@ -58,26 +59,42 @@ class PositionwiseConvFF(Module):
                  is_causal: bool = True,
                  hidden_act: str = 'gelu',
                  padding:int = 0,
+                 dilation:int = 1,
                  dtype=None,
                  groups: int = 1,
 
                  ):
         super().__init__()
 
-
+        self.is_causal = is_causal
         self.hidden_size = hidden_size
         self.ffn_hidden_size = ffn_hidden_size
 
         self.hidden_act = ACT2FN[hidden_act]
-        self.proj = Conv1d(hidden_size, ffn_hidden_size, kernel_size=kernel_size, padding=padding, bias=has_bias, is_causal=is_causal)
-        self.o_net = Conv1d(ffn_hidden_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=has_bias, is_causal=is_causal)
+
+
+        if self.is_causal:
+            self.causal_padding = ((kernel_size - 1) * dilation, 0)
+
+            padding = 0
+
+        self.proj = Conv1d(hidden_size, ffn_hidden_size, kernel_size=kernel_size, padding=padding, bias=has_bias,  dilation=dilation)
+        self.o_net = Conv1d(ffn_hidden_size, hidden_size, kernel_size=kernel_size, padding=padding, bias=has_bias,  dilation=dilation)
 
     def forward(self, x: Tensor) -> Tensor:
         dim_sqz=x.ndim()
-        x = self.proj(unsqueeze(x,dim_sqz)) #.transpose(1, 2)
-        x=self.o_net(self.hidden_act(x))
+        print(f"{dim_sqz=}: {x.shape=}")
+
+        if self.is_causal:
+            # currently for T5TTS causal padding is only required for decoder but is 0 because kernel_size=1 for decoder
+            pass
+        x = unsqueeze(x,dim_sqz)
+        print(f"{dim_sqz=}: {x.shape=}")
+
+        x = self.proj(x)
+        x = self.o_net(self.hidden_act(x))
         x = squeeze(x,dim_sqz)
-        return x #.transpose(1, 2)
+        return x
 
 
 
@@ -198,7 +215,8 @@ class T5TTSEncoderLayer(Module):
                  relative_attention=False,
                  max_distance=0,
                  num_buckets=0,
-                 fp16_clamping=False):
+                 fp16_clamping=False,
+                 conv_is_causal=False,):
         super().__init__()
 
         self.layernorm_type = layernorm_type
@@ -232,9 +250,11 @@ class T5TTSEncoderLayer(Module):
             ffn_hidden_size=ffn_hidden_size,
             hidden_act=hidden_act,
             has_bias=has_ff_bias,
+            kernel_size=3,
             padding=1,
             groups=mapping.tp_group,
             dtype=dtype,
+            is_causal=conv_is_causal,
         )
 
         self.ff_layernorm = ln_type(normalized_shape=hidden_size,
@@ -410,6 +430,7 @@ class T5TTSDecoderLayer(Module):
             has_bias=has_ff_bias,
             groups=mapping.tp_group,
             dtype=dtype,
+            is_causal=True,
         )
 
         self.ff_layernorm = ln_type(normalized_shape=hidden_size,
@@ -627,7 +648,8 @@ class T5TTSEncoderModel(PretrainedModel):
                 relative_attention=self.config.relative_attention,
                 max_distance=self.config.max_distance,
                 num_buckets=self.config.num_buckets,
-                fp16_clamping=self.fp16_clamping)
+                fp16_clamping=self.fp16_clamping,
+                conv_is_causal=False)
             for _ in self.mapping.pp_layers(self.total_num_layers)
         ])
 
