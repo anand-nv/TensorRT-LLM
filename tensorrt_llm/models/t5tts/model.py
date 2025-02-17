@@ -18,7 +18,7 @@ from typing import List, Optional
 
 import tensorrt as trt
 import torch
-
+import numpy as np
 from tensorrt_llm._common import default_net
 from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch, fp32_array
 from tensorrt_llm.functional import (LayerNormPositionType, LayerNormType,
@@ -177,11 +177,11 @@ class EncDecEmbedding(Module):
                 ] if prompt_embedding_table is not None else []
 
         x = self.vocab_embedding(input_ids, *args) * self.embedding_scale
-        self.register_network_output('word_embeddings', x)
+        #self.register_network_output('word_embeddings', x)
 
         if self.position_embedding:
             pos_emb = self.position_embedding(position_ids)
-            self.register_network_output('position_embeddings', pos_emb)
+            #self.register_network_output('position_embeddings', pos_emb)
             x = x + pos_emb
         if self.token_type_embedding:
             x = x + self.token_type_embedding(token_type_ids)
@@ -244,7 +244,7 @@ class T5TTSEncoderLayer(Module):
                                            eps=layernorm_eps,
                                            dtype=dtype)
 
-        self.ff = PositionwiseConvFF(
+        self.mlp = PositionwiseConvFF(
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             hidden_act=hidden_act,
@@ -256,7 +256,7 @@ class T5TTSEncoderLayer(Module):
             is_causal=conv_is_causal,
         )
 
-        self.ff_layernorm = ln_type(normalized_shape=hidden_size,
+        self.mlp_layernorm = ln_type(normalized_shape=hidden_size,
                                      eps=layernorm_eps,
                                      dtype=dtype)
 
@@ -288,7 +288,7 @@ class T5TTSEncoderLayer(Module):
                                           max_input_length=max_input_length,
                                           lora_layer_params=lora_layer_params)
 
-        self.register_network_output('attention_output', attention_output)
+        #self.register_network_output('attention_output', attention_output)
 
         hidden_states = residual + attention_output
 
@@ -303,11 +303,11 @@ class T5TTSEncoderLayer(Module):
         residual = hidden_states * self.residual_scaling
 
         if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.ff_layernorm(hidden_states)
+            hidden_states = self.mlp_layernorm(hidden_states)
 
-        hidden_states = self.ff(hidden_states)
+        hidden_states = self.mlp(hidden_states)
 
-        self.register_network_output('mlp_output', hidden_states)
+        #self.register_network_output('mlp_output', hidden_states)
 
         hidden_states = residual + hidden_states
 
@@ -316,7 +316,7 @@ class T5TTSEncoderLayer(Module):
             hidden_states = minimum(64000.0, hidden_states)
 
         if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.ff_layernorm(hidden_states)
+            hidden_states = self.mlp_layernorm(hidden_states)
 
         return hidden_states
 
@@ -419,7 +419,7 @@ class T5TTSDecoderLayer(Module):
                                                  dtype=dtype)
 
 
-        self.ff = PositionwiseConvFF(
+        self.mlp = PositionwiseConvFF(
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             kernel_size=1,
@@ -431,7 +431,7 @@ class T5TTSDecoderLayer(Module):
             is_causal=True,
         )
 
-        self.ff_layernorm = ln_type(normalized_shape=hidden_size,
+        self.mlp_layernorm = ln_type(normalized_shape=hidden_size,
                                      eps=layernorm_eps,
                                      dtype=dtype)
 
@@ -489,7 +489,7 @@ class T5TTSDecoderLayer(Module):
             attention_output, presents_self = attention_output
 
 
-        self.register_network_output('self_attention_output', attention_output)
+        #self.register_network_output('self_attention_output', attention_output)
 
         hidden_states = residual + attention_output
 
@@ -534,7 +534,7 @@ class T5TTSDecoderLayer(Module):
         if use_cache:
             attention_output, presents_cross = attention_output
 
-        self.register_network_output('cross_attention_output', attention_output)
+        #self.register_network_output('cross_attention_output', attention_output)
 
         hidden_states = residual + attention_output
 
@@ -549,10 +549,10 @@ class T5TTSDecoderLayer(Module):
         residual = hidden_states * self.residual_scaling
 
         if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.ff_layernorm(hidden_states)
+            hidden_states = self.mlp_layernorm(hidden_states)
 
-        hidden_states = self.ff(hidden_states)
-        self.register_network_output('mlp_output', hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        #self.register_network_output('mlp_output', hidden_states)
 
         hidden_states = residual + hidden_states
 
@@ -561,7 +561,7 @@ class T5TTSDecoderLayer(Module):
             hidden_states = minimum(64000.0, hidden_states)
 
         if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.ff_layernorm(hidden_states)
+            hidden_states = self.mlp_layernorm(hidden_states)
 
         if use_cache:
             return (hidden_states, presents_self, presents_cross)
@@ -1004,8 +1004,7 @@ class T5TTSDecoderModel(PretrainedModel):
         type_vocab_size = self.config.type_vocab_size
         self.has_token_type_embedding = (type_vocab_size is not None)
         self.rescale_before_lm_head = self.config.rescale_before_lm_head
-        self.context_audio_codes = self.config.context_audio_codes
-        self.context_
+
         # e.g. BART regular, T5 RMS
         self.layernorm_type = self.config.layernorm_type
         ln_type = layernorm_map[self.layernorm_type]
@@ -1143,16 +1142,20 @@ class T5TTSDecoderModel(PretrainedModel):
     def embed_audio_tokens(self, audio_tokens):
         # audio_tokens: (B, C, T')
         # Add and average the embeddings of the audio tokens across the codebooks
-        print(f"A {audio_tokens.shape=}")
+        #print(f"A {audio_tokens.shape=}")
         #d = index_select(audio_tokens,1,[-1,0,-1])
         d=select(audio_tokens,1,1)
-        print(f"H {d=}")
+        #print(f"H {d=}")
         audio_embedding = self.audio_embeddings[0](d)
         for c in range(1,audio_tokens.size(1)):
             d = select(audio_tokens, 1, c)
             audio_embedding = audio_embedding + self.audio_embeddings[c](d)
         audio_embedding = audio_embedding / audio_tokens.size(1)
         return audio_embedding
+
+    def get_mask_from_lengths(self, lengths, dtype):
+        ones = constant(np.ones(lengths, dtype=np.float32)).cast(dtype)
+        return ones
 
     def check_config(self, config: PretrainedConfig):
         config.set_if_not_exist('has_position_embedding', False)
@@ -1178,19 +1181,7 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('relative_attention', False)
         config.set_if_not_exist('residual_scaling', 1.0)
 
-    def prepare_dummy_cond_for_cfg(self, cond, cond_mask, additional_decoder_input, additional_decoder_mask):
-        dummy_additional_decoder_input = None
-        dummy_additional_dec_mask = None
-        if additional_decoder_input is not None:
-            dummy_additional_decoder_input = torch.zeros(additional_decoder_input.size())
-            # all ones mask means dont ignore any timesteps (so that it is consistent with usual decoder mask)
-            dummy_additional_dec_mask = torch.ones(additional_decoder_mask.size())
 
-        dummy_cond = torch.zeros_like(cond)
-        dummy_mask = torch.zeros_like(cond_mask)
-        dummy_mask[:,0] = 1 # ignore all timesteps except the first one
-        attn_prior = None
-        return dummy_cond, dummy_mask, dummy_additional_decoder_input, dummy_additional_dec_mask, attn_prior
 
     def forward(self,
                 decoder_input_ids: Tensor,
@@ -1218,11 +1209,12 @@ class T5TTSDecoderModel(PretrainedModel):
         if self.mapping.is_first_pp_rank():
 
             hidden_states = self.embed_audio_tokens(decoder_input_ids)
+            if additional_decoder_mask is not None:
+                hidden_states = concat(additional_decoder_input, hidden_states)
 
             #hidden_states = self.embedding(decoder_input_ids, position_ids,
             #                               token_type_ids)
-            self.register_network_output('embedding_layer_output',
-                                         hidden_states)
+            #self.register_network_output('embedding_layer_output',hidden_states)
         else:
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
 
@@ -1274,8 +1266,7 @@ class T5TTSDecoderModel(PretrainedModel):
                     2]
                 presents.append((presents_self, presents_cross))
                 hidden_states = hidden_states[0]
-            self.register_network_output(f'decoder_layer_{i}_output',
-                                         hidden_states)
+            #self.register_network_output(f'decoder_layer_{i}_output', hidden_states)
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -1285,7 +1276,7 @@ class T5TTSDecoderModel(PretrainedModel):
             hidden_states = gather_last_token_logits(
                 hidden_states, last_token_ids,
                 default_net().plugin_config.remove_input_padding)
-            self.register_network_output('logits_before_lmhead', hidden_states)
+            #self.register_network_output('logits_before_lmhead', hidden_states)
 
             # Rescale output before projecting on vocab (for T5)
             # See https://github.com/huggingface/transformers/blob/0b192de1f353b0e04dad4813e02e2c672de077be/src/transformers/models/t5/modeling_t5.py#L1769-L1772
@@ -1317,6 +1308,8 @@ class T5TTSDecoderModel(PretrainedModel):
                 return lm_logits
             return hidden_states
 
+
+
     def prepare_inputs(self,
                        max_batch_size,
                        max_beam_width,
@@ -1334,6 +1327,8 @@ class T5TTSDecoderModel(PretrainedModel):
 
             @return: a list contains values which can be fed into the self.forward()
         '''
+
+        print(f"{gather_context_logits=}, {gather_generation_logits}")
 
         # Prepare inputs
         max_output_len = max_decoder_input_len + max_seq_len
@@ -1391,7 +1386,6 @@ class T5TTSDecoderModel(PretrainedModel):
         remove_input_padding = default_net().plugin_config.remove_input_padding
         paged_kv_cache = default_net().plugin_config.paged_kv_cache
         tokens_per_block = default_net().plugin_config.tokens_per_block
-        use_lora_plugin = default_net().plugin_config.lora_plugin
 
         input_ids, position_ids, token_type_ids, hidden_states = None, None, None, None
         if remove_input_padding:
@@ -1613,89 +1607,7 @@ class T5TTSDecoderModel(PretrainedModel):
                                             shape=[1],
                                             dim_range=OrderedDict([('scalar',
                                                                     [1])]))
-        '''
-        LoRA plugin related inputs:
-        lora_target_modules for BART-decoder:
-            ['attn_q', 'cross_attn_q',
-             'attn_v', 'cross_attn_v']
-        This is NOT directly loaded from the adapter-config file
-        We make it this way because BART has LoRA weights for both self-attention and cross-attention in decoder
-        '''
-        lora_weights_pointers = None
-        lora_ranks = None
-        lora_params = None
-        if use_lora_plugin:
-            lora_weights_pointers = []
-            lora_ranks = []
-            # In current design, q_lora_params, k_lora_params and v_lora_params should be all enabled or all disabled at the same time.
-            # However, BART lora modules only contain two of them, so we use zero tensor to fill the missing ones.
-            missing_qkv_modules = []
-            if any(x in lora_target_modules
-                   for x in ["attn_q", "attn_k", "attn_v"]):
-                for lora_module in [
-                        "attn_q",
-                        "attn_k",
-                        "attn_v",
-                ]:
-                    if lora_module not in lora_target_modules:
-                        missing_qkv_modules.append(lora_module)
-            if any(x in lora_target_modules
-                   for x in ["cross_attn_q", "cross_attn_k", "cross_attn_v"]):
-                for lora_module in [
-                        "cross_attn_q", "cross_attn_k", "cross_attn_v"
-                ]:
-                    if lora_module not in lora_target_modules:
-                        missing_qkv_modules.append(lora_module)
 
-            for i in layers_range:
-                lora_weight_pointer_dict = {}
-                lora_rank_dict = {}
-                for lora_module in (lora_target_modules + missing_qkv_modules):
-                    lora_weight_pointer = Tensor(
-                        name=f'{lora_module}_lora_weights_pointers_{i}',
-                        dtype=trt.int64,
-                        shape=[-1, 2],
-                        dim_range=OrderedDict([('batch_size_beam_width',
-                                                [bb_range]), ('in_out', [2])]))
-                    lora_weight_pointer_dict.update({
-                        f'{lora_module}_lora_weights_pointers':
-                        lora_weight_pointer
-                    })
-
-                    lora_rank = Tensor(name=f'{lora_module}_lora_ranks_{i}',
-                                       dtype=trt.int32,
-                                       shape=[-1],
-                                       dim_range=OrderedDict([
-                                           ('batch_size_beam_width', [bb_range])
-                                       ]))
-                    lora_rank_dict.update(
-                        {f'{lora_module}_lora_ranks': lora_rank})
-
-                lora_weights_pointers.append(lora_weight_pointer_dict)
-                lora_ranks.append(lora_rank_dict)
-
-            # For cross attention, we need to use encoder_input_lengths (in CPU) to pass
-            # as the host_context_lengths to the lora_plugin. But for self attention, we
-            # should keep using the original host_context_lengths. Therefore, we keep both
-            # of them in the lora_params.
-            host_encoder_input_lengths = None
-            if remove_input_padding:
-                host_encoder_input_lengths = Tensor(
-                    name="host_encoder_input_lengths",
-                    dtype=trt.int32,
-                    shape=[-1],
-                    dim_range=OrderedDict([("batch_size_beam_width", [bb_range])
-                                           ]),
-                )
-
-            lora_params = LoraParams(
-                lora_ranks=lora_ranks,
-                lora_weights_pointers=lora_weights_pointers,
-                host_context_lengths=host_context_lengths,
-                max_encoder_context_length=max_encoder_input_len,
-                host_request_types=host_request_types,
-                host_encoder_input_lengths=host_encoder_input_lengths,
-            )
 
         kv_cache_block_offsets = None
         host_kv_cache_block_offsets = None
@@ -1889,7 +1801,7 @@ class T5TTSDecoderModel(PretrainedModel):
         result = {
             'decoder_input_ids': input_ids,
             'encoder_output': encoder_output,
-            'position_ids': position_ids,
+            'position_ids': None,
             'token_type_ids': token_type_ids,
             'use_cache': True,
             'attention_mask': attention_mask,
@@ -1898,15 +1810,14 @@ class T5TTSDecoderModel(PretrainedModel):
             'kv_cache_params': kv_cache_params,
             'attention_params': attention_params,
             'hidden_states': hidden_states,
-            'lora_params': lora_params,
+            'lora_params': None,
             'cross_kv_cache_gen': cross_kv_cache_gen,
             'cross_kv_reuse': cross_kv_reuse,
         }
 
         return result
 
-    def use_lora(self, lora_config: LoraConfig):
-        use_lora(self, lora_config, self.trtllm_modules_to_hf_modules)
+
 
     def precompute_relative_attention_bias(self, build_config):
         if self.config.relative_attention and not self.use_implicit_relative_attention:
