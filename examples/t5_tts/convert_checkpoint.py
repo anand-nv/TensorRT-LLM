@@ -244,11 +244,11 @@ def convert_t5tts_encoder(config, model_dict, quant_algo: str = None,):
             f't5_encoder.layers.{i}.self_attention.qkv_net.weight'].contiguous()
         weights[f'encoder_layers.{i}.attention.dense.weight'] = model_dict[
             f't5_encoder.layers.{i}.self_attention.o_net.weight'].contiguous()
-        weights[f'encoder_layers.{i}.ff_layernorm.weight'] = model_dict[
+        weights[f'encoder_layers.{i}.pos_ff_layernorm.weight'] = model_dict[
             f't5_encoder.layers.{i}.norm_pos_ff.weight'].contiguous()
-        weights[f'encoder_layers.{i}.ff.proj.weight'] = model_dict[
+        weights[f'encoder_layers.{i}.pos_ff.proj.weight'] = model_dict[
             f't5_encoder.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(3).contiguous()
-        weights[f'encoder_layers.{i}.ff.o_net.weight'] = model_dict[
+        weights[f'encoder_layers.{i}.pos_ff.o_net.weight'] = model_dict[
             f't5_encoder.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(3).contiguous()
 
     weights['final_layernorm.weight'] = model_dict[
@@ -266,6 +266,9 @@ def convert_t5tts_decoder(config, model_dict, quant_algo: str = None,):
     weights['lm_head.weight'] = model_dict['final_proj.weight'].clone().contiguous()
 
     weights['embedding.position_embedding.weight'] = model_dict['t5_decoder.position_embeddings.weight'].contiguous()
+
+    for i in range(8):
+        weights[f'audio_embeddings.{i}.weight'] = model_dict[f'audio_embeddings.{i}.weight']
 
     num_layers = config.n_layer
     for i in range(num_layers):
@@ -286,13 +289,13 @@ def convert_t5tts_decoder(config, model_dict, quant_algo: str = None,):
         weights[f'decoder_layers.{i}.cross_attention.qkv.weight'] = t
         weights[f'decoder_layers.{i}.cross_attention.dense.weight'] = model_dict[
             f't5_decoder.layers.{i}.cross_attention.o_net.weight'].contiguous()
-        weights[f'decoder_layers.{i}.ff_layernorm.weight'] = model_dict[
+        weights[f'decoder_layers.{i}.pos_ff_layernorm.weight'] = model_dict[
             f't5_decoder.layers.{i}.norm_pos_ff.weight'].contiguous()
         weights[f'decoder_layers.{i}.cross_attention_memnorm.weight'] = model_dict[
             f't5_decoder.layers.{i}.norm_xattn_memory.weight'].contiguous()
-        weights[f'decoder_layers.{i}.ff.proj.weight'] = model_dict[
+        weights[f'decoder_layers.{i}.pos_ff.proj.weight'] = model_dict[
             f't5_decoder.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(3).contiguous()
-        weights[f'decoder_layers.{i}.ff.o_net.weight'] = model_dict[
+        weights[f'decoder_layers.{i}.pos_ff.o_net.weight'] = model_dict[
             f't5_decoder.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(3).contiguous()
 
 

@@ -68,7 +68,7 @@ class PositionwiseConvFF(Module):
 
         self.is_causal = is_causal
         self.hidden_size = hidden_size
-        self.ffn_hidden_size = ffn_hidden_size
+        self.pos_ffn_hidden_size = ffn_hidden_size
 
         self.hidden_act = ACT2FN[hidden_act]
 
@@ -244,7 +244,7 @@ class T5TTSEncoderLayer(Module):
                                            eps=layernorm_eps,
                                            dtype=dtype)
 
-        self.mlp = PositionwiseConvFF(
+        self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             hidden_act=hidden_act,
@@ -256,7 +256,7 @@ class T5TTSEncoderLayer(Module):
             is_causal=conv_is_causal,
         )
 
-        self.mlp_layernorm = ln_type(normalized_shape=hidden_size,
+        self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                      eps=layernorm_eps,
                                      dtype=dtype)
 
@@ -303,9 +303,9 @@ class T5TTSEncoderLayer(Module):
         residual = hidden_states * self.residual_scaling
 
         if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.mlp_layernorm(hidden_states)
+            hidden_states = self.pos_ff_layernorm(hidden_states)
 
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.pos_ff(hidden_states)
 
         #self.register_network_output('mlp_output', hidden_states)
 
@@ -316,7 +316,7 @@ class T5TTSEncoderLayer(Module):
             hidden_states = minimum(64000.0, hidden_states)
 
         if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.mlp_layernorm(hidden_states)
+            hidden_states = self.pos_ff_layernorm(hidden_states)
 
         return hidden_states
 
@@ -419,7 +419,7 @@ class T5TTSDecoderLayer(Module):
                                                  dtype=dtype)
 
 
-        self.mlp = PositionwiseConvFF(
+        self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             kernel_size=1,
@@ -431,7 +431,7 @@ class T5TTSDecoderLayer(Module):
             is_causal=True,
         )
 
-        self.mlp_layernorm = ln_type(normalized_shape=hidden_size,
+        self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                      eps=layernorm_eps,
                                      dtype=dtype)
 
@@ -549,9 +549,9 @@ class T5TTSDecoderLayer(Module):
         residual = hidden_states * self.residual_scaling
 
         if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.mlp_layernorm(hidden_states)
+            hidden_states = self.pos_ff_layernorm(hidden_states)
 
-        hidden_states = self.mlp(hidden_states)
+        hidden_states = self.pos_ff(hidden_states)
         #self.register_network_output('mlp_output', hidden_states)
 
         hidden_states = residual + hidden_states
@@ -561,7 +561,7 @@ class T5TTSDecoderLayer(Module):
             hidden_states = minimum(64000.0, hidden_states)
 
         if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.mlp_layernorm(hidden_states)
+            hidden_states = self.pos_ff_layernorm(hidden_states)
 
         if use_cache:
             return (hidden_states, presents_self, presents_cross)
