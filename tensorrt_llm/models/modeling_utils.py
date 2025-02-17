@@ -413,6 +413,7 @@ class PretrainedConfig:
     def from_dict(cls, config: dict):
         # Maybe we need AutoConfig for this
         from . import MODEL_MAP
+        print(f"{MODEL_MAP=}")
         model_cls = MODEL_MAP[config['architecture']]
         config_cls = getattr(model_cls, 'config_class', cls)
         return config_cls(**config)
