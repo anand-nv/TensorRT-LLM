@@ -874,6 +874,7 @@ class Attention(Module):
 
         paged_kv_cache = default_net().plugin_config.paged_kv_cache
 
+
         assert attention_params is None or attention_params.is_valid(
             default_net().plugin_config.gpt_attention_plugin,
             default_net().plugin_config.remove_input_padding, use_cache)
