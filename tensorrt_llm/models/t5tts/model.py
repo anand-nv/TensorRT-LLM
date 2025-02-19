@@ -25,7 +25,7 @@ from tensorrt_llm.functional import (LayerNormPositionType, LayerNormType,
                                      MLPType, PositionEmbeddingType, Tensor,
                                      assertion, cast, gather_last_token_logits,
                                      gelu, maximum, minimum, recv, send, shape,
-                                     transpose, unsqueeze, ACT2FN, squeeze, select, concat)
+                                     transpose, unsqueeze, ACT2FN, squeeze, select, concat, arange)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
@@ -146,11 +146,15 @@ class PositionalEmbedding(Module):
                     prompt_vocab_size=None):
 
 
-            print(f"AAAAA {input_ids.size()=}, {position_ids=}")
 
+            #positions=None
+            print(f"AAAAA {input_ids.size()=}, {position_ids=}, ")
 
             pos_emb = self.position_embedding(position_ids)
+            print(f"BBBB {input_ids.size()=}, {position_ids=}, {pos_emb=}")
+
             #self.register_network_output('position_embeddings', pos_emb)
+
             x = input_ids + pos_emb
 
             if self.embedding_layernorm:
@@ -1001,6 +1005,8 @@ class T5TTSDecoderModel(PretrainedModel):
 
         self.hidden_size = self.config.hidden_size
         self.num_heads = self.config.num_attention_heads
+
+        self.num_audio_codebooks = self.config.num_audio_codebooks
         num_kv_heads = self.num_heads
         if num_kv_heads is None or num_kv_heads <= 0:
             num_kv_heads = self.num_heads
@@ -1019,7 +1025,6 @@ class T5TTSDecoderModel(PretrainedModel):
 
         self.has_position_embedding = self.config.has_position_embedding
         self.has_token_type_embedding = type_vocab_size is not None
-        self.num_audio_embeddings_layers = 8
 
 
         self.fp16_clamping = (self.config.dtype
@@ -1034,7 +1039,7 @@ class T5TTSDecoderModel(PretrainedModel):
 
 
         if self.mapping.is_first_pp_rank():
-            audio_emb_range = range(self.num_audio_embeddings_layers)
+            audio_emb_range = range(self.num_audio_codebooks)
             self.audio_embeddings = ModuleList([Embedding(2048,768) for idx in audio_emb_range])
 
             self.embedding = PositionalEmbedding(
@@ -1117,6 +1122,8 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('has_pos_ff_bias', False)
         config.set_if_not_exist('has_encoder_input_layernorm', True)
         config.set_if_not_exist('has_model_final_layernorm', False)
+        config.set_if_not_exist('num_audio_codebooks', 8)
+
         config.set_if_not_exist('encoder_hidden_size', None)
         config.set_if_not_exist('encoder_num_heads', None)
         config.set_if_not_exist('encoder_num_kv_heads', None)
@@ -1153,12 +1160,13 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
-            hidden_states = self.embed_audio_tokens(decoder_input_ids)
+            audio_embeddings = self.embed_audio_tokens(decoder_input_ids)
             if additional_decoder_mask is not None and additional_decoder_input is not None :
 
-                hidden_states = concat(additional_decoder_input, hidden_states)
+                audio_embeddings = concat(additional_decoder_input, audio_embeddings)
+            print(f"{decoder_input_ids.shape=} {audio_embeddings.shape=}")
 
-            hidden_states = self.embedding(hidden_states, position_ids=position_ids)
+            hidden_states = self.embedding(audio_embeddings, position_ids=position_ids)
 
             self.register_network_output('embedding_layer_output',
                                          hidden_states)
@@ -1400,9 +1408,10 @@ class T5TTSDecoderModel(PretrainedModel):
             if self.mapping.is_first_pp_rank():
                 input_ids = Tensor(name='input_ids',
                                    dtype=trt.int32,
-                                   shape=[-1, -1],
+                                   shape=[-1, self.num_audio_codebooks, -1],
                                    dim_range=OrderedDict([
                                        ('batch_size_beam_width', [bb_range]),
+                                       ('num_audio_codebooks',[self.num_audio_codebooks]),
                                        ('input_len', [inlen_range]),
                                    ]))
                 if self.has_position_embedding:

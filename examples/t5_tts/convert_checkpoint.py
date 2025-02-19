@@ -261,7 +261,7 @@ def convert_t5tts_encoder(config, model_dict, quant_algo: str = None,):
 
 def convert_t5tts_decoder(config, model_dict, quant_algo: str = None,):
     weights = {}
-    weights['embedding.vocab_embedding.weight'] = model_dict['final_proj.weight'].clone().contiguous()
+    #weights['embedding.vocab_embedding.weight'] = model_dict['final_proj.weight'].clone().contiguous()
 
     weights['lm_head.weight'] = model_dict['final_proj.weight'].clone().contiguous()
 
