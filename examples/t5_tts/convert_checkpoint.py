@@ -291,7 +291,7 @@ def convert_t5tts_decoder(config, model_dict, quant_algo: str = None,):
             f't5_decoder.layers.{i}.cross_attention.o_net.weight'].contiguous()
         weights[f'decoder_layers.{i}.pos_ff_layernorm.weight'] = model_dict[
             f't5_decoder.layers.{i}.norm_pos_ff.weight'].contiguous()
-        weights[f'decoder_layers.{i}.cross_attention_memnorm.weight'] = model_dict[
+        weights[f'decoder_layers.{i}.cross_attention_memory_layernorm.weight'] = model_dict[
             f't5_decoder.layers.{i}.norm_xattn_memory.weight'].contiguous()
         weights[f'decoder_layers.{i}.pos_ff.proj.weight'] = model_dict[
             f't5_decoder.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(3).contiguous()

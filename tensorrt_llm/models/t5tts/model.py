@@ -399,6 +399,7 @@ class T5TTSDecoderLayer(Module):
                  q_scaling=1.0,
                  has_attention_qkvo_bias=False,
                  has_pos_ff_bias=False,
+                 has_encoder_input_layernorm=False,
                  layernorm_position=LayerNormPositionType.pre_layernorm,
                  layernorm_type=LayerNormType.LayerNorm,
                  layernorm_eps=1e-5,
@@ -413,6 +414,8 @@ class T5TTSDecoderLayer(Module):
                  skip_cross_kv=False,
                  use_implicit_relative_attention=False):
         super().__init__()
+
+        self.has_encoder_input_layernorm=has_encoder_input_layernorm
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -477,6 +480,13 @@ class T5TTSDecoderLayer(Module):
             position_embedding_type=PositionEmbeddingType.learned_absolute,
             skip_cross_kv=skip_cross_kv)
 
+        self.cache_cross_attention_memory=None
+        if has_encoder_input_layernorm:
+            self.cross_attention_memory_layernorm = ln_type(normalized_shape=hidden_size,
+                                                 eps=layernorm_eps,
+                                                 dtype=dtype)
+
+
         self.cross_attention_layernorm = ln_type(normalized_shape=hidden_size,
                                                  eps=layernorm_eps,
                                                  dtype=dtype)
@@ -533,6 +543,15 @@ class T5TTSDecoderLayer(Module):
 
         if use_cache:
             attention_output, presents_self = attention_output
+            if not self.has_encoder_input_layernorm:
+                encoder_memory=encoder_output
+            else:
+                # This will mess up IFB and would require a workaround
+                # Probably move this to before decoder ??
+                if self.cache_cross_attention_memory is not None:
+                    encoder_memory = self.cache_cross_attention_memory
+                else:
+                    encoder_memory = self.cross_attention_memory_layernorm(encoder_output)
 
         self.register_network_output('self_attention_output', attention_output)
 
@@ -968,6 +987,7 @@ class T5TTSDecoderModel(PretrainedModel):
         # e.g. BART true, T5 false
         self.has_attention_qkvo_bias = self.config.has_attention_qkvo_bias
         self.has_pos_ff_bias = self.config.has_pos_ff_bias
+        self.has_encoder_input_layernorm = self.config.has_encoder_input_layernorm
 
         # e.g. BART false, T5 true
         self.has_model_final_layernorm = self.config.has_model_final_layernorm
@@ -1001,6 +1021,7 @@ class T5TTSDecoderModel(PretrainedModel):
         self.has_token_type_embedding = type_vocab_size is not None
         self.num_audio_embeddings_layers = 8
 
+
         self.fp16_clamping = (self.config.dtype
                               == 'float16') and (self.config.model_type
                                                  in ['t5', 'pix2struct'])
@@ -1010,6 +1031,7 @@ class T5TTSDecoderModel(PretrainedModel):
             self.config, "mlp_type") else self.config.mlp_type
         self.use_implicit_relative_attention = self.config.use_implicit_relative_attention if hasattr(
             self.config, "use_implicit_relative_attention") else False
+
 
         if self.mapping.is_first_pp_rank():
             audio_emb_range = range(self.num_audio_embeddings_layers)
@@ -1041,6 +1063,7 @@ class T5TTSDecoderModel(PretrainedModel):
                 q_scaling=self.config.q_scaling,
                 has_attention_qkvo_bias=self.config.has_attention_qkvo_bias,
                 has_pos_ff_bias=self.config.has_pos_ff_bias,
+                has_encoder_input_layernorm=self.config.has_encoder_input_layernorm,
                 layernorm_position=self.config.layernorm_position,
                 layernorm_eps=self.config.norm_epsilon,
                 layernorm_type=self.config.layernorm_type,
@@ -1092,6 +1115,7 @@ class T5TTSDecoderModel(PretrainedModel):
                                 LayerNormPositionType.pre_layernorm)
         config.set_if_not_exist('has_attention_qkvo_bias', False)
         config.set_if_not_exist('has_pos_ff_bias', False)
+        config.set_if_not_exist('has_encoder_input_layernorm', True)
         config.set_if_not_exist('has_model_final_layernorm', False)
         config.set_if_not_exist('encoder_hidden_size', None)
         config.set_if_not_exist('encoder_num_heads', None)
