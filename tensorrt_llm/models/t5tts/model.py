@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,23 +18,21 @@ from typing import List, Optional
 
 import tensorrt as trt
 import torch
-import numpy as np
+
 from tensorrt_llm._common import default_net
-from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch, fp32_array
+from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch
 from tensorrt_llm.functional import (LayerNormPositionType, LayerNormType,
                                      MLPType, PositionEmbeddingType, Tensor,
                                      assertion, cast, gather_last_token_logits,
                                      gelu, maximum, minimum, recv, send, shape,
-                                     slice, transpose, conv1d, unsqueeze, ACT2FN,
-                                     squeeze, constant, expand_dims, concat, expand, index_select, select)
-from tensorrt_llm.layers import (Attention, AttentionMaskType,
-                                 AttentionParams, BertAttention, ColumnLinear,
-                                 Conv1d, Embedding,
-                                 GroupNorm, KeyValueCacheParams, LayerNorm,
-                                 LoraParams, PromptTuningEmbedding, RmsNorm)
-from tensorrt_llm.lora_manager import (LoraConfig,
-                                       get_default_trtllm_modules_to_hf_modules,
-                                       use_lora)
+                                     transpose, unsqueeze, ACT2FN, squeeze, select, concat)
+from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
+                                 AttentionMaskType, AttentionParams,
+                                 BertAttention, ColumnLinear, Conv1d, Embedding,
+                                 FusedGatedMLP, GatedMLP, GroupNorm,
+                                 KeyValueCacheParams, LayerNorm, LoraParams,
+                                 PromptTuningEmbedding, RmsNorm)
+
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import PretrainedConfig, PretrainedModel
 from tensorrt_llm.module import Module, ModuleList
@@ -47,6 +45,11 @@ layernorm_map = {
     LayerNormType.GroupNorm: GroupNorm,
 }
 
+mlp_map = {
+    MLPType.MLP: MLP,
+    MLPType.GatedMLP: GatedMLP,
+    MLPType.FusedGatedMLP: FusedGatedMLP,
+}
 
 
 
@@ -96,6 +99,64 @@ class PositionwiseConvFF(Module):
         return x
 
 
+class PositionalEmbedding(Module):
+    def __init__(self,
+                 max_position_embeddings,
+                 hidden_size,
+                 has_embedding_layernorm=False,
+                 has_embedding_scale=False,
+                 layernorm_eps=1e-5,
+                 layernorm_type=LayerNormType.LayerNorm,
+                 dtype=None,
+                 use_parallel_embedding=False,
+                 embedding_sharding_dim=0,
+                 mapping=Mapping()):
+        super().__init__()
+
+        self.layernorm_type = layernorm_type
+        ln_type = layernorm_map[layernorm_type]
+
+
+        self.max_position_embeddings = max_position_embeddings
+        self.position_embedding = None
+        self.position_embedding = Embedding(
+                max_position_embeddings,
+                hidden_size,
+                dtype=dtype,
+                tp_size=mapping.tp_size if use_parallel_embedding else 1,
+                tp_group=mapping.tp_group if use_parallel_embedding else None,
+                sharding_dim=embedding_sharding_dim,
+                tp_rank=mapping.tp_rank)
+
+
+        self.embedding_layernorm = None
+        if has_embedding_layernorm:
+            self.embedding_layernorm = ln_type(normalized_shape=hidden_size,
+                                               eps=layernorm_eps,
+                                               dtype=dtype)
+
+        self.embedding_scale = 1.0
+        if has_embedding_scale:
+            self.embedding_scale = math.sqrt(hidden_size)
+
+    def forward(self,
+                    input_ids,
+                    position_ids=None,
+                    prompt_tasks=None,
+                    prompt_vocab_size=None):
+
+
+            print(f"AAAAA {input_ids.size()=}, {position_ids=}")
+
+
+            pos_emb = self.position_embedding(position_ids)
+            #self.register_network_output('position_embeddings', pos_emb)
+            x = input_ids + pos_emb
+
+            if self.embedding_layernorm:
+                x = self.embedding_layernorm(x)
+
+            return x
 
 
 class EncDecEmbedding(Module):
@@ -151,17 +212,20 @@ class EncDecEmbedding(Module):
                 sharding_dim=embedding_sharding_dim,
                 tp_rank=mapping.tp_rank)
 
+        # e.g. BART true, T5 false
         self.embedding_layernorm = None
         if has_embedding_layernorm:
             self.embedding_layernorm = ln_type(normalized_shape=hidden_size,
                                                eps=layernorm_eps,
                                                dtype=dtype)
 
+        # e.g. BART true, T5 false
         self.embedding_scale = 1.0
         if has_embedding_scale:
             self.embedding_scale = math.sqrt(hidden_size)
 
-
+        # Note: embedding offset in BART is not considered as a standard. For the specific case,
+        # we just need to shrink its position embedding table by [offset:] during weight loading
 
     def forward(self,
                 input_ids,
@@ -177,11 +241,11 @@ class EncDecEmbedding(Module):
                 ] if prompt_embedding_table is not None else []
 
         x = self.vocab_embedding(input_ids, *args) * self.embedding_scale
-        #self.register_network_output('word_embeddings', x)
+        self.register_network_output('word_embeddings', x)
 
         if self.position_embedding:
             pos_emb = self.position_embedding(position_ids)
-            #self.register_network_output('position_embeddings', pos_emb)
+            self.register_network_output('position_embeddings', pos_emb)
             x = x + pos_emb
         if self.token_type_embedding:
             x = x + self.token_type_embedding(token_type_ids)
@@ -203,9 +267,9 @@ class T5TTSEncoderLayer(Module):
                  max_position_embeddings=None,
                  q_scaling=1.0,
                  has_attention_qkvo_bias=False,
-                 has_ff_bias=False,
+                 has_pos_ff_bias=False,
                  layernorm_position=LayerNormPositionType.pre_layernorm,
-                 layernorm_type=LayerNormType.RmsNorm,
+                 layernorm_type=LayerNormType.LayerNorm,
                  layernorm_eps=1e-5,
                  hidden_act="gelu",
                  mapping=Mapping(),
@@ -215,15 +279,17 @@ class T5TTSEncoderLayer(Module):
                  max_distance=0,
                  num_buckets=0,
                  fp16_clamping=False,
-                 conv_is_causal=False,):
+                 conv_is_causal=False):
         super().__init__()
 
+        # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
         ln_type = layernorm_map[layernorm_type]
 
+        # e.g. BART post, T5 pre
         self.layernorm_position = layernorm_position
 
-        # T5 q_scaling = 1.f/sqrt(head_size)
+        # e.g. BART q_scaling = 1.f, T5 q_scaling = 1.f/sqrt(head_size)
         self.attention = BertAttention(
             hidden_size,
             num_attention_heads,
@@ -248,7 +314,7 @@ class T5TTSEncoderLayer(Module):
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             hidden_act=hidden_act,
-            has_bias=has_ff_bias,
+            has_bias=has_pos_ff_bias,
             kernel_size=3,
             padding=1,
             groups=mapping.tp_group,
@@ -259,6 +325,7 @@ class T5TTSEncoderLayer(Module):
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                      eps=layernorm_eps,
                                      dtype=dtype)
+
 
         self.residual_scaling = residual_scaling
 
@@ -271,8 +338,7 @@ class T5TTSEncoderLayer(Module):
                 hidden_states: Tensor,
                 attention_mask=None,
                 input_lengths=None,
-                max_input_length=None,
-                lora_layer_params=None):
+                max_input_length=None):
         assert isinstance(hidden_states, Tensor)
 
         # self attention
@@ -281,14 +347,12 @@ class T5TTSEncoderLayer(Module):
         if self.layernorm_position == LayerNormPositionType.pre_layernorm:
             hidden_states = self.attention_layernorm(hidden_states)
 
-
         attention_output = self.attention(hidden_states,
                                           attention_mask=attention_mask,
                                           input_lengths=input_lengths,
-                                          max_input_length=max_input_length,
-                                          lora_layer_params=lora_layer_params)
+                                          max_input_length=max_input_length)
 
-        #self.register_network_output('attention_output', attention_output)
+        self.register_network_output('attention_output', attention_output)
 
         hidden_states = residual + attention_output
 
@@ -307,7 +371,7 @@ class T5TTSEncoderLayer(Module):
 
         hidden_states = self.pos_ff(hidden_states)
 
-        #self.register_network_output('mlp_output', hidden_states)
+        self.register_network_output('pos_ff_output', hidden_states)
 
         hidden_states = residual + hidden_states
 
@@ -334,7 +398,7 @@ class T5TTSDecoderLayer(Module):
                  max_position_embeddings=None,
                  q_scaling=1.0,
                  has_attention_qkvo_bias=False,
-                 has_ff_bias=False,
+                 has_pos_ff_bias=False,
                  layernorm_position=LayerNormPositionType.pre_layernorm,
                  layernorm_type=LayerNormType.LayerNorm,
                  layernorm_eps=1e-5,
@@ -347,11 +411,9 @@ class T5TTSDecoderLayer(Module):
                  num_buckets=0,
                  fp16_clamping=False,
                  skip_cross_kv=False,
-                 apply_norm_to_cond=True,
                  use_implicit_relative_attention=False):
         super().__init__()
 
-        self.apply_norm_to_cond = apply_norm_to_cond
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
         ln_type = layernorm_map[layernorm_type]
@@ -408,7 +470,8 @@ class T5TTSDecoderLayer(Module):
             tp_rank=mapping.tp_rank,
             dtype=dtype,
             cross_attention=True,
-            relative_attention=False,  # Cross attention has no relative attention bias
+            relative_attention=
+            False,  # Cross attention has no relative attention bias
             max_distance=max_distance,
             num_buckets=num_buckets,
             position_embedding_type=PositionEmbeddingType.learned_absolute,
@@ -418,50 +481,36 @@ class T5TTSDecoderLayer(Module):
                                                  eps=layernorm_eps,
                                                  dtype=dtype)
 
-
         self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
             ffn_hidden_size=ffn_hidden_size,
             kernel_size=1,
             padding=0,
             hidden_act=hidden_act,
-            has_bias=has_ff_bias,
+            has_bias=has_pos_ff_bias,
             groups=mapping.tp_group,
             dtype=dtype,
             is_causal=True,
         )
 
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
-                                     eps=layernorm_eps,
-                                     dtype=dtype)
-
-        self.cross_attention_memnorm = ln_type(normalized_shape=hidden_size,
-                                     eps=layernorm_eps,
-                                     dtype=dtype)
-
+                                        eps=layernorm_eps,
+                                        dtype=dtype)
 
         self.residual_scaling = residual_scaling
-        self.cache={
-            'self_attn_output': None,
-            'cross_attn_output': None,
-            'memory': None,
-        }
 
         # T5-series model(e.g. t5-large, t5-3b, flan-t5-small) has accuracy issue due to fp16 overflow
         # after residual add. We add workaround for clamping fp16 range [-64000, 64000] after every
         # residual add to avoid accuracy drop.
         self.fp16_clamping = fp16_clamping
-        self.layeridx=0
 
     def forward(self,
                 hidden_states: Tensor,
                 encoder_output: Optional[Tensor] = None,
-                attention_mask=None,
-                cross_attention_mask=None,
+                attention_mask_params=None,
                 use_cache=False,
                 kv_cache_params=None,
                 attention_params=None,
-                lora_layer_params=None,
                 cross_kv_cache_gen: Optional[Tensor] = None,
                 cross_kv_reuse: Optional[Tensor] = None):
         assert isinstance(hidden_states, Tensor)
@@ -477,19 +526,15 @@ class T5TTSDecoderLayer(Module):
 
         attention_output = self.self_attention(
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
+            attention_mask=attention_mask_params.self_attention_mask,
             use_cache=use_cache,
             kv_cache_params=kv_cache_params,
-            attention_params=attention_params,
-            lora_layer_params=lora_layer_params)
-        self.layeridx += 1
-
+            attention_params=attention_params)
 
         if use_cache:
             attention_output, presents_self = attention_output
 
-
-        #self.register_network_output('self_attention_output', attention_output)
+        self.register_network_output('self_attention_output', attention_output)
 
         hidden_states = residual + attention_output
 
@@ -506,35 +551,22 @@ class T5TTSDecoderLayer(Module):
         if self.layernorm_position == LayerNormPositionType.pre_layernorm:
             hidden_states = self.cross_attention_layernorm(hidden_states)
 
-        memory = encoder_output
-
-        if encoder_output is not None:
-            if use_cache and self.cache['memory'] is not None:
-                memory = self.cache['memory']
-            else:
-                if self.apply_norm_to_cond:
-                    memory = self.cross_attention_memnorm(encoder_output)
-                if use_cache:
-                    self.cache['memory'] = memory
-
-
-
-
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
-            attention_mask=cross_attention_mask,
-            encoder_output=memory,
+            attention_mask=attention_mask_params.cross_attention_mask,
+            attention_packed_mask=attention_mask_params.
+            cross_attention_packed_mask,
+            encoder_output=encoder_output,
             use_cache=use_cache,
             kv_cache_params=kv_cache_params,
             attention_params=attention_params,
-            lora_layer_params=lora_layer_params,
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
 
         if use_cache:
             attention_output, presents_cross = attention_output
 
-        #self.register_network_output('cross_attention_output', attention_output)
+        self.register_network_output('cross_attention_output', attention_output)
 
         hidden_states = residual + attention_output
 
@@ -552,7 +584,7 @@ class T5TTSDecoderLayer(Module):
             hidden_states = self.pos_ff_layernorm(hidden_states)
 
         hidden_states = self.pos_ff(hidden_states)
-        #self.register_network_output('mlp_output', hidden_states)
+        self.register_network_output('pos_ff_output', hidden_states)
 
         hidden_states = residual + hidden_states
 
@@ -561,7 +593,7 @@ class T5TTSDecoderLayer(Module):
             hidden_states = minimum(64000.0, hidden_states)
 
         if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.pos_ff_layernorm(hidden_states)
+            hidden_states = self.mlp_layernorm(hidden_states)
 
         if use_cache:
             return (hidden_states, presents_self, presents_cross)
@@ -585,7 +617,7 @@ class T5TTSEncoderModel(PretrainedModel):
 
         # e.g. BART true, T5 false
         self.has_attention_qkvo_bias = self.config.has_attention_qkvo_bias
-        self.has_ff_bias = self.config.has_ff_bias
+        self.has_pos_ff_bias = self.config.has_pos_ff_bias
 
         # e.g. BART false, T5 true
         self.has_model_final_layernorm = self.config.has_model_final_layernorm
@@ -605,7 +637,8 @@ class T5TTSEncoderModel(PretrainedModel):
 
         self.fp16_clamping = (self.config.dtype
                               == 'float16') and (self.config.model_type == 't5')
-
+        self.mlp_type = MLPType.MLP if not hasattr(
+            self.config, "mlp_type") else self.config.mlp_type
 
         if self.mapping.is_first_pp_rank():
             self.embedding = EncDecEmbedding(
@@ -633,7 +666,7 @@ class T5TTSEncoderModel(PretrainedModel):
                 max_position_embeddings=self.config.max_position_embeddings,
                 q_scaling=self.config.q_scaling,
                 has_attention_qkvo_bias=self.has_attention_qkvo_bias,
-                has_ff_bias=self.has_ff_bias,
+                has_pos_ff_bias=self.has_pos_ff_bias,
                 layernorm_position=self.config.layernorm_position,
                 layernorm_eps=self.config.norm_epsilon,
                 layernorm_type=self.layernorm_type,
@@ -646,8 +679,7 @@ class T5TTSEncoderModel(PretrainedModel):
                 relative_attention=self.config.relative_attention,
                 max_distance=self.config.max_distance,
                 num_buckets=self.config.num_buckets,
-                fp16_clamping=self.fp16_clamping,
-                conv_is_causal=False)
+                fp16_clamping=self.fp16_clamping)
             for _ in self.mapping.pp_layers(self.total_num_layers)
         ])
 
@@ -666,7 +698,7 @@ class T5TTSEncoderModel(PretrainedModel):
         config.set_if_not_exist('layernorm_position',
                                 LayerNormPositionType.pre_layernorm)
         config.set_if_not_exist('has_attention_qkvo_bias', False)
-        config.set_if_not_exist('has_ff_bias', False)
+        config.set_if_not_exist('has_pos_ff_bias', False)
         config.set_if_not_exist('has_model_final_layernorm', False)
         config.set_if_not_exist('encoder_hidden_size', None)
         config.set_if_not_exist('encoder_num_heads', None)
@@ -692,8 +724,7 @@ class T5TTSEncoderModel(PretrainedModel):
                 prompt_embedding_table=None,
                 prompt_tasks=None,
                 prompt_vocab_size=None,
-                attention_mask=None,
-                lora_params: LoraParams = None):
+                attention_mask=None):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
@@ -709,14 +740,11 @@ class T5TTSEncoderModel(PretrainedModel):
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
 
         for layer_idx, encoder_layer in enumerate(self.encoder_layers):
-            lora_layer_params = None
-            if lora_params is not None and lora_params.lora_ranks is not None:
-                lora_layer_params = lora_params.get_layer_params(layer_idx)
+
             hidden_states = encoder_layer(hidden_states=hidden_states,
                                           attention_mask=attention_mask,
                                           input_lengths=input_lengths,
-                                          max_input_length=max_input_length,
-                                          lora_layer_params=lora_layer_params)
+                                          max_input_length=max_input_length)
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -732,7 +760,6 @@ class T5TTSEncoderModel(PretrainedModel):
                        max_batch_size,
                        max_input_len,
                        prompt_embedding_table_size: int = 0,
-                       lora_target_modules: List[str] = None,
                        *args,
                        **kwargs):
         '''@brief: Prepare inputs Tensors for the model, the given sizes are used to determine the
@@ -753,7 +780,6 @@ class T5TTSEncoderModel(PretrainedModel):
 
         input_ids, position_ids, token_type_ids, hidden_states = None, None, None, None
         remove_input_padding = default_net().plugin_config.remove_input_padding
-        use_lora_plugin = default_net().plugin_config.lora_plugin
 
         attention_mask = None
         if remove_input_padding:
@@ -886,76 +912,7 @@ class T5TTSEncoderModel(PretrainedModel):
                                        dtype=trt.int32,
                                        shape=[1],
                                        dim_range=OrderedDict([('size', [1])]))
-        '''
-        LoRA plugin related inputs:
-        lora_target_modules for BART-encoder:
-            ['attn_q', 'attn_v']
-        For BART-decoder, the lora_target_modules is different.
-        See comments in the DecoderModel.prepare_inputs() for more details.
-        '''
-        lora_weights_pointers = None
-        lora_ranks = None
-        lora_params = None
-        if use_lora_plugin:
-            lora_weights_pointers = []
-            lora_ranks = []
-            # In current design, q_lora_params, k_lora_params and v_lora_params should be all enabled or all disabled at the same time.
-            # However, BART lora modules only contain two of them, so we use zero tensor to fill the missing ones.
-            missing_qkv_modules = []
-            if any(x in lora_target_modules
-                   for x in ["attn_q", "attn_k", "attn_v"]):
-                for lora_module in ["attn_q", "attn_k", "attn_v"]:
-                    if lora_module not in lora_target_modules:
-                        missing_qkv_modules.append(lora_module)
 
-            layers_range = self.mapping.pp_layers(self.total_num_layers)
-            for i in layers_range:
-                lora_weight_pointer_dict = {}
-                lora_rank_dict = {}
-                for lora_module in (lora_target_modules + missing_qkv_modules):
-                    lora_weight_pointer = Tensor(
-                        name=f'{lora_module}_lora_weights_pointers_{i}',
-                        dtype=trt.int64,
-                        shape=[-1, 2],
-                        dim_range=OrderedDict([('batch_size', [bs_range]),
-                                               ('in_out', [2])]))
-                    lora_weight_pointer_dict.update({
-                        f'{lora_module}_lora_weights_pointers':
-                        lora_weight_pointer
-                    })
-
-                    lora_rank = Tensor(name=f'{lora_module}_lora_ranks_{i}',
-                                       dtype=trt.int32,
-                                       shape=[-1],
-                                       dim_range=OrderedDict([('batch_size',
-                                                               [bs_range])]))
-                    lora_rank_dict.update(
-                        {f'{lora_module}_lora_ranks': lora_rank})
-
-                lora_weights_pointers.append(lora_weight_pointer_dict)
-                lora_ranks.append(lora_rank_dict)
-
-            host_request_types = Tensor(name='host_request_types',
-                                        dtype=trt.int32,
-                                        shape=[-1],
-                                        dim_range=OrderedDict([('batch_size',
-                                                                [bs_range])]))
-
-            host_context_lengths = None
-            if remove_input_padding:
-                host_context_lengths = Tensor(name='host_context_lengths',
-                                              dtype=trt.int32,
-                                              shape=[-1],
-                                              dim_range=OrderedDict([
-                                                  ('batch_size', [bs_range])
-                                              ]))
-
-            lora_params = LoraParams(
-                lora_ranks=lora_ranks,
-                lora_weights_pointers=lora_weights_pointers,
-                host_request_types=host_request_types,
-                host_context_lengths=host_context_lengths,
-            )
 
         result = {
             'input_ids': input_ids,
@@ -968,13 +925,11 @@ class T5TTSEncoderModel(PretrainedModel):
             'prompt_tasks': tasks,
             'prompt_vocab_size': prompt_vocab_size,
             'attention_mask': attention_mask,
-            'lora_params': lora_params,
         }
 
         return result
 
-    def use_lora(self, lora_config: LoraConfig):
-        use_lora(self, lora_config)
+
 
     def use_prompt_tuning(self):
         embedding = self.embedding.vocab_embedding
@@ -1000,6 +955,7 @@ class T5TTSDecoderModel(PretrainedModel):
         super().__init__(config)
 
         self.mapping = self.config.mapping
+
         self.has_position_embedding = self.config.has_position_embedding
         type_vocab_size = self.config.type_vocab_size
         self.has_token_type_embedding = (type_vocab_size is not None)
@@ -1011,7 +967,7 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # e.g. BART true, T5 false
         self.has_attention_qkvo_bias = self.config.has_attention_qkvo_bias
-        self.has_ff_bias = self.config.has_ff_bias
+        self.has_pos_ff_bias = self.config.has_pos_ff_bias
 
         # e.g. BART false, T5 true
         self.has_model_final_layernorm = self.config.has_model_final_layernorm
@@ -1047,19 +1003,21 @@ class T5TTSDecoderModel(PretrainedModel):
 
         self.fp16_clamping = (self.config.dtype
                               == 'float16') and (self.config.model_type
-                                                 in ['t5'])
+                                                 in ['t5', 'pix2struct'])
 
         self.skip_cross_kv = self.config.skip_cross_kv
+        self.mlp_type = MLPType.MLP if not hasattr(
+            self.config, "mlp_type") else self.config.mlp_type
         self.use_implicit_relative_attention = self.config.use_implicit_relative_attention if hasattr(
             self.config, "use_implicit_relative_attention") else False
 
         if self.mapping.is_first_pp_rank():
-            self.embedding = EncDecEmbedding(
-                self.config.vocab_size,
-                self.config.hidden_size,
+            audio_emb_range = range(self.num_audio_embeddings_layers)
+            self.audio_embeddings = ModuleList([Embedding(2048,768) for idx in audio_emb_range])
+
+            self.embedding = PositionalEmbedding(
+                hidden_size=self.config.hidden_size,
                 max_position_embeddings=self.config.max_position_embeddings,
-                has_position_embedding=self.config.has_position_embedding,
-                type_vocab_size=type_vocab_size,
                 has_embedding_layernorm=self.config.has_embedding_layernorm,
                 has_embedding_scale=self.config.has_embedding_scale,
                 layernorm_eps=self.config.norm_epsilon,
@@ -1069,10 +1027,6 @@ class T5TTSDecoderModel(PretrainedModel):
                 embedding_sharding_dim=self.config.embedding_sharding_dim,
                 mapping=self.mapping)
 
-        audio_emb_range= range(self.num_audio_embeddings_layers)
-
-        if self.mapping.is_first_pp_rank():
-            self.audio_embeddings = ModuleList([Embedding(2048,768) for idx in audio_emb_range])
 
         layers_range = self.mapping.pp_layers(self.total_num_layers)
         self.decoder_layers = ModuleList([
@@ -1086,7 +1040,7 @@ class T5TTSDecoderModel(PretrainedModel):
                 max_position_embeddings=self.config.max_position_embeddings,
                 q_scaling=self.config.q_scaling,
                 has_attention_qkvo_bias=self.config.has_attention_qkvo_bias,
-                has_ff_bias=self.config.has_ff_bias,
+                has_pos_ff_bias=self.config.has_pos_ff_bias,
                 layernorm_position=self.config.layernorm_position,
                 layernorm_eps=self.config.norm_epsilon,
                 layernorm_type=self.config.layernorm_type,
@@ -1121,41 +1075,13 @@ class T5TTSDecoderModel(PretrainedModel):
                 gather_output=True,
             )
 
-        self.trtllm_modules_to_hf_modules = {
-            **get_default_trtllm_modules_to_hf_modules(),
-            "attn_q": "self_attn.q_proj",
-            "attn_k": "self_attn.k_proj",
-            "attn_v": "self_attn.v_proj",
-            "attn_dense": "self_attn.o_proj",
-            "cross_attn_q": "encoder_attn.q_proj",
-            "cross_attn_k": "encoder_attn.k_proj",
-            "cross_attn_v": "encoder_attn.v_proj",
-            "cross_attn_dense": "encoder_attn.o_proj",
-        }
+
 
         if self.config.relative_attention and not self.use_implicit_relative_attention:
             self.rel_attn_table = Parameter(
                 shape=(self.config.num_attention_heads // self.mapping.tp_size,
                        self.config.num_buckets),
                 dtype=self._dtype)
-
-    def embed_audio_tokens(self, audio_tokens):
-        # audio_tokens: (B, C, T')
-        # Add and average the embeddings of the audio tokens across the codebooks
-        #print(f"A {audio_tokens.shape=}")
-        #d = index_select(audio_tokens,1,[-1,0,-1])
-        d=select(audio_tokens,1,1)
-        #print(f"H {d=}")
-        audio_embedding = self.audio_embeddings[0](d)
-        for c in range(1,audio_tokens.size(1)):
-            d = select(audio_tokens, 1, c)
-            audio_embedding = audio_embedding + self.audio_embeddings[c](d)
-        audio_embedding = audio_embedding / audio_tokens.size(1)
-        return audio_embedding
-
-    def get_mask_from_lengths(self, lengths, dtype):
-        ones = constant(np.ones(lengths, dtype=np.float32)).cast(dtype)
-        return ones
 
     def check_config(self, config: PretrainedConfig):
         config.set_if_not_exist('has_position_embedding', False)
@@ -1165,7 +1091,7 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('layernorm_position',
                                 LayerNormPositionType.pre_layernorm)
         config.set_if_not_exist('has_attention_qkvo_bias', False)
-        config.set_if_not_exist('has_ff_bias', False)
+        config.set_if_not_exist('has_pos_ff_bias', False)
         config.set_if_not_exist('has_model_final_layernorm', False)
         config.set_if_not_exist('encoder_hidden_size', None)
         config.set_if_not_exist('encoder_num_heads', None)
@@ -1181,23 +1107,19 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('relative_attention', False)
         config.set_if_not_exist('residual_scaling', 1.0)
 
-
-
     def forward(self,
                 decoder_input_ids: Tensor,
                 encoder_output: Tensor,
-                additional_decoder_input: Tensor=None,
-                additional_decoder_mask: Tensor=None,
                 position_ids=None,
                 token_type_ids=None,
                 use_cache=False,
-                attention_mask=None,
-                cross_attention_mask=None,
+                attention_mask_params=None,
+                additional_decoder_mask=None,
+                additional_decoder_input=None,
                 last_token_ids=None,
                 kv_cache_params=None,
                 attention_params=None,
                 hidden_states=None,
-                lora_params: LoraParams = None,
                 cross_kv_cache_gen: Optional[Tensor] = None,
                 cross_kv_reuse: Optional[Tensor] = None):
         if self.mapping.is_first_pp_rank():
@@ -1207,14 +1129,15 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
-
             hidden_states = self.embed_audio_tokens(decoder_input_ids)
-            if additional_decoder_mask is not None:
+            if additional_decoder_mask is not None and additional_decoder_input is not None :
+
                 hidden_states = concat(additional_decoder_input, hidden_states)
 
-            #hidden_states = self.embedding(decoder_input_ids, position_ids,
-            #                               token_type_ids)
-            #self.register_network_output('embedding_layer_output',hidden_states)
+            hidden_states = self.embedding(hidden_states, position_ids=position_ids)
+
+            self.register_network_output('embedding_layer_output',
+                                         hidden_states)
         else:
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
 
@@ -1222,18 +1145,16 @@ class T5TTSDecoderModel(PretrainedModel):
 
         if use_cache:
             presents = []
+
         for i, (decoder_layer, past) in enumerate(
                 zip(self.decoder_layers, kv_cache_params.past_key_value)):
 
-            lora_layer_params = None
-            if lora_params is not None and lora_params.lora_ranks is not None:
-                lora_layer_params = lora_params.get_layer_params(i)
+
 
             hidden_states = decoder_layer(
                 hidden_states,
                 encoder_output=encoder_output,
-                attention_mask=attention_mask,
-                cross_attention_mask=cross_attention_mask,
+                attention_mask_params=attention_mask_params,
                 use_cache=use_cache,
                 kv_cache_params=KeyValueCacheParams(
                     past_key_value=past,
@@ -1250,14 +1171,17 @@ class T5TTSDecoderModel(PretrainedModel):
                     host_cross_kv_cache_block_offsets,
                     host_kv_cache_pool_pointers=kv_cache_params.
                     host_kv_cache_pool_pointers,
+                    host_kv_cache_pool_mapping=kv_cache_params.
+                    host_kv_cache_pool_mapping,
                     cross_kv_cache_block_offsets=kv_cache_params.
                     cross_kv_cache_block_offsets,
                     host_cross_kv_cache_block_offsets=kv_cache_params.
                     host_cross_kv_cache_block_offsets,
                     host_cross_kv_cache_pool_pointers=kv_cache_params.
-                    host_cross_kv_cache_pool_pointers),
+                    host_cross_kv_cache_pool_pointers,
+                    host_cross_kv_cache_pool_mapping=kv_cache_params.
+                    host_cross_kv_cache_pool_mapping),
                 attention_params=attention_params,
-                lora_layer_params=lora_layer_params,
                 cross_kv_cache_gen=cross_kv_cache_gen,
                 cross_kv_reuse=cross_kv_reuse)
 
@@ -1266,7 +1190,8 @@ class T5TTSDecoderModel(PretrainedModel):
                     2]
                 presents.append((presents_self, presents_cross))
                 hidden_states = hidden_states[0]
-            #self.register_network_output(f'decoder_layer_{i}_output', hidden_states)
+            self.register_network_output(f'decoder_layer_{i}_output',
+                                         hidden_states)
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -1276,7 +1201,7 @@ class T5TTSDecoderModel(PretrainedModel):
             hidden_states = gather_last_token_logits(
                 hidden_states, last_token_ids,
                 default_net().plugin_config.remove_input_padding)
-            #self.register_network_output('logits_before_lmhead', hidden_states)
+            self.register_network_output('logits_before_lmhead', hidden_states)
 
             # Rescale output before projecting on vocab (for T5)
             # See https://github.com/huggingface/transformers/blob/0b192de1f353b0e04dad4813e02e2c672de077be/src/transformers/models/t5/modeling_t5.py#L1769-L1772
@@ -1308,17 +1233,28 @@ class T5TTSDecoderModel(PretrainedModel):
                 return lm_logits
             return hidden_states
 
-
+    def embed_audio_tokens(self, audio_tokens):
+        # audio_tokens: (B, C, T')
+        # Add and average the embeddings of the audio tokens across the codebooks
+        #print(f"A {audio_tokens.shape=}")
+        #d = index_select(audio_tokens,1,[-1,0,-1])
+        d=select(audio_tokens,1,1)
+        #print(f"H {d=}")
+        audio_embedding = self.audio_embeddings[0](d)
+        for c in range(1,audio_tokens.size(1)):
+            d = select(audio_tokens, 1, c)
+            audio_embedding = audio_embedding + self.audio_embeddings[c](d)
+        audio_embedding = audio_embedding / audio_tokens.size(1)
+        return audio_embedding
 
     def prepare_inputs(self,
                        max_batch_size,
                        max_beam_width,
-                       max_decoder_input_len=14,
-                       max_seq_len=16384,
-                       max_encoder_input_len=2048,
+                       max_decoder_input_len,
+                       max_seq_len,
+                       max_encoder_input_len,
                        gather_context_logits: bool = False,
                        gather_generation_logits: bool = False,
-                       lora_target_modules: List[str] = None,
                        use_cache=True,
                        *args,
                        **kwargs):
@@ -1327,8 +1263,6 @@ class T5TTSDecoderModel(PretrainedModel):
 
             @return: a list contains values which can be fed into the self.forward()
         '''
-
-        print(f"{gather_context_logits=}, {gather_generation_logits}")
 
         # Prepare inputs
         max_output_len = max_decoder_input_len + max_seq_len
@@ -1375,12 +1309,28 @@ class T5TTSDecoderModel(PretrainedModel):
             (max_encoder_input_len + 1) // 2,
             max_encoder_input_len
         ]
+        max_cross_packed_mask_dim0 = max_batch_size * (
+            (max_decoder_input_len + 128 - 1) // 128) * 128
+        max_cross_packed_mask_dim1 = (
+            (max_encoder_input_len + 256 - 1) // 256) * 256 // 32
+        cross_packed_mask_dim0_range = [
+            1, (max_cross_packed_mask_dim0 + 1) // 2, max_cross_packed_mask_dim0
+        ]
+        cross_packed_mask_dim1_range = [
+            0,  # 0 for generation phase, >0 for context phase
+            (max_cross_packed_mask_dim1 + 1) // 2,
+            max_cross_packed_mask_dim1
+        ]
+
         past_key_value = []
         sequence_length = None
         host_past_key_value_lengths = None
         runtime_perf_knobs = None
+        context_progress = None
         attention_mask = None
         cross_attention_mask = None
+        cross_attention_packed_mask = None
+        attention_mask_params = AttentionMaskParams()
         use_gpt_attention_plugin = default_net(
         ).plugin_config.gpt_attention_plugin
         remove_input_padding = default_net().plugin_config.remove_input_padding
@@ -1392,7 +1342,7 @@ class T5TTSDecoderModel(PretrainedModel):
             if self.mapping.is_first_pp_rank():
                 input_ids = Tensor(name='input_ids',
                                    dtype=trt.int32,
-                                   shape=[8, -1],
+                                   shape=[-1],
                                    dim_range=OrderedDict([
                                        ('decoder_num_tokens',
                                         [decoder_num_tokens_range]),
@@ -1426,10 +1376,9 @@ class T5TTSDecoderModel(PretrainedModel):
             if self.mapping.is_first_pp_rank():
                 input_ids = Tensor(name='input_ids',
                                    dtype=trt.int32,
-                                   shape=[-1, 8, -1],
+                                   shape=[-1, -1],
                                    dim_range=OrderedDict([
                                        ('batch_size_beam_width', [bb_range]),
-                                       ('num_audio_codecs', [[8,8,8]]),
                                        ('input_len', [inlen_range]),
                                    ]))
                 if self.has_position_embedding:
@@ -1544,6 +1493,12 @@ class T5TTSDecoderModel(PretrainedModel):
                                         dim_range=OrderedDict([
                                             ('perf_knob_size', [16])
                                         ]))
+            context_progress = Tensor(name='host_context_progress',
+                                      dtype=trt.int64,
+                                      shape=[1],
+                                      dim_range=OrderedDict([
+                                          ('context_progress_size', [1])
+                                      ]))
 
         last_token_ids = None
         if self.mapping.is_last_pp_rank() and not gather_context_logits:
@@ -1573,9 +1528,36 @@ class T5TTSDecoderModel(PretrainedModel):
                 dim_range=OrderedDict([
                     ('batch_size_beam_width', [bb_range]),
                     ('query_len', [1]),
-                    ('encoder_input_len', [encoder_input_len_range]),
+                    ('encoder_input_len_2', [encoder_input_len_range]),
                 ]),
             )
+        else:
+            cross_attention_mask = Tensor(
+                name='cross_attention_mask',
+                dtype=trt.bool,
+                shape=[-1, -1],
+                dim_range=OrderedDict([
+                    ('decoder_num_tokens_2',
+                     [decoder_num_tokens_range
+                      ]),  # TODO (bhsueh) should use same name as input_ids
+                    ('encoder_input_len_2', [encoder_input_len_range]),
+                ]),
+            )
+
+            cross_attention_packed_mask = Tensor(
+                name='cross_attention_packed_mask',
+                dtype=trt.int32,
+                shape=[-1, -1],
+                dim_range=OrderedDict([
+                    ('cross_packed_mask_dim0', [cross_packed_mask_dim0_range]),
+                    ('cross_packed_mask_dim1', [cross_packed_mask_dim1_range]),
+                ]),
+            )
+
+        # create the attention_mask_params.
+        attention_mask_params = AttentionMaskParams(
+            attention_mask, None, cross_attention_mask,
+            cross_attention_packed_mask)
 
         cache_indirection = Tensor(
             name='cache_indirection',
@@ -1608,14 +1590,15 @@ class T5TTSDecoderModel(PretrainedModel):
                                             dim_range=OrderedDict([('scalar',
                                                                     [1])]))
 
-
         kv_cache_block_offsets = None
         host_kv_cache_block_offsets = None
         host_kv_cache_pool_pointers = None
+        host_kv_cache_pool_mapping = None
 
         cross_kv_cache_block_offsets = None
         host_cross_kv_cache_block_offsets = None
         host_cross_kv_cache_pool_pointers = None
+        host_cross_kv_cache_pool_mapping = None
 
         if use_cache:
             if not paged_kv_cache:
@@ -1680,21 +1663,25 @@ class T5TTSDecoderModel(PretrainedModel):
                     x for x in max_cross_blocks_per_seq_range[0]
                 ]]
 
-                kv_cache_block_offsets = Tensor(name=f'kv_cache_block_offsets',
-                                                dtype=trt.int32,
-                                                shape=[-1, 2, -1],
-                                                dim_range=OrderedDict([
-                                                    ('batch_size_beam_width',
-                                                     [bb_range]),
-                                                    ('kv', [2]),
-                                                    ('max_blocks_per_seq',
-                                                     max_blocks_per_seq_range),
-                                                ]))
+                # TODO(oargov): add support for vgqa, meanwhile assume a single kv cache pool
+                num_kv_cache_pools = 1
+
+                kv_cache_block_offsets = Tensor(
+                    name=f'kv_cache_block_offsets',
+                    dtype=trt.int32,
+                    shape=[num_kv_cache_pools, -1, 2, -1],
+                    dim_range=OrderedDict([
+                        ('num_kv_cache_pools', [num_kv_cache_pools]),
+                        ('batch_size_beam_width', [bb_range]),
+                        ('kv', [2]),
+                        ('max_blocks_per_seq', max_blocks_per_seq_range),
+                    ]))
                 host_kv_cache_block_offsets = Tensor(
                     name=f'host_kv_cache_block_offsets',
                     dtype=trt.int32,
-                    shape=[-1, 2, -1],
+                    shape=[num_kv_cache_pools, -1, 2, -1],
                     dim_range=OrderedDict([
+                        ('num_kv_cache_pools', [num_kv_cache_pools]),
                         ('batch_size_beam_width', [bb_range]),
                         ('kv', [2]),
                         ('max_blocks_per_seq', max_blocks_per_seq_range),
@@ -1702,17 +1689,26 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_kv_cache_pool_pointers = Tensor(
                     name=f'host_kv_cache_pool_pointers',
                     dtype=trt.int64,
-                    shape=[2],
+                    shape=[num_kv_cache_pools, 2],
                     dim_range=OrderedDict([
-                        ('num_pools', [2]),
+                        ('num_pools_layers', [num_kv_cache_pools]),
+                        ('num_pools_kv', [2]),
+                    ]))
+                host_kv_cache_pool_mapping = Tensor(
+                    name=f"host_kv_cache_pool_mapping",
+                    dtype=trt.int32,
+                    shape=[num_pp_layers],
+                    dim_range=OrderedDict([
+                        ('pools_mapping', [num_pp_layers]),
                     ]))
 
                 # paged blocks for cross kv
                 cross_kv_cache_block_offsets = Tensor(
                     name=f'cross_kv_cache_block_offsets',
                     dtype=trt.int32,
-                    shape=[-1, 2, -1],
+                    shape=[num_kv_cache_pools, -1, 2, -1],
                     dim_range=OrderedDict([
+                        ('num_kv_cache_pools', [num_kv_cache_pools]),
                         ('batch_size_beam_width', [bb_range]),
                         ('kv', [2]),
                         ('max_cross_blocks_per_seq',
@@ -1721,8 +1717,9 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_cross_kv_cache_block_offsets = Tensor(
                     name=f'host_cross_kv_cache_block_offsets',
                     dtype=trt.int32,
-                    shape=[-1, 2, -1],
+                    shape=[num_kv_cache_pools, -1, 2, -1],
                     dim_range=OrderedDict([
+                        ('num_kv_cache_pools', [num_kv_cache_pools]),
                         ('batch_size_beam_width', [bb_range]),
                         ('kv', [2]),
                         ('max_cross_blocks_per_seq',
@@ -1731,9 +1728,17 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_cross_kv_cache_pool_pointers = Tensor(
                     name=f'host_cross_kv_cache_pool_pointers',
                     dtype=trt.int64,
-                    shape=[2],
+                    shape=[num_kv_cache_pools, 2],
                     dim_range=OrderedDict([
+                        ('num_kv_cache_pools', [num_kv_cache_pools]),
                         ('num_pools', [2]),
+                    ]))
+                host_cross_kv_cache_pool_mapping = Tensor(
+                    name=f"host_cross_kv_cache_pool_mapping",
+                    dtype=trt.int32,
+                    shape=[num_pp_layers],
+                    dim_range=OrderedDict([
+                        ('pools_mapping', [num_pp_layers]),
                     ]))
 
                 for i in layers_range:
@@ -1748,11 +1753,14 @@ class T5TTSDecoderModel(PretrainedModel):
                 kv_cache_block_offsets=kv_cache_block_offsets,
                 host_kv_cache_block_offsets=host_kv_cache_block_offsets,
                 host_kv_cache_pool_pointers=host_kv_cache_pool_pointers,
+                host_kv_cache_pool_mapping=host_kv_cache_pool_mapping,
                 cross_kv_cache_block_offsets=cross_kv_cache_block_offsets,
                 host_cross_kv_cache_block_offsets=
                 host_cross_kv_cache_block_offsets,
                 host_cross_kv_cache_pool_pointers=
                 host_cross_kv_cache_pool_pointers,
+                host_cross_kv_cache_pool_mapping=
+                host_cross_kv_cache_pool_mapping,
             )
 
             attention_params = AttentionParams(
@@ -1763,7 +1771,8 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_request_types=host_request_types,
                 encoder_input_lengths=encoder_input_lengths,
                 encoder_max_input_length=encoder_max_input_length,
-                host_runtime_perf_knobs=runtime_perf_knobs)
+                host_runtime_perf_knobs=runtime_perf_knobs,
+                host_context_progress=context_progress)
 
         cross_kv_cache_gen = Tensor(name='cross_kv_cache_gen',
                                     dtype=trt.bool,
@@ -1774,7 +1783,7 @@ class T5TTSDecoderModel(PretrainedModel):
         cross_kv_reuse = None
         num_heads = (self.num_heads + self.mapping.tp_size -
                      1) // self.mapping.tp_size
-        cross_kv_out_dim = num_heads * self.head_size + 2 * num_kv_heads * self.head_size
+        cross_kv_out_dim = 2 * num_kv_heads * self.head_size
         if self.skip_cross_kv:
             if remove_input_padding:
                 cross_kv_reuse = Tensor(
@@ -1783,7 +1792,7 @@ class T5TTSDecoderModel(PretrainedModel):
                     shape=[-1, cross_kv_out_dim],
                     dim_range=OrderedDict([
                         ("encoder_num_tokens", [encoder_num_tokens_range]),
-                        ("encoder_qkv_size", [cross_kv_out_dim]),
+                        ("encoder_kv_size", [cross_kv_out_dim]),
                     ]),
                 )
             else:
@@ -1794,30 +1803,26 @@ class T5TTSDecoderModel(PretrainedModel):
                     dim_range=OrderedDict([
                         ("batch_size_beam_width_encoder", [bb_range]),
                         ("encoder_input_len", [encoder_input_len_range]),
-                        ("encoder_qkv_size", [cross_kv_out_dim]),
+                        ("encoder_kv_size", [cross_kv_out_dim]),
                     ]),
                 )
 
         result = {
             'decoder_input_ids': input_ids,
             'encoder_output': encoder_output,
-            'position_ids': None,
+            'position_ids': position_ids,
             'token_type_ids': token_type_ids,
             'use_cache': True,
-            'attention_mask': attention_mask,
-            'cross_attention_mask': cross_attention_mask,
+            'attention_mask_params': attention_mask_params,
             'last_token_ids': last_token_ids,
             'kv_cache_params': kv_cache_params,
             'attention_params': attention_params,
             'hidden_states': hidden_states,
-            'lora_params': None,
             'cross_kv_cache_gen': cross_kv_cache_gen,
             'cross_kv_reuse': cross_kv_reuse,
         }
 
         return result
-
-
 
     def precompute_relative_attention_bias(self, build_config):
         if self.config.relative_attention and not self.use_implicit_relative_attention:
@@ -1842,4 +1847,3 @@ class T5TTSDecoderModel(PretrainedModel):
                 self.decoder_layers[
                     layer_idx].self_attention.set_rel_attn_table(
                         build_config.max_seq_len, rel_attn_precomputed)
-
