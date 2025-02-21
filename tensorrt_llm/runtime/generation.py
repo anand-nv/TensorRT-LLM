@@ -789,6 +789,7 @@ class GenerationSession(object):
                  stream: torch.cuda.Stream = None):
         assert isinstance(model_config, ModelConfig)
         self._model_config = model_config
+        print(f"{model_config}")
         self.mapping = mapping
         self.runtime = _Runtime(engine_buffer, mapping)
         if DISABLE_TORCH_DEVICE_SET:
@@ -1421,7 +1422,7 @@ class GenerationSession(object):
                                   dtype=torch.int32,
                                   device=self.device)
         max_context_length = host_context_lengths.max()
-
+        print(f"NOW: {input_ids.shape=}")
         # setup output ids buffer
         if input_ids.dim() == 1:
             # input_ids only have one dimension, which means remove_padding is enabled
@@ -1454,7 +1455,7 @@ class GenerationSession(object):
             self.output_ids = torch.cat(
                 (padded_input_ids,
                  torch.full(
-                     (batch_size, self.max_seq_length - max_context_length),
+                     (batch_size, 8, self.max_seq_length - max_context_length),
                      scfg.end_id,
                      dtype=padded_input_ids.dtype,
                      device=padded_input_ids.device)),
@@ -4531,3 +4532,565 @@ class QWenForCausalLMGenerationSession(GenerationSession):
             if runtime_rank == 0:
                 outputs = output_ids[:, 0, :]
                 return outputs
+
+class T5TTSGenerationSession(GenerationSession):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        engine_buffer,
+        mapping: Mapping,
+        debug_mode=False,
+        debug_tensors_to_save=None,
+        cuda_graph_mode=False,
+        stream: torch.cuda.Stream = None,
+    ):
+
+        super().__init__(
+            model_config,
+            engine_buffer,
+            mapping,
+            debug_mode,
+            debug_tensors_to_save,
+            cuda_graph_mode,
+            stream,
+        )
+
+        self.mask_index_tensor = None
+
+    @staticmethod
+    def _prepare_attention_mask(input_ids: torch.Tensor,
+                                pad_id: Optional[int] = None):
+        is_pad_id_in_inputs = (pad_id is not None) and (pad_id in input_ids)
+        print(f"{input_ids=}")
+        if input_ids is not None and is_pad_id_in_inputs:
+            mask = input_ids.ne(pad_id).int()
+            print("I SHOULD NOT BE HERE")
+            # for enc-dec models, pad_id could be the start token and should be always counted
+            # as valid token rather than padded token, so we force its mask to be 1.
+            # This doesn't impact the existing behavior
+            mask[:, 0] = 1
+            return mask
+        else:
+            return torch.ones([input_ids.shape[0],input_ids.shape[-1]],
+                              dtype=torch.int32,
+                              device=input_ids.device)
+
+    def _prepare_context_inputs(self, batch_size, context_lengths,
+                                host_context_lengths, use_gpt_attention_plugin,
+                                remove_input_padding, **kwargs):
+        last_token_ids = context_lengths.detach().clone()
+        if (self.is_medusa_mode
+                or self.is_redrafter_mode) and not remove_input_padding:
+            # For Medusa, last_token_ids should contain the actual indices
+            last_token_ids = last_token_ids - 1  # sub 1 from context_lengths for indices
+            last_token_ids = last_token_ids.reshape([batch_size, -1])
+        if (use_gpt_attention_plugin
+                or self.has_rnn_layers) and remove_input_padding:
+            last_token_ids = torch.cumsum(last_token_ids, dim=0).int()
+        ret = {'last_token_ids': last_token_ids}
+
+        if use_gpt_attention_plugin:
+            max_context_length = kwargs.pop('max_context_length')
+            if remove_input_padding:
+                position_ids = torch.concat([
+                    torch.arange(0,
+                                 host_context_lengths[i],
+                                 dtype=torch.int32,
+                                 device='cuda') for i in range(batch_size)
+                ])
+            else:
+                position_ids = torch.tensor(range(max_context_length),
+                                            dtype=torch.int32,
+                                            device='cuda').reshape(
+                                                [1,
+                                                 -1]).expand([batch_size, -1])
+
+            perf_knob_tensor_size = 16
+            context_runtime_perf_knobs = torch.tensor([-1] *
+                                                      perf_knob_tensor_size,
+                                                      dtype=torch.int64)
+            if self.multi_block_mode:
+                context_runtime_perf_knobs[0] = 1  # multi_block_mode
+            if self.enable_context_fmha_fp32_acc:
+                context_runtime_perf_knobs[
+                    1] = 1  # enable_context_fmha_fp32_acc
+            ret['host_runtime_perf_knobs'] = context_runtime_perf_knobs
+        else:
+            if self.has_attn_layers:
+                input_ids = kwargs.pop('input_ids')
+                pad_id = kwargs.pop('pad_id', None)
+                print(f"PAD {pad_id=}, {input_ids.shape=}")
+                attention_mask = self._prepare_attention_mask(input_ids, pad_id)
+                position_ids = attention_mask.long().cumsum(-1) - 1
+                position_ids.masked_fill_(attention_mask == 0, 1)
+                position_ids = position_ids.int()
+                ret['attention_mask'] = attention_mask
+
+        if self.has_position_embedding and self.has_attn_layers:
+            ret['position_ids'] = position_ids
+
+        if self.is_redrafter_mode:
+            self.buffer['position_ids_base'] = context_lengths.clone()
+            # NOTE: Generate random tensors using torch
+            redrafter_prepare_random_tensors(self, batch_size, initialize=True)
+
+        print(f"CONTEXT INPUTS {ret=}")
+        return ret
+
+
+    def handle_per_step(
+        self,
+        *,
+        cache_indirections: list,
+        step: int,
+        batch_size: int,
+        max_context_length: int,
+        beam_width: int,
+        input_ids: torch.Tensor,
+        hidden_states: torch.Tensor,
+        scfg: SamplingConfig,
+        kv_cache_block_offsets: torch.Tensor,
+        host_kv_cache_block_offsets: torch.Tensor,
+        cross_kv_cache_block_offsets: torch.Tensor,
+        host_cross_kv_cache_block_offsets: torch.Tensor,
+        prompt_embedding_table: torch.Tensor,
+        tasks: torch.Tensor,
+        context_lengths: torch.Tensor,
+        host_context_lengths,
+        attention_mask: torch.Tensor,
+        cross_attention_mask_for_context: torch.Tensor,
+        cross_attention_mask_for_gen: torch.Tensor,
+        prompt_vocab_size: torch.Tensor,
+        ite: int,
+        sequence_limit_lengths: torch.Tensor,
+        sequence_lengths: torch.Tensor,
+        next_step_tensors: Dict[str, RuntimeTensor],
+        stop_words_data,
+        bad_words_data,
+        encoder_output: torch.Tensor,
+        encoder_input_lengths: torch.Tensor,
+        stopping_criteria: StoppingCriteria,
+        logits_processor: LogitsProcessor,
+        **kwargs,
+    ):
+
+        print(f"handle_per_step {attention_mask=}")
+        if self.debug_mode:
+            print(
+                f"=================================== STEP {step} =================================="
+            )
+        if step % 2:
+            context = self.runtime.context_0
+            this_src_cache_indirection = cache_indirections[1]
+            this_tgt_cache_indirection = cache_indirections[0]
+            next_src_cache_indirection = cache_indirections[0]
+        else:
+            context = self.runtime.context_1
+            this_src_cache_indirection = cache_indirections[0]
+            this_tgt_cache_indirection = cache_indirections[1]
+            next_src_cache_indirection = cache_indirections[1]
+
+        position_ids_raw = kwargs.get('position_ids', None)
+        skip_cross_attn_blocks = kwargs.get('skip_cross_attn_blocks', None)
+        if step == 0:
+            model_inputs = self._prepare_context_inputs(
+                batch_size=batch_size,
+                context_lengths=context_lengths,
+                host_context_lengths=host_context_lengths,
+                use_gpt_attention_plugin=self.use_gpt_attention_plugin,
+                remove_input_padding=self.remove_input_padding,
+                max_context_length=max_context_length,
+                input_ids=input_ids,
+                pad_id=scfg.pad_id,
+                eos_id=scfg.end_id)
+
+            if position_ids_raw is None:
+                # default iota position ids
+                position_ids = model_inputs.get('position_ids', None)
+            else:
+                # user input position ids
+                if self.remove_input_padding:
+                    position_ids = torch.cat(position_ids_raw, dim=0)
+                else:
+                    padded_position_ids = torch.nn.utils.rnn.pad_sequence(
+                        position_ids_raw, batch_first=True, padding_value=0)
+                    position_ids = padded_position_ids
+            last_token_ids = model_inputs.get('last_token_ids')
+            attention_mask = model_inputs.get('attention_mask', None)
+            print(f"HEREI {last_token_ids.shape=}")
+            if attention_mask is not None:
+                print(f" {attention_mask.shape=}")
+            #print(f"2 {attention_mask=}, {attention_mask.shape=}")
+            context_runtime_perf_knobs = model_inputs.get(
+                'host_runtime_perf_knobs', None)
+            host_context_progress = torch.tensor([0], dtype=torch.int64)
+
+            if self.paged_kv_cache and self.has_attn_layers:
+                host_kv_cache_block_offsets = self.pools_kv_cache_manager.get_block_offsets(
+                    beam_width=1)
+                kv_cache_block_offsets = host_kv_cache_block_offsets.to('cuda')
+                if self.cross_attention:
+                    host_cross_kv_cache_block_offsets = self.cross_pools_kv_cache_manager.get_block_offsets(
+                        beam_width=1)
+                    cross_kv_cache_block_offsets = host_cross_kv_cache_block_offsets.to(
+                        'cuda')
+
+            ctx_tensors = self._get_context_shape_buffer(
+                input_ids,
+                context_lengths,
+                host_context_lengths,
+                position_ids,
+                last_token_ids,
+                attention_mask,
+                cross_attention_mask_for_context,
+                this_src_cache_indirection,
+                kv_cache_block_offsets,
+                host_kv_cache_block_offsets,
+                cross_kv_cache_block_offsets,
+                host_cross_kv_cache_block_offsets,
+                hidden_states,
+                prompt_embedding_table,
+                tasks,
+                prompt_vocab_size,
+                encoder_output,
+                encoder_input_lengths,
+                host_runtime_perf_knobs=context_runtime_perf_knobs,
+                host_context_progress=host_context_progress,
+                skip_cross_attn_blocks=skip_cross_attn_blocks,
+            )
+
+            print(f"HERE {position_ids=}, {position_ids.shape=}")
+            print(f"{attention_mask=}, {attention_mask.shape=}, {input_ids.shape=}")
+
+            context = self.runtime.ctx_context
+            self.runtime._set_tensors(context, ctx_tensors)
+            if self.debug_mode:
+                self.debug_buffer = {
+                    name: tensor.to_torch()
+                    for name, tensor in ctx_tensors.items()
+                }
+            if self.cuda_graph_mode:
+                # context mode, clean cuda graph instances
+                self.runtime.cuda_graph_instances = [None for _ in range(2)]
+
+        if self.debug_mode and False:  # TODO: after TRT bug is fixed
+            self.runtime._check_tensors(context)
+        # dynamic_decoder currently use torch's current stream, so must let TRT enqueue use same stream here
+        stream = torch.cuda.current_stream().cuda_stream
+        instance_idx = step % 2
+        if self.cuda_graph_mode and self.runtime.cuda_graph_instances[
+                instance_idx] is not None:
+            # launch cuda graph
+            CUASSERT(
+                cudart.cudaGraphLaunch(
+                    self.runtime.cuda_graph_instances[instance_idx], stream))
+            ok = True
+        else:
+            print(f"{context=}, {stream=}")
+            ok = self.runtime._run(context, stream)
+
+        if not ok:
+            raise RuntimeError(f"Executing TRT engine failed step={step}!")
+
+        # TODO: remove this Windows WAR after https://nvbugs/4460474 is fixed.
+        if platform.system() == "Windows" or self.debug_mode:
+            torch.cuda.synchronize()
+
+        context_logits = None
+        if self.mapping.is_last_pp_rank():
+            if step == 0 and self.gather_context_logits:
+                assert not self.is_medusa_mode and not self.is_redrafter_mode
+                context_logits = self.buffer['logits'].detach().clone()
+                # gather last token of context
+                if self.remove_input_padding:
+                    # reshape self.buffer['logits'] from [bs, max_context_length, vocab]
+                    # to [1, bs * max_context_length, vocab]
+                    # Note that the data are put in the buffer without padding although
+                    # the allocated buffer has padding.
+                    self.buffer['logits'] = self.buffer['logits'].reshape(
+                        [1, -1, self.vocab_size_padded])
+                    self.buffer['logits'] = torch.index_select(
+                        self.buffer['logits'], 1,
+                        last_token_ids - 1).view(batch_size,
+                                                 self.vocab_size_padded)
+                else:
+                    last_token_ids = last_token_ids.reshape(batch_size, 1, 1)
+                    last_token_ids = last_token_ids.expand(
+                        batch_size, 1, self.vocab_size_padded) - 1
+                    self.buffer['logits'] = torch.gather(
+                        self.buffer['logits'],
+                        dim=1,
+                        index=last_token_ids.to(dtype=torch.int64)).view(
+                            batch_size, self.vocab_size_padded)
+
+        if step == 0 and beam_width > 1:
+            assert not self.is_medusa_mode and not self.is_redrafter_mode
+            assert not self.has_rnn_layers
+            # these tiled tensors are returned by handle_per_step(), so they can relay to the next generation calls
+            if not self.use_gpt_attention_plugin:
+                attention_mask = _tile_beam_width(attention_mask, beam_width)
+            context_lengths = _tile_beam_width(context_lengths, beam_width)
+            host_context_lengths = _tile_beam_width(host_context_lengths,
+                                                    beam_width)
+            if encoder_input_lengths is not None:
+                encoder_input_lengths = _tile_beam_width(
+                    encoder_input_lengths, beam_width)
+
+            if tasks is not None:
+                tasks = _tile_beam_width(tasks, beam_width)
+
+            # Move tiling before logit computing of context
+            if not self.paged_kv_cache:
+                for key in self.buffer:
+                    # Note: this tiles both self attn cache and cross attn
+                    # cache! both names contain "present_key_value"
+                    if "present_key_value" in key:
+                        if self.use_gpt_attention_plugin:
+                            self.buffer[key] = _tile_beam_width(
+                                self.buffer[key], beam_width)
+                        else:
+                            # In the OOTB path, KV cache should be contiguously
+                            # tiled since TRT engine allocates past_kv cache of
+                            # length context_length, i.e., we need a buffer of
+                            # shape (batch * beam, 2, heads, context_length, head_size).
+                            b, _, h, _, d = self.buffer[key].shape
+                            numel = 2 * b * h * (max_context_length + step) * d
+                            self.buffer[key] = _contiguous_tile_beam_width(
+                                self.buffer[key], numel, beam_width)
+
+            if self.mapping.is_last_pp_rank():
+                self.buffer['logits'] = _tile_beam_width(
+                    self.buffer['logits'], beam_width)
+
+        generation_logits = None
+        if self.mapping.is_last_pp_rank():
+            if self.gather_generation_logits:
+                generation_logits = self.buffer['logits'].detach().clone()
+
+        # Initialize sequence_lengths (no paddings) for the generation phase.
+        if step == 0 and not self.is_medusa_mode and not self.is_redrafter_mode:  # Medusa/ReDrafter has its own logic
+            self.sequence_length_buffer = context_lengths.detach().clone()
+
+        if self.is_redrafter_mode:
+            # to simplify some processing logic, always swap buffers after execution
+            exchange_redrafter_buffers(self)
+
+        # NOTE: handle next step.
+        if not step == self.max_new_tokens - 1:
+            # Set shape and address for the next step
+            model_inputs = self._prepare_generation_inputs(
+                batch_size=batch_size,
+                context_lengths=context_lengths,
+                use_gpt_attention_plugin=self.use_gpt_attention_plugin,
+                remove_input_padding=self.remove_input_padding,
+                step=step,
+                num_beams=beam_width,
+                attention_mask=attention_mask,
+            )
+
+            if position_ids_raw is None:
+                position_ids = model_inputs.get('position_ids', None)
+            else:
+                position_ids = torch.cat(
+                    [p[-1:] + step + 1 for p in position_ids_raw], dim=0)
+                if not self.remove_input_padding:
+                    position_ids = torch.unsqueeze(position_ids, 1)
+            last_token_ids = model_inputs.get('last_token_ids')
+            attention_mask = model_inputs.get('attention_mask', None)
+            gen_runtime_perf_knobs = model_inputs.get('host_runtime_perf_knobs',
+                                                      None)
+            host_context_progress = torch.tensor([0], dtype=torch.int64)
+
+            # Prepare for the next step, and always allocate 1 token slot.
+            if self.paged_kv_cache and self.has_attn_layers:
+                # Iterate to the next step in KV cache manager.
+                # Increase number of tokens for all unfinished sequences.
+                # And allocate new blocks if needed.
+                # We set this to False for all sequences, since we use only length criterion to stop now
+                # OPTIMIZE: find a better of adding multiple tokens for paged kv cache.
+                torch.cuda.nvtx.range_push("paged_kv_alloc")
+                if self.is_redrafter_mode and self.max_draft_tokens > 0:
+                    add_token_count = (self.max_draft_tokens +
+                                       1) * 2 if step == 0 else torch.max(
+                                           self.accept_lengths).item()
+                    assert add_token_count > 0
+                    for _ in range(add_token_count):
+                        self.pools_kv_cache_manager.step([False] * batch_size)
+                if self.is_medusa_mode and self.num_draft_tokens > 0:
+                    # Allocate kv cache token slots for next step.
+                    # Make sure there are always > (num_draft_tokens + 1) free token slots.
+                    # Allocate (num_draft_tokens + 1) * 2 for safety as we don't know the current step or next step's accepted lengths.
+                    add_token_count = (self.num_draft_tokens +
+                                       1) * 2 if step == 0 else torch.max(
+                                           self.accept_lengths).item()
+                    assert add_token_count > 0
+                    for _ in range(add_token_count):
+                        self.pools_kv_cache_manager.step([False] * batch_size)
+                else:
+                    self.pools_kv_cache_manager.step([False] * batch_size)
+                torch.cuda.nvtx.range_pop()
+                torch.cuda.nvtx.range_push("paged_kv_post_alloc")
+                host_kv_cache_block_offsets = self.pools_kv_cache_manager.get_block_offsets(
+                    beam_width)
+                kv_cache_block_offsets = host_kv_cache_block_offsets.to('cuda')
+                if self.cross_attention:
+                    host_cross_kv_cache_block_offsets = self.cross_pools_kv_cache_manager.get_block_offsets(
+                        beam_width)
+                    cross_kv_cache_block_offsets = host_cross_kv_cache_block_offsets.to(
+                        'cuda')
+                torch.cuda.nvtx.range_pop()
+
+            next_context = self.runtime.context_1 if step % 2 else self.runtime.context_0
+            cross_attention_mask_step = None
+            if cross_attention_mask_for_gen is not None:
+                # cross_attention_mask_for_gen shape [batch_size, max_output_length, max_encoder_input_length]
+                decode_step = step
+                if decode_step == 0:
+                    decode_step += 1
+                if self.use_gpt_attention_plugin:
+                    cross_attention_mask_step = cross_attention_mask_for_gen[:, (
+                        decode_step - 1), :]
+                else:
+                    cross_attention_mask_step = cross_attention_mask_for_gen[:, (
+                        decode_step - 1):decode_step, :]
+            next_step_tensors = self._get_next_step_shape_buffer(
+                batch_size,
+                beam_width,
+                max_context_length,
+                step,
+                context_lengths,
+                host_context_lengths,
+                position_ids,
+                last_token_ids,
+                attention_mask,
+                cross_attention_mask_step,
+                next_src_cache_indirection,
+                kv_cache_block_offsets,
+                host_kv_cache_block_offsets,
+                cross_kv_cache_block_offsets,
+                host_cross_kv_cache_block_offsets,
+                hidden_states,
+                prompt_embedding_table,
+                tasks,
+                prompt_vocab_size,
+                encoder_output,
+                encoder_input_lengths,
+                host_runtime_perf_knobs=gen_runtime_perf_knobs,
+                host_context_progress=host_context_progress,
+                skip_cross_attn_blocks=skip_cross_attn_blocks,
+            )
+
+            # there are some tensors created inside the _get_next_step_shape_buffer, not owned by any object
+            # needs to pro-long the life time of the tensors inside the next_step_tensors array
+            # otherwise, it maybe released before the next step actually enqueued
+            # one way to prolong it is to return the list, and destroy it in next step by assigning new values
+            torch.cuda.nvtx.range_push("_set_tensors")
+            self.runtime._set_tensors(next_context, next_step_tensors)
+            torch.cuda.nvtx.range_pop()
+
+            if self.cuda_graph_mode:
+                self._capture_cuda_graph_and_instantiate(
+                    next_context, stream, step)
+
+        should_stop = None
+        logits = None
+        if self.mapping.is_last_pp_rank():
+            logits = self.buffer['logits']
+            if self.is_redrafter_mode:
+                should_stop = self.process_logits_including_draft(
+                    step, batch_size, logits, next_step_tensors)
+            elif logits is not None:
+                if self.is_medusa_mode:
+                    should_stop = self.process_logits_including_draft(
+                        step, batch_size, logits, next_step_tensors)
+                else:
+                    if logits_processor is not None:
+                        final_output_ids = self.finalize_decoder(
+                            context_lengths,
+                            batch_size,
+                            beam_width,
+                            scfg,
+                            in_progress=True)
+                        # keep the shape as same as huggingface stopping_criteria
+                        final_output_ids_ = final_output_ids.reshape(
+                            -1, final_output_ids.size(-1))
+                        logits = logits_processor(step, final_output_ids_,
+                                                  logits)
+                        self.buffer['logits'] = logits
+                    # [batch_size x beam_width, vocab_size_padded] -> [batch_size, beam_width, vocab_size_padded]
+                    next_token_logits = logits.reshape(
+                        (batch_size, beam_width,
+                         -1)).to(self.decoder_logits_dtype)
+                    decode_step = step + max_context_length
+
+                    stop_words_list_ptrs, stop_words_lens, max_stop_words_len = stop_words_data
+                    bad_words_list_ptrs, bad_words_lens, max_bad_words_len = bad_words_data
+
+                    should_stop = self.dynamic_decoder.forward(
+                        next_token_logits, decode_step, max_context_length,
+                        self.max_attention_window_size, self.sink_token_length,
+                        ite, batch_size, self.end_ids, self.embedding_bias_opt,
+                        context_lengths, sequence_limit_lengths,
+                        stop_words_list_ptrs, stop_words_lens,
+                        max_stop_words_len, bad_words_list_ptrs, bad_words_lens,
+                        max_bad_words_len, this_src_cache_indirection,
+                        self.output_ids, self.new_tokens, self.finished,
+                        self.finished, self.sequence_length_buffer,
+                        self.cum_log_probs, self.log_probs,
+                        self.log_probs_tiled, self.parent_ids,
+                        this_tgt_cache_indirection,
+                        self.beam_hyps_output_ids_cba,
+                        self.beam_hyps_seq_len_cba,
+                        self.beam_hyps_cum_log_probs_cba,
+                        self.beam_hyps_normed_scores_cba,
+                        self.beam_hyps_log_probs_cba,
+                        self.beam_hyps_min_normed_scores,
+                        self.beam_hyps_num_beams, self.beam_hyps_is_done,
+                        scfg.use_beam_hyps)
+
+                    if not self.use_gpt_attention_plugin:
+                        self.reorder_kv_cache_for_beam_search(
+                            batch_size, beam_width, max_context_length, step)
+
+                    if stopping_criteria is not None and not should_stop.item():
+                        final_output_ids = self.finalize_decoder(
+                            context_lengths,
+                            batch_size,
+                            beam_width,
+                            scfg,
+                            in_progress=True)
+                        # keep the shape as same as huggingface stopping_criteria
+                        final_output_ids_ = final_output_ids.reshape(
+                            -1, final_output_ids.size(-1))
+                        should_stop[0] = stopping_criteria(
+                            step, final_output_ids_, logits)
+
+        if self.runtime._is_profiling():
+            if not context.report_to_profiler():
+                logger.warning("Runtime report to profiler failed.")
+            self.runtime._insert_step_to_profiler(step)
+
+        if self.mapping.has_pp():
+            should_stop = self.pp_communicate_new_tokens(
+                should_stop, this_tgt_cache_indirection,
+                self.sequence_length_buffer)
+
+        if self.paged_kv_cache and self.has_attn_layers:
+            if (step >= self.max_new_tokens - 1) or (should_stop is not None
+                                                     and should_stop.item()):
+                # Free all blocks in all sequences.
+                # With in-flight batching and while loop we'll free some sequences, when they are done
+                self.pools_kv_cache_manager.step([True] * batch_size)
+                if self.cross_attention:
+                    self.cross_pools_kv_cache_manager.step([True] * batch_size)
+
+        if self.debug_mode:
+            self.dump_debug_buffers(step)
+
+            if next_step_tensors is not None:
+                self.debug_buffer = {
+                    name: tensor.to_torch()
+                    for name, tensor in next_step_tensors.items()
+                }
+
+        return should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, context_logits, generation_logits, encoder_input_lengths

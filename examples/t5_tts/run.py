@@ -14,6 +14,7 @@
 # limitations under the License.
 import argparse
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -37,8 +38,28 @@ from tensorrt_llm.runtime import EncDecModelRunner
 from collections import OrderedDict
 
 
-decoder_input_ids=[]
-encoder_input_ids=[]
+from omegaconf.omegaconf import OmegaConf, open_dict
+
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--log_level', type=str, default='warning')
+    parser.add_argument('--engine_dir', type=str, default='engines')
+    parser.add_argument('--input_file', type=str, default=None)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--num_beams', type=int, default=1)
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--enable_warmup', action='store_true')
+    parser.add_argument('--dtype',
+                        type=str,
+                        default='float32',
+                        choices=['float32'])
+    parser.add_argument('--use_py_session',
+                        action='store_true',
+                        help="use python session or cpp session")
+
+    return parser.parse_args()
 
 def read_config(component, engine_dir):
     config_path = engine_dir / component / 'config.json'
@@ -84,23 +105,48 @@ def remove_tensor_padding(input_tensor, input_tensor_lengths=None, pad_value=0):
 
     return output_tensor
 
+class T5Encoding:
+    def __init__(self, engine_dir, txt_tokenizer, text_num_tokens=106339, num_audio_tokens_per_codebook=2048,
+                 debug_mode=False):
+        self.tokenizer = txt_tokenizer
+        self.decoder_config = read_config('decoder', engine_dir)
+        self.text_bos=text_num_tokens-2
+        self.text_eos=text_num_tokens-1
+
+        self.context_bos=num_audio_tokens_per_codebook-4
+        self.context_eos=num_audio_tokens_per_codebook-3
+
+    def get_session(self, engine_dir):
+        serialize_path = engine_dir / 'encoder' / 'rank0.engine'
+        with open(serialize_path, 'rb') as f:
+            session = Session.from_serialized_engine(f.read())
+        return session
+
+    def get_text_features(self, text, text_lengths):
+        pass
+
+    def infer(self,input, input_mask, input_lengths):
+        pass
+
+
 
 class T5Decoding:
-    def __init__(self, engine_dir, runtime_mapping, tokenizer, debug_mode=False):
-        self.tokenizer = tokenizer
+    def __init__(self, engine_dir, runtime_mapping, text_num_tokens=106339,
+                 num_audio_tokens_per_codebook=2048, debug_mode=False):
+        self.tokenizer = None
         self.decoder_config = read_config('decoder', engine_dir)
         self.decoder_generation_session = self.get_session(
             engine_dir, runtime_mapping, debug_mode)
         self.dtype=str_dtype_to_torch(self.decoder_config['dtype'])
         self.pad_id=0
-        self.audio_bos=2046
-        self.audio_eos=2047
-        self.context_bos=2044
-        self.context_eos=2045
-        self.text_bos=106337
-        self.text_eos=106338
+        self.audio_bos=num_audio_tokens_per_codebook-2
+        self.audio_eos=num_audio_tokens_per_codebook-1
+        self.context_bos=num_audio_tokens_per_codebook-4
+        self.context_eos=num_audio_tokens_per_codebook-3
+        self.text_bos=text_num_tokens-2
+        self.text_eos=text_num_tokens-1
 
-       
+
     @staticmethod
     def get_x_attention_mask(lens, max_length):
         batch_size = lens.shape[0]
@@ -133,7 +179,7 @@ class T5Decoding:
             dtype=self.decoder_config['dtype'],
             has_token_type_embedding=False,
         )
-        decoder_generation_session = tensorrt_llm.runtime.GenerationSession(
+        decoder_generation_session = tensorrt_llm.runtime.T5TTSGenerationSession(
             decoder_model_config,
             decoder_engine_buffer,
             runtime_mapping,
@@ -141,37 +187,109 @@ class T5Decoding:
 
         return decoder_generation_session
 
-    def generate(self,
+    def generate2(self,
                  decoder_input_ids,
                  encoder_outputs,
                  encoder_max_input_length,
                  encoder_input_lengths,
+                 eot_id,
                  max_new_tokens=40,
                  num_beams=1):
-        encoder_outputs = encoder_outputs.to(dtype=self.dtype)
-
-        decoder_input_lengths = torch.tensor(
-            [decoder_input_ids.shape[-1] for _ in range(decoder_input_ids.shape[0])], dtype=torch.int32, device='cuda'
-        )
+        batch_size = decoder_input_ids.shape[0]
+        decoder_input_lengths = torch.tensor([
+            decoder_input_ids.shape[-1]
+            for _ in range(decoder_input_ids.shape[0])
+        ],
+                                             dtype=torch.int32,
+                                             device='cuda')
         decoder_max_input_length = torch.max(decoder_input_lengths).item()
 
-        cross_attention_mask = torch.ones([encoder_outputs.shape[0], 1, encoder_outputs.shape[1]]).int().cuda()
-
+        cross_attention_mask = torch.ones([
+            batch_size, decoder_max_input_length + max_new_tokens,
+            encoder_max_input_length
+        ]).int().cuda()
         # generation config
-        sampling_config = SamplingConfig(
-            end_id=self.tokenizer.eos_id, pad_id=self.tokenizer.pad_id, num_beams=num_beams
-        )
+        sampling_config = SamplingConfig(end_id=eot_id,
+                                         pad_id=eot_id,
+                                         num_beams=num_beams)
         self.decoder_generation_session.setup(
             decoder_input_lengths.size(0),
             decoder_max_input_length,
             max_new_tokens,
             beam_width=num_beams,
-            encoder_max_input_length=encoder_outputs.shape[1],
-        )
+            encoder_max_input_length=encoder_max_input_length)
 
         torch.cuda.synchronize()
 
         decoder_input_ids = decoder_input_ids.type(torch.int32).cuda()
+        if self.decoder_config['plugin_config']['remove_input_padding']:
+            # 50256 is the index of <pad> for all whisper models' decoder
+            WHISPER_PAD_TOKEN_ID = 50256
+            decoder_input_ids = remove_tensor_padding(
+                decoder_input_ids, pad_value=WHISPER_PAD_TOKEN_ID)
+            if encoder_outputs.dim() == 3:
+                encoder_output_lens = torch.full((encoder_outputs.shape[0], ),
+                                                 encoder_outputs.shape[1],
+                                                 dtype=torch.int32,
+                                                 device='cuda')
+
+                encoder_outputs = remove_tensor_padding(encoder_outputs,
+                                                        encoder_output_lens)
+        output_ids = self.decoder_generation_session.decode(
+            decoder_input_ids,
+            decoder_input_lengths,
+            sampling_config,
+            encoder_output=encoder_outputs,
+            encoder_input_lengths=encoder_input_lengths,
+            cross_attention_mask=cross_attention_mask,
+        )
+        torch.cuda.synchronize()
+
+        # get the list of int from output_ids tensor
+        output_ids = output_ids.cpu().numpy().tolist()
+        return output_ids
+
+
+    def generate(self,
+                 decoder_input_ids,
+                 encoder_outputs,
+                 encoder_max_input_length,
+                 encoder_input_lengths,
+                 additional_decoder_input,
+                 additional_decoder_mask,
+                 max_new_tokens=8,
+                 num_beams=1):
+        encoder_outputs = encoder_outputs.to(dtype=self.dtype)
+        batch_size = decoder_input_ids.shape[0]
+        decoder_input_lengths = torch.tensor(
+            [decoder_input_ids.shape[-1] for _ in range(batch_size)], dtype=torch.int32, device='cuda'
+        )
+        decoder_max_input_length = torch.max(decoder_input_lengths).item()
+        cross_attention_mask = torch.ones([encoder_outputs.shape[0], 1, encoder_outputs.shape[1]]).int().cuda()
+        cross_attention_mask = torch.ones([
+            batch_size, decoder_max_input_length + max_new_tokens,
+            encoder_max_input_length
+        ]).int().cuda()
+        print(f"{cross_attention_mask.size()=}")
+        # generation config
+        sampling_config = SamplingConfig(
+            end_id=self.audio_eos, pad_id=self.audio_eos, num_beams=num_beams
+        )
+
+        self.decoder_generation_session.setup(
+            decoder_input_lengths.size(0),
+            decoder_max_input_length,
+            max_new_tokens,
+            beam_width=num_beams,
+            encoder_max_input_length=encoder_max_input_length)
+
+        torch.cuda.synchronize()
+
+        decoder_input_ids = decoder_input_ids.type(torch.int32).cuda()
+        print(f"{decoder_input_ids.size()=}")
+        attention_mask = torch.ones([decoder_input_ids.shape[0], 1]).int().cuda()
+       # print(f"{attention_mask.size()=}")
+
         if self.decoder_config['plugin_config']['remove_input_padding']:
             decoder_input_ids = remove_tensor_padding(
                 decoder_input_ids, pad_value=self.tokenizer.pad_id)
@@ -190,10 +308,140 @@ class T5Decoding:
             sampling_config,
             encoder_output=encoder_outputs,
             encoder_input_lengths=encoder_input_lengths,
+            positions_ids=None,
             cross_attention_mask=cross_attention_mask,
+            #attention_mask=attention_mask,
         )
         torch.cuda.synchronize()
 
         # get the list of int from output_ids tensor
         output_ids = output_ids.cpu().numpy().tolist()
         return output_ids
+
+class TextTokenizer():
+    def __init__(self):
+        pass
+
+class AudioTokenizer():
+    def __init__(self):
+        pass
+
+class ContextTokenizer():
+    def __init__(self):
+        pass
+
+class T5TTS():
+    def __init__(self,
+                 engine_dir,
+                 text_num_tokens=106339,
+                 num_audio_tokens_per_codebook=2048,
+                 debug_mode=False,
+                 device="cuda:0",
+                 num_beams=1,
+                 batch_size=1,
+                 use_py_session=True):
+        self.device = device
+        world_size = 1
+        runtime_rank = tensorrt_llm.mpi_rank()
+        runtime_mapping = tensorrt_llm.Mapping(world_size, runtime_rank)
+        torch.cuda.set_device(runtime_rank % runtime_mapping.gpus_per_node)
+        engine_dir = Path(engine_dir)
+        encoder_config = read_config('encoder', engine_dir)
+        self.decoder_config = read_config('decoder', engine_dir)
+        self.text_tokenizer = TextTokenizer()
+        self.audio_tokenizer = AudioTokenizer()
+        self.context_tokenizer = ContextTokenizer()
+        self.model_type =  'decoder_context_tts'
+
+        self.bos_id = text_num_tokens - 2
+        self.eos_id = text_num_tokens - 1
+
+        self.audio_bos_id = num_audio_tokens_per_codebook - 2
+        self.audio_eos_id = num_audio_tokens_per_codebook - 1
+
+        # For model_type == 'decoder_context_tts'
+        self.context_audio_bos_id = num_audio_tokens_per_codebook - 4
+        self.context_audio_eos_id = num_audio_tokens_per_codebook- 3
+
+        #self.encoder = T5Encoding(engine_dir, encoder_config)
+        self.decoder = T5Decoding(engine_dir,  runtime_mapping=runtime_mapping)
+
+
+
+
+    def get_decoder_context_tensors(self, data="batch_decoder_io.pt"):
+        return torch.load(data)
+
+    @staticmethod
+    def prepare_dummy_cond_for_cfg(cond, cond_mask, additional_decoder_input, additional_dec_mask):
+        dummy_additional_decoder_input = None
+        dummy_additional_dec_mask = None
+        if additional_decoder_input is not None:
+            dummy_additional_decoder_input = torch.zeros_like(additional_decoder_input)
+            # all ones mask means dont ignore any timesteps (so that it is consistent with usual decoder mask)
+            dummy_additional_dec_mask = torch.ones_like(additional_dec_mask)
+
+        if isinstance(cond, list):
+            # multi encoder conditioning
+            dummy_cond = [torch.zeros_like(cond_item) for cond_item in cond]
+            attn_prior = [None for _ in cond]
+            dummy_mask = []
+            for mask_item in cond_mask:
+                # ignore all timesteps except the first one
+                mask = torch.zeros_like(mask_item)
+                mask[:, 0] = 1  # Make first timestep all zeros
+                dummy_mask.append(mask)
+
+        elif isinstance(cond, torch.Tensor):
+            # single encoder conditioning
+            dummy_cond = torch.zeros_like(cond)
+            dummy_mask = torch.zeros_like(cond_mask)
+            dummy_mask[:, 0] = 1  # ignore all timesteps except the first one
+            attn_prior = None
+        else:
+            raise ValueError(f"Unsupported type for cond {type(cond)}")
+
+        return dummy_cond, dummy_mask, dummy_additional_decoder_input, dummy_additional_dec_mask, attn_prior
+
+    def infer(self, context_tensors, max_new_tokens=3, encoder_max_input_length=128, num_beams=3):
+
+        audio_codes_bos=torch.full((1, 8, 1), self.audio_bos_id).long()
+        decoder_input_ids = audio_codes_bos
+        batch_size = decoder_input_ids.shape[0]
+
+        encoder_input_ids = context_tensors['cond']
+        encoder_input_mask = context_tensors['cond_mask']
+        additional_decoder_input = context_tensors['additional_decoder_input']
+        additional_decoder_mask = context_tensors['additional_decoder_mask']
+        encoder_input_lengths=torch.IntTensor([encoder_input_mask.size(-1) for b in range(batch_size)] )
+        print(f"{encoder_input_lengths=}")
+
+        encoder_max_input_length = torch.max(encoder_input_lengths).item()
+
+        return  self.decoder.generate(decoder_input_ids=decoder_input_ids,
+                              encoder_outputs=encoder_input_ids,
+                              encoder_max_input_length=encoder_max_input_length,
+                              encoder_input_lengths=encoder_input_lengths,
+                              additional_decoder_input=additional_decoder_input,
+                              additional_decoder_mask=additional_decoder_mask)
+
+
+
+
+
+def infer_audio(model,data):
+    context_tensors=torch.load(data)
+    audio_ids = model.infer(context_tensors)
+    return audio_ids
+
+
+
+if __name__ == '__main__':
+    args = parse_arguments()
+    tensorrt_llm.logger.set_level(args.log_level)
+    model = T5TTS(engine_dir=args.engine_dir, debug_mode=args.debug,
+                  batch_size=args.batch_size, use_py_session=args.use_py_session,
+                  num_beams=args.num_beams)
+
+    output_ids = infer_audio( model, args.input_file)
+    print(f"{output_ids=}")

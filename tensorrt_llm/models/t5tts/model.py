@@ -25,7 +25,7 @@ from tensorrt_llm.functional import (LayerNormPositionType, LayerNormType,
                                      MLPType, PositionEmbeddingType, Tensor,
                                      assertion, cast, gather_last_token_logits,
                                      gelu, maximum, minimum, recv, send, shape,
-                                     transpose, unsqueeze, ACT2FN, squeeze, select, concat, arange)
+                                     transpose, unsqueeze, ACT2FN, squeeze, select, concat, arange, view)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
@@ -577,14 +577,14 @@ class T5TTSDecoderLayer(Module):
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask_params.cross_attention_mask,
-            attention_packed_mask=attention_mask_params.
-            cross_attention_packed_mask,
+            attention_packed_mask=attention_mask_params.cross_attention_packed_mask,
             encoder_output=encoder_output,
             use_cache=use_cache,
             kv_cache_params=kv_cache_params,
             attention_params=attention_params,
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
+        print(f"{attention_output=}, {attention_mask_params.cross_attention_mask.shape=}")
 
         if use_cache:
             attention_output, presents_cross = attention_output
@@ -1007,6 +1007,9 @@ class T5TTSDecoderModel(PretrainedModel):
         self.num_heads = self.config.num_attention_heads
 
         self.num_audio_codebooks = self.config.num_audio_codebooks
+        self.num_audio_tokens_per_codebook = self.config.num_audio_tokens_per_codebook
+        self.audio_embedding_dim = self.config.audio_embedding_dim
+
         num_kv_heads = self.num_heads
         if num_kv_heads is None or num_kv_heads <= 0:
             num_kv_heads = self.num_heads
@@ -1040,7 +1043,7 @@ class T5TTSDecoderModel(PretrainedModel):
 
         if self.mapping.is_first_pp_rank():
             audio_emb_range = range(self.num_audio_codebooks)
-            self.audio_embeddings = ModuleList([Embedding(2048,768) for idx in audio_emb_range])
+            self.audio_embeddings = ModuleList([Embedding(self.num_audio_tokens_per_codebook, self.audio_embedding_dim) for idx in audio_emb_range])
 
             self.embedding = PositionalEmbedding(
                 hidden_size=self.config.hidden_size,
@@ -1123,6 +1126,9 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('has_encoder_input_layernorm', True)
         config.set_if_not_exist('has_model_final_layernorm', False)
         config.set_if_not_exist('num_audio_codebooks', 8)
+        config.set_if_not_exist('num_audio_tokens_per_codebook', 2048)
+        config.set_if_not_exist('audio_embedding_dim', 768)
+
 
         config.set_if_not_exist('encoder_hidden_size', None)
         config.set_if_not_exist('encoder_num_heads', None)
@@ -1245,6 +1251,10 @@ class T5TTSDecoderModel(PretrainedModel):
 
             # [bs, hidden_size] -> [bs, vocab_size]
             lm_logits = self.lm_head(hidden_states)
+            print(f"{lm_logits.shape=}")
+            lm_logits=lm_logits.view([0,self.num_audio_tokens_per_codebook,self.num_audio_codebooks], zero_is_placeholder=True).permute([0,2,1])
+            print(f"{lm_logits.shape=}")
+
             lm_logits.mark_output('logits', self._logits_dtype)
         else:
             hidden_states = send(hidden_states, self.mapping.next_pp_rank())
@@ -1271,7 +1281,7 @@ class T5TTSDecoderModel(PretrainedModel):
         #print(f"A {audio_tokens.shape=}")
         #d = index_select(audio_tokens,1,[-1,0,-1])
         d=select(audio_tokens,1,1)
-        #print(f"H {d=}")
+        print(f"H {d=}")
         audio_embedding = self.audio_embeddings[0](d)
         for c in range(1,audio_tokens.size(1)):
             d = select(audio_tokens, 1, c)
@@ -1374,10 +1384,11 @@ class T5TTSDecoderModel(PretrainedModel):
             if self.mapping.is_first_pp_rank():
                 input_ids = Tensor(name='input_ids',
                                    dtype=trt.int32,
-                                   shape=[-1],
+                                   shape=[-1,self.num_audio_codebooks],
                                    dim_range=OrderedDict([
-                                       ('decoder_num_tokens',
-                                        [decoder_num_tokens_range]),
+                                       ('decoder_num_tokens', [decoder_num_tokens_range]),
+                                       ('num_audio_codebooks', [self.num_audio_codebooks]),
+
                                    ]))
                 if self.has_position_embedding:
                     position_ids = Tensor(name='position_ids',

@@ -15,6 +15,7 @@
 from .enc_dec_model_runner import EncDecModelRunner
 from .generation import SamplingConfig  # autoflake: skip
 from .generation import (ChatGLMGenerationSession, GenerationSession,
+                         T5TTSGenerationSession,
                          LogitsProcessor, LogitsProcessorList, ModelConfig,
                          QWenForCausalLMGenerationSession, StoppingCriteria,
                          StoppingCriteriaList, decode_words_list)
@@ -42,6 +43,7 @@ __all__ = [
     'TensorInfo',
     'ChatGLMGenerationSession',
     'QWenForCausalLMGenerationSession',
+    'T5TTSGenerationSession',
     'decode_words_list',
     'LogitsProcessorList',
     'LogitsProcessor',
