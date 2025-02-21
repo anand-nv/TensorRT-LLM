@@ -364,7 +364,7 @@ class T5TTS():
         self.context_audio_eos_id = num_audio_tokens_per_codebook- 3
 
         #self.encoder = T5Encoding(engine_dir, encoder_config)
-        self.decoder = T5Decoding(engine_dir,  runtime_mapping=runtime_mapping)
+        self.decoder = T5Decoding(engine_dir,  runtime_mapping=runtime_mapping, debug_mode=debug_mode)
 
 
 
