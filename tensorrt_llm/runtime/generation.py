@@ -4680,7 +4680,8 @@ class T5TTSGenerationSession(GenerationSession):
         self.all_predictions.append(audio_codes_next)
         if step>0:
             self.output_ids[:,:,step] = audio_codes_next
-        should_stop=torch.as_tensor([self.end_indices==batch_size], dtype=torch.bool)
+
+        should_stop=torch.as_tensor([len(self.end_indices)==batch_size], dtype=torch.bool)
 
         return should_stop
 
