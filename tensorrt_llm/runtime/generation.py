@@ -795,7 +795,6 @@ class GenerationSession(object):
                  stream: torch.cuda.Stream = None):
         assert isinstance(model_config, ModelConfig)
         self._model_config = model_config
-        print(f"{model_config}")
         self.mapping = mapping
         self.runtime = _Runtime(engine_buffer, mapping)
         if DISABLE_TORCH_DEVICE_SET:
@@ -4849,7 +4848,6 @@ class T5TTSGenerationSession(GenerationSession):
                         last_token_ids - 1).view(batch_size,
                                                  self.vocab_size_padded)
                 else:
-                    print(f"SHOULD NOT BE HERE {last_token_ids=}")
                     last_token_ids = last_token_ids.reshape(batch_size, 1, 1)
                     last_token_ids = last_token_ids.expand(
                         batch_size, 1, self.vocab_size_padded) - 1
@@ -4858,7 +4856,6 @@ class T5TTSGenerationSession(GenerationSession):
                         dim=1,
                         index=last_token_ids.to(dtype=torch.int64)).view(
                             batch_size, self.vocab_size_padded)
-        #print(f"{context_logits=}, {last_token_ids=}, {self.buffer['logits'].shape=}")
         if step == 0 and beam_width > 1:
             assert not self.is_medusa_mode and not self.is_redrafter_mode
             assert not self.has_rnn_layers
@@ -5022,15 +5019,7 @@ class T5TTSGenerationSession(GenerationSession):
             # otherwise, it maybe released before the next step actually enqueued
             # one way to prolong it is to return the list, and destroy it in next step by assigning new values
             torch.cuda.nvtx.range_push("_set_tensors")
-            print("========== NEXT STEP ========")
-            print(f"{context.get_tensor_shape('input_ids')=}")
-            print(f"{self.output_ids=}")
 
-            print(f"{next_context.get_tensor_shape('input_ids')=}")
-
-            #for key in next_step_tensors:
-            #    print(f"{key}, {ctx_tensors[key].shape==next_step_tensors[key].shape}, {ctx_tensors[key].shape=}, {next_step_tensors[key].shape=}")
-            print("---------- NEXT STEP ---------")
 
             self.runtime._set_tensors(next_context, next_step_tensors)
             torch.cuda.nvtx.range_pop()
@@ -5043,7 +5032,6 @@ class T5TTSGenerationSession(GenerationSession):
         logits = None
         if self.mapping.is_last_pp_rank():
             logits = self.buffer['logits']
-            print(f"LOGITS=========== {logits=}, {logits.shape=}")
             if self.is_redrafter_mode:
                 should_stop = self.process_logits_including_draft(
                     step, batch_size, logits, next_step_tensors)
@@ -5055,7 +5043,6 @@ class T5TTSGenerationSession(GenerationSession):
 
 
                     should_stop=self.decode_logits(batch_size=batch_size, logits=logits, step=step)
-                    print(f"{self.output_ids[:,:,step]=}")
 
                     # [batch_size x beam_width, vocab_size_padded] -> [batch_size, beam_width, vocab_size_padded]
                     next_token_logits = logits.reshape(
@@ -5064,9 +5051,7 @@ class T5TTSGenerationSession(GenerationSession):
                     decode_step = step + max_context_length
 
 
-                    print(f"{should_stop=}")
-                    print(f"{self.output_ids.shape=}, {self.log_probs=}, {self.log_probs_tiled=}")
-                    print(f"{self.output_ids[:,:,step]=}")
+
                     if not self.use_gpt_attention_plugin:
                         self.reorder_kv_cache_for_beam_search(
                             batch_size, beam_width, max_context_length, step)
@@ -5079,7 +5064,6 @@ class T5TTSGenerationSession(GenerationSession):
                             scfg,
                             in_progress=True)
 
-                        print(f"{final_output_ids=}")
         if self.runtime._is_profiling():
             if not context.report_to_profiler():
                 logger.warning("Runtime report to profiler failed.")
@@ -5147,7 +5131,6 @@ class T5TTSGenerationSession(GenerationSession):
             return tensors.update({name: sym(x, name)})
 
         def add_tensor_with_shape(x, name, shape):
-            print(f"{name=}, {x.shape=}")
             return tensors.update(
                 {name: RuntimeTensor.from_torch(name, x, override_shape=shape)})
 
@@ -5189,7 +5172,6 @@ class T5TTSGenerationSession(GenerationSession):
                 ) if self.remove_input_padding else (batch_size * beam_width, self._model_config.num_audio_codebooks,
 
                                                      self.num_draft_tokens + 1)
-            print(f"NEXT_SHAPE {self.new_tokens=}, {input_ids_shape=}, {self.num_draft_tokens=}")
             if self.is_redrafter_mode:
                 add_tensor_with_shape(self.buffer['flat_tokens'], 'input_ids',
                                       input_ids_shape)
@@ -5521,7 +5503,6 @@ class T5TTSGenerationSession(GenerationSession):
         ite = 0  # index of local batches, will always be 0 if pp_size = 1
         self.end_indices={}
         self.all_predictions=[]
-        print(f"{self._model_config=}")
         if self.remove_input_padding and input_ids.dim() == 2:
             assert input_ids.shape[
                        0] == 1, "Packed 2D input must have shape [1, <sum of input lengths>]"
@@ -5750,7 +5731,6 @@ class T5TTSGenerationSession(GenerationSession):
                         host_context_lengths: torch.Tensor):
         '''Allocate buffers and setup the post-processing decoder kernel
         '''
-        print(f"THIS2 {input_ids.shape=}")
         batch_size = host_context_lengths.shape[0]
         scfg = sampling_config  # just to make a shorter name, no other meaning
         if isinstance(scfg.top_k, torch.Tensor):
@@ -5932,7 +5912,6 @@ class T5TTSGenerationSession(GenerationSession):
                             device=padded_input_ids.device)),
                 axis=-1)
         else:
-            print(f"{(self.max_seq_length - max_context_length )=}, {self.max_seq_length=}")
             self.output_ids = torch.cat(
                 (padded_input_ids,
                  torch.full(
@@ -5988,7 +5967,6 @@ class T5TTSGenerationSession(GenerationSession):
             self.new_tokens = torch.zeros([batch_size, self._model_config.num_audio_codebooks, 1],
                                           dtype=torch.int32,
                                           device=self.device)
-        print(f"THIS {self.new_tokens.shape=}")
         if scfg.num_beams > 1 or scfg.output_cum_log_probs:
             self.cum_log_probs = torch.full((batch_size, scfg.num_beams),
                                             -1e20,
@@ -6261,7 +6239,6 @@ class T5TTSGenerationSession(GenerationSession):
         profile_fn(benchmark_profiler, generation_phase_step_count)
 
         final_output_ids = self.output_ids
-        print(f"IIIII {final_output_ids=}")
 
         if self.mapping.is_first_pp_rank():
             if return_dict:
