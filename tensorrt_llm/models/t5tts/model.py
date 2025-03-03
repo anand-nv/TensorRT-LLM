@@ -429,6 +429,7 @@ class T5TTSDecoderLayer(Module):
         self.layernorm_position = layernorm_position
 
         # e.g. BART q_scaling = 1.f, T5 q_scaling = 1.f/sqrt(head_size)
+        print(f"{local_layer_idx=}, {hidden_size=}, {head_size=}, {num_attention_heads=}, {num_kv_heads=}, {max_position_embeddings=}")
         self.self_attention = Attention(
             local_layer_idx=local_layer_idx,
             hidden_size=hidden_size,
@@ -1166,6 +1167,7 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
+
             audio_embeddings = self.embed_audio_tokens(decoder_input_ids)
             if additional_decoder_mask is not None and additional_decoder_input is not None :
 
@@ -1251,8 +1253,9 @@ class T5TTSDecoderModel(PretrainedModel):
 
             # [bs, hidden_size] -> [bs, vocab_size]
             lm_logits = self.lm_head(hidden_states)
+
             print(f"{lm_logits.shape=}")
-            lm_logits=lm_logits.view([0,self.num_audio_tokens_per_codebook,self.num_audio_codebooks], zero_is_placeholder=True).permute([0,2,1])
+            #lm_logits=lm_logits_orig.view([0,self.num_audio_tokens_per_codebook,self.num_audio_codebooks], zero_is_placeholder=True).permute([0,2,1])
             print(f"{lm_logits.shape=}")
 
             lm_logits.mark_output('logits', self._logits_dtype)
