@@ -4563,6 +4563,9 @@ class T5TTSGenerationSession(GenerationSession):
         self.mask_index_tensor = None
         self.end_indices={}
         self.all_predictions=[]
+        self.deterministic_seed = torch.Generator(device=self.device).manual_seed(2147483647)
+
+
 
 
     @staticmethod
@@ -4645,6 +4648,7 @@ class T5TTSGenerationSession(GenerationSession):
     def sample_codes_from_logits(self, logits, temperature=0.7, topk=80):
         # all_code_logits_t: (B, num_codebooks * num_tokens_per_codebook), logits at a given timestep
         all_preds = []
+
         for idx in range(self._model_config.num_audio_codebooks):
             si = idx * self._model_config.num_audio_tokens_per_codebook
             ei = si + self._model_config.num_audio_tokens_per_codebook
@@ -4655,7 +4659,7 @@ class T5TTSGenerationSession(GenerationSession):
             codebook_logits_rescored[indices_to_remove] = float('-inf')
 
             codebook_probs = torch.softmax(codebook_logits / temperature, dim=-1) # (B, num_tokens_per_codebook)
-            codebook_preds = torch.multinomial(codebook_probs, 1) # (B, 1)
+            codebook_preds = torch.multinomial(codebook_probs, 1, generator=self.deterministic_seed) # (B, 1)
             all_preds.append(codebook_preds)
         all_preds = torch.cat(all_preds, dim=1).long() # (B, num_codebooks)
         return all_preds
