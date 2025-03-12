@@ -24,7 +24,7 @@ import click
 
 class ConformerTRT:
 
-    def __init__(self, config_file, min_feat_len=32, max_feat_len=3001, opt_feat_len=None):
+    def __init__(self, config_file, min_feat_len=32, max_feat_len=12001, opt_feat_len=3001):
 
         with open(config_file,'r') as f:
             self.encoder_config = json.load(f)

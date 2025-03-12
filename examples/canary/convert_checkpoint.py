@@ -227,6 +227,7 @@ class CanaryModel:
             'enc_hidden_size': self.model_config['model_defaults']['asr_enc_hidden'],
             'enc_heads': self.model_config['encoder']['n_heads'],
             'vocab': self.export_vocab(),
+            'prompt_format': self.model_config['prompt_format'],
         }
 
         return model_metadata
@@ -411,6 +412,7 @@ class CanaryModel:
             'embedding_sharding_dim': 0,
             'max_position_embeddings': self.config['max_sequence_length'],
             'use_prompt_tuning': False,
+            'prompt_format': self.config['prompt_format'],
             'head_size': self.config['hidden_size'] // self.config['num_attention_heads'],
             'has_position_embedding': True,
             'layernorm_type': LayerNormType.LayerNorm,

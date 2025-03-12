@@ -33,7 +33,7 @@ Pathlike = Union[str, Path]
 
 CONSTANT = 1e-5
 SAMPLE_RATE = 16000
-CHUNK_LENGTH = 29
+CHUNK_LENGTH = 30
 
 N_SAMPLES = CHUNK_LENGTH * SAMPLE_RATE  # 480000 samples in a 30-second chunk
 
@@ -235,6 +235,20 @@ def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
 
     return array
 
+def trim(array, length: int = N_SAMPLES, *, axis: int = -1):
+    """
+    Pad or trim the audio array to N_SAMPLES, as expected by the encoder.
+    """
+    if torch.is_tensor(array):
+        if array.shape[axis] > length:
+            array = array.index_select(dim=axis,
+                                       index=torch.arange(length,
+                                                          device=array.device))
+    else:
+        if array.shape[axis] > length:
+            array = array.take(indices=range(length), axis=axis)
+
+    return array
 
 
 class MelFilterBankFeats:

@@ -38,8 +38,9 @@ from tensorrt_llm.bindings import GptJsonConfig, KVCacheType
 from tensorrt_llm.runtime import PYTHON_BINDINGS, ModelConfig, SamplingConfig
 from tensorrt_llm.runtime.session import Session, TensorInfo
 from string import punctuation
+import librosa
 
-from utils import MelFilterBankFeats, pad_or_trim, store_transcripts, Pathlike, N_SAMPLES, write_error_stats
+from utils import MelFilterBankFeats, pad_or_trim, trim, store_transcripts, Pathlike, N_SAMPLES, write_error_stats
 
 if PYTHON_BINDINGS:
     from tensorrt_llm.runtime import ModelRunnerCpp
@@ -80,12 +81,15 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def remove_tensor_padding(input_tensor, input_tensor_lengths=None, pad_value=0):
-    if input_tensor.dim() == 2:
+def remove_tensor_padding(input_tensor,
+                          input_tensor_lengths=None,
+                          pad_value=None):
+    if pad_value:
+        assert input_tensor_lengths is None, "input_tensor_lengths should be None when pad_value is provided"
         # Text tensor case: batch, seq_len
         assert torch.all(
-            input_tensor[:, 0] != pad_value
-        ), "First token in each sequence should not be pad_value"
+            input_tensor[:, 0] !=
+            pad_value), "First token in each sequence should not be pad_value"
         assert input_tensor_lengths is None
 
         # Create a mask for all non-pad tokens
@@ -94,24 +98,20 @@ def remove_tensor_padding(input_tensor, input_tensor_lengths=None, pad_value=0):
         # Apply the mask to input_tensor to remove pad tokens
         output_tensor = input_tensor[mask].view(1, -1)
 
-    elif input_tensor.dim() == 3:
+    else:
         # Audio tensor case: batch, seq_len, feature_len
+        # position_ids case: batch, seq_len
         assert input_tensor_lengths is not None, "input_tensor_lengths must be provided for 3D input_tensor"
-        batch_size, seq_len, feature_len = input_tensor.shape
 
         # Initialize a list to collect valid sequences
         valid_sequences = []
 
-        for i in range(batch_size):
+        for i in range(input_tensor.shape[0]):
             valid_length = input_tensor_lengths[i]
-            valid_sequences.append(input_tensor[i, :valid_length, :])
+            valid_sequences.append(input_tensor[i, :valid_length])
 
         # Concatenate all valid sequences along the batch dimension
         output_tensor = torch.cat(valid_sequences, dim=0)
-
-    else:
-        raise ValueError("Input tensor must have 2 or 3 dimensions")
-
     return output_tensor
 
 
@@ -126,8 +126,12 @@ def read_config(component, engine_dir):
 
 
 class CanaryTokenizer:
-    def __init__(self, engine_dir):
+    def __init__(self, engine_dir, prompt_format='canary1'):
         vocab_file = os.path.join(engine_dir, 'decoder/vocab.json')
+        decoder_config = read_config('decoder', engine_dir)
+        self.prompt_format = decoder_config.get('prompt_format', prompt_format)
+        self.blank = '▁'
+
         with open(vocab_file, 'r') as jfp:
             vocab = json.load(jfp)
         self.token_id_offset = vocab['offsets']
@@ -135,13 +139,31 @@ class CanaryTokenizer:
         self.__id_to_token__ = {l: {} for l in vocab['tokens']}
 
         self.spl_tokens = self.__id_to_token__['spl_tokens']
-        self.blank = '▁'
+ 
+            
 
         for lang in vocab['tokens']:
             self.__id_to_token__[lang] = {int(k): v for k, v in vocab['tokens'][lang].items()}
         self.__token_to_id__ = {}
         for lang in self.__id_to_token__:
             self.__token_to_id__[lang] = {v: k for k, v in self.__id_to_token__[lang].items()}
+        
+        for lang in self.langs:
+            if lang == 'spl_tokens':
+                continue
+            lang_token=f"<|{lang.split('-')[0]}|>"
+            if "-" in lang:
+                lang_country_token=f"<|{lang}|>"
+            else:
+                lang_country_token=lang_token
+            if lang_country_token  in self.__token_to_id__['spl_tokens']:
+                continue
+
+            if lang_country_token not in self.__token_to_id__['spl_tokens'] and lang_token in self.__token_to_id__['spl_tokens']:
+                self.__token_to_id__['spl_tokens'][lang_country_token]=self.__token_to_id__['spl_tokens'][lang_token]
+                if lang_country_token != lang_token:
+                    self.langs.append(lang.split('-')[0])
+                
 
         self.id_to_token = {}
         for lang in self.__id_to_token__:
@@ -170,6 +192,9 @@ class CanaryTokenizer:
             self.pad_id = vocab['pad_id']
 
         self.blank_id = self.__token_to_id__['spl_tokens'][self.blank]
+
+    def set_prompt_format(self, prompt_format='canary1'):
+        self.prompt_format = prompt_format
 
     @staticmethod
     def word_separator(lang):
@@ -232,7 +257,43 @@ class CanaryTokenizer:
                 return re.sub(r'(?<=[.,;:])(?=[^\s])', r' ', ''.join(tokens).strip())
             return ''.join(tokens).strip()
 
-    def get_prompt(self, task_type='transcribe', pnc=True, src_lang='en', tgt_lang=None):
+    def get_prompt_v2(self, pnc=True, src_lang='en', tgt_lang=None, itn=False, timestamp=False, diarize=False,):
+        # prompt_format: 
+        # <|startofcontext|><|startoftranscript|><|emo:undefined|><|{src_lang}|><|{tgt_lang}|><|[no]pnc|><|[no]itn|><|[no]timestamp><|[no]diarize|>
+        prompt = "<|startofcontext|> <|startoftranscript|> <|emo:undefined|>"
+
+
+        if src_lang not in self.langs:
+            raise ValueError(f"Invalid language {src_lang=} specified")
+
+        prompt += f" <|{src_lang}|>"
+        if pnc:
+            pnc = "<|pnc|>"
+        else:
+            pnc = "<|nopnc|>"
+        if itn:
+            itn = "<|itn|>"
+        else:
+            itn = "<|noitn|>"
+        if diarize:
+            diarize = "<|diarize|>"
+        else:
+            diarize = "<|nodiarize|>"
+        if timestamp:
+            timestamp = "<|timestamp|>"
+        else:
+            timestamp = "<|notimestamp|>"
+
+        if tgt_lang is None:
+            tgt_lang = src_lang
+            if tgt_lang not in self.langs:
+                raise ValueError(f"Invalid language {tgt_lang=} specified")
+
+        prompt += f" <|{src_lang}|> <|{tgt_lang}|> {pnc} {itn} {timestamp} {diarize}"
+
+        return prompt
+    
+    def get_prompt_legacy(self, task_type='transcribe', pnc=True, src_lang='en', tgt_lang=None):
         prompt = "<|startoftranscript|>"
 
         if src_lang not in self.langs and "-" in src_lang and src_lang.split('-')[0] in self.langs:
@@ -266,12 +327,22 @@ class CanaryTokenizer:
         return prompt
 
     def get_prompt_ids(self, task='transcribe', pnc=False, src_lang='en', tgt_lang=None):
-        return self.tokens_to_ids(self.get_prompt(task, pnc=pnc, src_lang=src_lang, tgt_lang=tgt_lang))
+        return self.tokens_to_ids(self.get_prompt_legacy(task, pnc=pnc, src_lang=src_lang, tgt_lang=tgt_lang))
 
     def get_prompt_ids_from_cfg(self, cfg):
-        return self.tokens_to_ids(
-            self.get_prompt(cfg['task'], cfg['pnc'], cfg['source_language'], cfg['target_language'])
-        )
+
+        if self.prompt_format == 'canary2':
+            return self.tokens_to_ids(
+                self.get_prompt_v2(cfg['pnc'], cfg['source_language'], cfg['target_language'], cfg['itn'], cfg['timestamp'], cfg['diarize'])
+            )
+
+        else:
+            return self.tokens_to_ids(
+                self.get_prompt_legacy(cfg['task'], cfg['pnc'], cfg['source_language'], cfg['target_language'])
+            )
+
+
+    
     def encode(self, prompt):
         return self.tokens_to_ids(prompt.split())
 
@@ -330,6 +401,8 @@ class CanaryDecoding:
     def __init__(self, engine_dir, runtime_mapping, tokenizer, debug_mode=False):
         self.tokenizer = tokenizer
         self.decoder_config = read_config('decoder', engine_dir)
+        self.prompt_format = self.decoder_config['prompt_format']
+        self.tokenizer.set_prompt_format(self.prompt_format)
         self.decoder_generation_session = self.get_session(
             engine_dir, runtime_mapping, debug_mode)
         self.dtype=str_dtype_to_torch(self.decoder_config['dtype'])
@@ -379,18 +452,22 @@ class CanaryDecoding:
     def generate(self,
                  decoder_input_ids,
                  encoder_outputs,
-                 encoder_max_input_length,
                  encoder_input_lengths,
                  max_new_tokens=40,
                  num_beams=1):
         encoder_outputs=encoder_outputs.to(dtype=self.dtype)
+        batch_size = decoder_input_ids.shape[0]
+        encoder_max_input_length = encoder_outputs.shape[1]
 
         decoder_input_lengths = torch.tensor(
             [decoder_input_ids.shape[-1] for _ in range(decoder_input_ids.shape[0])], dtype=torch.int32, device='cuda'
         )
         decoder_max_input_length = torch.max(decoder_input_lengths).item()
 
-        cross_attention_mask = torch.ones([encoder_outputs.shape[0], 1, encoder_outputs.shape[1]]).int().cuda()
+        cross_attention_mask = torch.ones([
+            batch_size, decoder_max_input_length + max_new_tokens,
+            encoder_max_input_length
+        ]).int().cuda()
 
         # generation config
         sampling_config = SamplingConfig(
@@ -401,7 +478,7 @@ class CanaryDecoding:
             decoder_max_input_length,
             max_new_tokens,
             beam_width=num_beams,
-            encoder_max_input_length=encoder_outputs.shape[1],
+            encoder_max_input_length=encoder_max_input_length,
         )
 
         torch.cuda.synchronize()
@@ -412,7 +489,7 @@ class CanaryDecoding:
                 decoder_input_ids, pad_value=self.tokenizer.pad_id)
             if encoder_outputs.dim() == 3:
                 encoder_input_lengths = torch.full((encoder_outputs.shape[0], ),
-                                                 encoder_outputs.shape[1],
+                                                 encoder_max_input_length,
                                                  dtype=torch.int32,
                                                  device='cuda')
 
@@ -482,7 +559,7 @@ class CanaryTRTLLM(object):
             audio_input_lengths,
             text_prefix="<|startoftranscript|> <|en|> <|transcribe|> <|en|> <|pnc|>",
             num_beams=1,
-            max_new_tokens=96,
+            max_new_tokens=128,
             prompts_cfg=None):
         batch_size = len(audio_input_lengths)
 
@@ -499,16 +576,13 @@ class CanaryTRTLLM(object):
                 prompt_ids, batch_first=True, padding_value=self.tokenizer.pad_id
             ).to(self.device)
 
-
         stream=torch.cuda.current_stream('cuda')
 
 
         mel,mel_input_lengths = self.preprocessor.get_feats(audio, audio_input_lengths)
-        torch.save((mel, mel_input_lengths), "mel_feats.pt")
         encoder_output, encoder_output_lengths = self.encoder.infer(
             mel, mel_input_lengths, stream)
 
-        encoder_max_input_length = encoder_output.shape[2]
         batch_size = len(encoder_output_lengths)
 
 
@@ -516,11 +590,9 @@ class CanaryTRTLLM(object):
 
         output_ids = self.decoder.generate(decoder_input_ids,
                                            encoder_output,
-                                           encoder_max_input_length,
                                            encoder_output_lengths,
                                            max_new_tokens=max_new_tokens,
                                            num_beams=num_beams)
-
         texts = []
         for i in range(len(output_ids)):
             text = self.tokenizer.decode(output_ids[i][0]).strip()
@@ -557,21 +629,31 @@ def decode_wav_file(
 def batch_manifest(manifest_file, batch_size):
     waveforms, durations, labels, ids, prompts_cfg = [], [], [], [], []
     count=0
+    max_batch_len=0
     with open(manifest_file,'r') as manifest:
         for line in manifest:
                 data = json.loads(line)
                 waveform, sample_rate = soundfile.read(data['audio_filepath'])
+                if sample_rate != 16000:
+                    waveform = librosa.resample(waveform, orig_sr=sample_rate, target_sr=16000)
+                    sample_rate = 16000
                 duration = len(waveform)
-                waveform = pad_or_trim(waveform, N_SAMPLES)
-                waveform = waveform.astype(np.float32)
-                waveform = torch.from_numpy(waveform)
+                if max_batch_len < duration:
+                    max_batch_len = duration
+            
+
                 prompt={'task':data.get('taskname','transcribe'),
                         'pnc': data.get('pnc','no')=='yes',
                         'source_language': data.get('source_language','en-US'),
                         'target_language': data.get('source_language','en-US'),
+                        'itn': data.get('itn', "no")=='yes',
+                        'timestamp': data.get('timestamp', "no")=='yes',
+                        'diarize': data.get('diarize', "no")=='yes',
                         }
                 if 'text' in data:
                     prompt['text'] = data['text']
+                else:
+                    data['text'] = "na"
                 if 'answer' in data:
                     prompt['answer'] = data['answer']
                 prompts_cfg.append(prompt)
@@ -579,11 +661,13 @@ def batch_manifest(manifest_file, batch_size):
                 ids.append(data['audio_filepath'])
                 durations.append(duration)
                 waveforms.append(waveform)
+                #print(f"{waveform.shape=}")
                 count += 1
                 if count == batch_size:
-                    yield waveforms, durations, labels, ids, prompts_cfg
+                    yield waveforms, durations, labels, ids, prompts_cfg, max_batch_len
                     waveforms, durations, labels, ids, prompts_cfg = [], [], [], [], []
                     count=0
+                    max_batch_len=0
 
         return waveforms, durations, labels, ids, prompts_cfg
 
@@ -594,12 +678,22 @@ def decode_manifest(
         batch_size=1,
         num_beams=1,
         sample_rate=16000,
-        output_manifest=None):
+        output_manifest=None,
+        warmstart_batches=None):
 
     results = []
     total_duration = 0
+    total_batches=0
 
-    for waveforms, durations, texts, ids, prompt_cfg in batch_manifest(manifest_file, batch_size):
+    for waveforms, durations, texts, ids, prompt_cfg, max_batch_len in batch_manifest(manifest_file, batch_size):
+        for idx in range(len(waveforms)):
+            max_batch_len = max(max_batch_len, sample_rate*3)
+            waveform = pad_or_trim(waveforms[idx], max_batch_len)
+
+            waveform = waveform.astype(np.float32)
+            waveform = torch.from_numpy(waveform)
+            waveforms[idx]=waveform
+
         total_duration += sum(durations) / sample_rate
         predictions = model.process_batch(waveforms, durations,
                                           num_beams=num_beams, prompts_cfg=prompt_cfg)
@@ -607,7 +701,7 @@ def decode_manifest(
             # remove all special tokens in the prediction
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
 
-            print(f"wav_id: {wav_id}, label: {label}, prediction: {prediction}")
+
             data={'audio_filepath': wav_id,
                   'source_lang': cfg['source_language'],
                   'target_lang': cfg['target_language'],
@@ -622,7 +716,12 @@ def decode_manifest(
             results.append((ids,texts,prompt_cfg))
             if output_manifest is not None:
                 output_manifest.append(data)
+            
+            total_batches+=1
 
+            if warmstart_batches is not None and total_batches >= warmstart_batches:
+                return results, total_duration
+            
     return results, total_duration
 
 
@@ -672,7 +771,6 @@ def decode_dataset(
             # remove all special tokens in the prediction
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
 
-            print(f"wav_id: {wav_id}, label: {label}, prediction: {prediction}")
             results.append((wav_id, label.lower().split(), prediction.lower().split()))
     return results, total_duration
 
@@ -682,6 +780,12 @@ if __name__ == '__main__':
     tensorrt_llm.logger.set_level(args.log_level)
     model = CanaryTRTLLM(args.engine_dir, debug_mode=args.debug, device="cuda:0",
                           use_py_session=args.use_py_session)
+    log_file=None
+    if args.manifest_file is not None:
+        args.results_dir=Path(args.manifest_file).parent.absolute()
+        mf_name=Path(args.manifest_file).stem
+        args.results_manifest=os.path.join(args.results_dir, f"manifest_{mf_name}.json")
+        log_file=os.path.join(args.results_dir, f"{mf_name}.log")
     if args.results_manifest is not None:
         output_manifest = []
     else:
@@ -692,8 +796,9 @@ if __name__ == '__main__':
             "hf-internal-testing/librispeech_asr_dummy",
             batch_size=args.batch_size,
             num_beams=args.num_beams)
-    start_time = time.time()
     if args.input_file:
+        start_time = time.time()
+
         results, total_duration = decode_wav_file(
             args.input_file,
             model,
@@ -709,6 +814,15 @@ if __name__ == '__main__':
             batch_size=args.batch_size,
             num_beams=args.num_beams,)
     elif args.manifest_file:
+        #warmup
+        results, total_duration = decode_manifest(
+            args.manifest_file,
+            model,
+            batch_size=args.batch_size,
+            num_beams=args.num_beams,
+            output_manifest=None,
+            warmstart_batches=2
+        )
         start_time = time.time()
 
         results, total_duration = decode_manifest(
@@ -720,6 +834,15 @@ if __name__ == '__main__':
         )
 
     else:
+        #warmup
+        results, total_duration = decode_dataset(
+            model,
+            args.dataset,
+            text_prefix=args.prompt_text,
+            num_beams=args.num_beams,)
+        
+        start_time = time.time()
+
         results, total_duration = decode_dataset(
             model,
             args.dataset,
@@ -732,10 +855,7 @@ if __name__ == '__main__':
     store_transcripts(filename=f"{args.results_dir}/recogs-{args.name}.txt",
                       texts=results)
 
-    if output_manifest is not None:
-        with open(args.results_manifest, 'w') as ofp:
-            for data in output_manifest:
-                ofp.write(f"{json.dumps(data)}\n")
+
 
 
     s=""
@@ -759,6 +879,13 @@ if __name__ == '__main__':
     s += f"num_beams: {args.num_beams}\n"
 
     print(s)
+
+    if output_manifest is not None:
+        with open(args.results_manifest, 'w') as ofp:
+            for data in output_manifest:
+                ofp.write(f"{json.dumps(data)}\n")
+        with open(log_file, 'a') as f:
+            f.write(s)
 
     with open(f"{args.results_dir}/rtf-{args.name}.txt", "w") as f:
         f.write(s)
