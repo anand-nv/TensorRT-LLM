@@ -38,8 +38,8 @@ checkpoint_dir=tllm_checkpoint
 
 # Export the canary model TensorRT-LLM format.
 python3 convert_checkpoint.py \
-                --dtype=bfloat16 \
-                --logits_dtype=float16 \
+                --dtype=${INFERENCE_PRECISION} \
+                --model_path <path_to_nemo_checkpoint> \
                 ${engine_dir}
 
 # Build the canary encoder model using conformer_onnx_trt.py
