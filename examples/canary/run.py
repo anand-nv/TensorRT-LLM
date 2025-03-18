@@ -54,7 +54,7 @@ def parse_arguments():
     parser.add_argument('--assets_dir', type=str, default='./assets')
     parser.add_argument('--input_file', type=str, default=None)
     parser.add_argument('--prompt_text', type=str,
-                        default="<|startoftranscript|> <|en-US|> <|translate|> <|en-US|> <|pnc|>")
+                        default=None)
     parser.add_argument('--manifest_file', type=str, default=None)
     parser.add_argument('--results_manifest', type=str, default=None)
 
@@ -131,6 +131,10 @@ class CanaryTokenizer:
         decoder_config = read_config('decoder', engine_dir)
         self.prompt_format = decoder_config.get('prompt_format', prompt_format)
         self.blank = '▁'
+        if self.prompt_format == 'canary2':
+            self.default_prompt = "<|startofcontext|> <|startoftranscript|> <|emo:undefined|> <|en-US|> <|en-US|> <|nopnc|> <|noitn|> <|notimestamp|> <|nodiarize|>" 
+        else:
+            self.default_prompt = "<|startoftranscript|><|en|> <|transcribe|> <|en|> <|pnc|>"
 
         with open(vocab_file, 'r') as jfp:
             vocab = json.load(jfp)
@@ -557,13 +561,15 @@ class CanaryTRTLLM(object):
             self,
             audio,
             audio_input_lengths,
-            text_prefix="<|startoftranscript|> <|en|> <|transcribe|> <|en|> <|pnc|>",
+            text_prefix=None,
             num_beams=1,
             max_new_tokens=128,
-            prompts_cfg=None):
+            prompts_cfg=None,):
         batch_size = len(audio_input_lengths)
-
         if prompts_cfg is None:
+            if text_prefix is None:
+                text_prefix = self.tokenizer.default_prompt
+
             prompt_id = self.tokenizer.encode(text_prefix)
             prompt_id = torch.tensor(prompt_id)
             decoder_input_ids = prompt_id.repeat(batch_size, 1)
@@ -600,14 +606,17 @@ class CanaryTRTLLM(object):
             texts.append(text)
         return texts
 
+
 def decode_wav_file(
         input_file_path,
         model,
         batch_size=1,
-        text_prefix="<|startoftranscript|> <|en-US|> <|transcribe|> <|en-US|> <|pnc|>",
+        text_prefix=None,
         num_beams=1):
+    
+    waveform, sample_rate = librosa.load(input_file_path,sr=16000)
 
-    waveform, sample_rate = soundfile.read(input_file_path)
+        
     total_duration=waveform.shape[0]/sample_rate
     waveform=torch.from_numpy(waveform).to(dtype=torch.float32,  device="cuda:0")
 
@@ -633,10 +642,8 @@ def batch_manifest(manifest_file, batch_size):
     with open(manifest_file,'r') as manifest:
         for line in manifest:
                 data = json.loads(line)
-                waveform, sample_rate = soundfile.read(data['audio_filepath'])
-                if sample_rate != 16000:
-                    waveform = librosa.resample(waveform, orig_sr=sample_rate, target_sr=16000)
-                    sample_rate = 16000
+                waveform, sample_rate = librosa.load(data['audio_filepath'], sr=16000)
+
                 duration = len(waveform)
                 if max_batch_len < duration:
                     max_batch_len = duration
@@ -661,7 +668,6 @@ def batch_manifest(manifest_file, batch_size):
                 ids.append(data['audio_filepath'])
                 durations.append(duration)
                 waveforms.append(waveform)
-                #print(f"{waveform.shape=}")
                 count += 1
                 if count == batch_size:
                     yield waveforms, durations, labels, ids, prompts_cfg, max_batch_len
@@ -744,7 +750,7 @@ def collate_wrapper(batch):
 def decode_dataset(
         model,
         dataset,
-        text_prefix="<|startoftranscript|> <|en|> <|transcribe|> <|en|> <|nopnc|>",
+        text_prefix=None,
         batch_size=1,
         num_beams=1,
         sample_rate=16000):
@@ -753,26 +759,32 @@ def decode_dataset(
     data_loader = DataLoader(librispeech_dummy,
                              batch_size=batch_size,
                              num_workers=4,
-                             pin_memory=True,
+                             pin_memory=False,
                              collate_fn=collate_wrapper)
     results = []
     total_duration = 0
+    start_time = time.time()
     for batch in data_loader:
         waveforms, durations, texts, ids = batch
         total_duration += sum(durations) / sample_rate
+        max_durations=max(durations)
+        max_batch_len = max(max_durations, sample_rate*15)
+        waveforms_list=[]
 
-        for wave in waveforms:
-            assert wave.is_pinned()
+        for idx in range(len(waveforms)):
+            waveform = pad_or_trim(waveforms[idx], max_batch_len)
+            waveforms_list.append(waveform)
 
 
-        predictions = model.process_batch(waveforms, durations,
+
+        predictions = model.process_batch(waveforms_list, durations,
                                           text_prefix, num_beams)
         for wav_id, label, prediction in zip(ids, texts, predictions):
             # remove all special tokens in the prediction
             prediction = re.sub(r'<\|.*?\|>', '', prediction)
 
             results.append((wav_id, label.lower().split(), prediction.lower().split()))
-    return results, total_duration
+    return results, total_duration, start_time
 
 
 if __name__ == '__main__':
@@ -784,45 +796,43 @@ if __name__ == '__main__':
     if args.manifest_file is not None:
         args.results_dir=Path(args.manifest_file).parent.absolute()
         mf_name=Path(args.manifest_file).stem
-        args.results_manifest=os.path.join(args.results_dir, f"manifest_{mf_name}.json")
-        log_file=os.path.join(args.results_dir, f"{mf_name}.log")
+        args.results_manifest=os.path.join(args.results_dir, f"{args.name}_manifest_{mf_name}.json")
+        log_file=os.path.join(args.results_dir, f"{args.name}_log_{mf_name}.log")
     if args.results_manifest is not None:
         output_manifest = []
     else:
         output_manifest = None
     if args.enable_warmup:
-        results, total_duration = decode_dataset(
-            model,
-            "hf-internal-testing/librispeech_asr_dummy",
-            batch_size=args.batch_size,
-            num_beams=args.num_beams)
-    if args.input_file:
-        start_time = time.time()
-
-        results, total_duration = decode_wav_file(
-            args.input_file,
-            model,
-            text_prefix=args.prompt_text,
-            batch_size=args.batch_size,
-            num_beams=args.num_beams,)
-        start_time = time.time()
-
-        results, total_duration = decode_wav_file(
-            args.input_file,
-            model,
-            text_prefix=args.prompt_text,
-            batch_size=args.batch_size,
-            num_beams=args.num_beams,)
-    elif args.manifest_file:
-        #warmup
-        results, total_duration = decode_manifest(
+        if args.manifest_file:
+                  results, total_duration = decode_manifest(
             args.manifest_file,
             model,
             batch_size=args.batch_size,
             num_beams=args.num_beams,
             output_manifest=None,
-            warmstart_batches=2
+            warmstart_batches=10
         )
+        else:
+
+            results, total_duration = decode_dataset(
+                model,
+                "hf-internal-testing/librispeech_asr_dummy",
+                batch_size=args.batch_size,
+                num_beams=args.num_beams)
+    if args.input_file:
+        start_time = time.time()
+
+ 
+
+        results, total_duration = decode_wav_file(
+            args.input_file,
+            model,
+            text_prefix=args.prompt_text,
+            batch_size=args.batch_size,
+            num_beams=args.num_beams,)
+            
+    elif args.manifest_file:
+
         start_time = time.time()
 
         results, total_duration = decode_manifest(
@@ -833,21 +843,16 @@ if __name__ == '__main__':
             output_manifest=output_manifest
         )
 
-    else:
-        #warmup
-        results, total_duration = decode_dataset(
-            model,
-            args.dataset,
-            text_prefix=args.prompt_text,
-            num_beams=args.num_beams,)
-        
-        start_time = time.time()
 
-        results, total_duration = decode_dataset(
+    else:
+
+        results, total_duration, start_time = decode_dataset(
             model,
             args.dataset,
+            batch_size=args.batch_size,
             text_prefix=args.prompt_text,
             num_beams=args.num_beams,)
+
     elapsed = time.time() - start_time
     results = sorted(results)
 
@@ -867,11 +872,11 @@ if __name__ == '__main__':
                                                  results,
                                                  enable_log=True)
             if args.accuracy_check and args.dataset == "hf-internal-testing/librispeech_asr_dummy" and not args.input_file:
-                assert total_error_rate <= 2.8, f"Word Error rate using canary model should be 2.40%, but got {total_error_rate}"
+                assert total_error_rate <= 2.8, f"Word Error rate using canary model should be 2.26%, but got {total_error_rate}"
             s = f"total error rate: {total_error_rate:.2f}%\n"
 
     rtf = total_duration/elapsed
-    s += f"RTF: {rtf:.4f}\n"
+    s += f"RTFx: {rtf:.4f}\n"
     s += f"total_duration: {total_duration:.3f} seconds\n"
     s += f"({total_duration/3600:.2f} hours)\n"
     s += f"processing time: {elapsed:.3f} seconds " f"({elapsed/3600:.2f} hours)\n"
