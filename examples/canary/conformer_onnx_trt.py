@@ -28,7 +28,7 @@ class ConformerTRT:
 
         with open(config_file,'r') as f:
             self.encoder_config = json.load(f)
-
+        print(f"{config_file}: {self.encoder_config}")
         self.dtype=self.encoder_config['dtype']
         self.feat_in=self.encoder_config['feat_in']
         self.min_feat_len=min_feat_len
