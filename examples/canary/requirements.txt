@@ -1,12 +1,11 @@
 --extra-index-url https://pypi.nvidia.com
-torch>=2.4.0
+torch>=2.5.0
 pytorch-lightning>=2.4.0
 soundfile
 safetensors
 kaldialign
-tensorrt_llm==0.13.0
+tensorrt_llm==0.17.0
 datasets
 lhotse
-nemo2riva
-nemo>=1.23.0
-
+nemo==2.1.0
+librosa
