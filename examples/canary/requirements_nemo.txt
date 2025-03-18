@@ -1,8 +1,0 @@
-hydra-core
-einops
-jiwer
-librosa
-pyannote.core
-pyannote.metrics
-webdataset
-editdistance
