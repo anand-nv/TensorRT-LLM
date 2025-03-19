@@ -68,7 +68,7 @@ trtllm-build  --checkpoint_dir ${checkpoint_dir}/decoder \
 
 ```bash
 # decode a single wav file
-python3 run.py --engine_dir ${engine_dir}--name single_wav_test --input_file assets/1221-135766-0002.wav
+python3 run.py --engine_dir ${engine_dir} --name single_wav_test --input_file assets/1221-135766-0002.wav
 
 # decode a whole dataset
 python3 run.py --engine_dir ${engine_dir} --dataset hf-internal-testing/librispeech_asr_dummy --enable_warmup --name librispeech_dummy_large_v3
