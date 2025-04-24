@@ -830,7 +830,9 @@ def optimize_model_with_config(model: PretrainedModel,
     if build_config.plugin_config.lora_plugin is not None:
         model.use_lora(build_config.lora_config)
 
-    is_enc_dec = model.config.architecture in ["EncoderModel", "DecoderModel"]
+    is_enc_dec = model.config.architecture in [
+        "EncoderModel", "DecoderModel", "T5TTSEncoderModel", "T5TTSDecoderModel"
+    ]
     # FusedMLP does not support RecurrentGemma FP8 currently.
     is_recurrent_gemma = model.config.architecture in [
         "RecurrentGemmaForCausalLM"
@@ -1225,8 +1227,9 @@ def build(model: PretrainedModel, build_config: BuildConfig) -> Engine:
             build_config.lora_config.lora_target_modules
         }
 
-        if model.config.architecture == "DecoderModel" or "mllama" in model.config.architecture.lower(
-        ):
+        if model.config.architecture in [
+                "DecoderModel", "T5TTSDecoderModel"
+        ] or "mllama" in model.config.architecture.lower():
             prepare_input_args["max_seq_len"] = build_config.max_seq_len
             prepare_input_args[
                 "max_decoder_input_len"] = build_config.max_input_len
@@ -1255,7 +1258,7 @@ def build(model: PretrainedModel, build_config: BuildConfig) -> Engine:
             logger.warning(
                 "Paged Context FMHA is required for EAGLE. Turning it on")
             build_config.plugin_config.use_paged_context_fmha = True
-
+        print(f"{prepare_input_args=}")
         inputs = model.prepare_inputs(**prepare_input_args)
         model(**inputs)
 

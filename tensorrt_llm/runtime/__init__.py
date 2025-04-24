@@ -17,7 +17,8 @@ from .generation import SamplingConfig  # autoflake: skip
 from .generation import (ChatGLMGenerationSession, GenerationSession,
                          LogitsProcessor, LogitsProcessorList, ModelConfig,
                          QWenForCausalLMGenerationSession, StoppingCriteria,
-                         StoppingCriteriaList, decode_words_list)
+                         StoppingCriteriaList, T5TTSGenerationSession,
+                         decode_words_list)
 from .kv_cache_manager import GenerationSequence, KVCacheManager
 from .model_runner import ModelRunner
 from .multimodal_model_runner import MultimodalModelRunner
@@ -35,6 +36,7 @@ if PYTHON_BINDINGS:
 __all__ = [
     'ModelConfig',
     'GenerationSession',
+    'T5TTSGenerationSession',
     'GenerationSequence',
     'KVCacheManager',
     'SamplingConfig',

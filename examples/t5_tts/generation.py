@@ -449,6 +449,7 @@ class _Runtime(object):
                 continue
 
             tensor = tensors[name]
+
             if context.get_tensor_address(name) != tensor.data:
                 context.set_tensor_address(name, tensor.data)
 
@@ -459,6 +460,7 @@ class _Runtime(object):
             if name not in tensors:
                 dtype = self.engine.get_tensor_dtype(name)
                 shape = context.get_tensor_shape(name)
+
                 tensors[name] = RuntimeTensor.from_torch(
                     name,
                     torch.zeros(tuple(shape),
@@ -612,7 +614,10 @@ class ModelConfig:
     num_kv_heads_per_layer: Optional[List[int]] = None
     num_kv_heads_per_cross_attn_layer: Optional[List[int]] = None
     skip_cross_attn_blocks: bool = False
-    num_audio_codebooks: Optional[int] = None
+    num_audio_codebooks: int = 8
+    num_audio_tokens_per_codebook: int = 2048
+    eos_token_id: int = 2046
+    bos_token_id: int = 2047
 
 
 @dataclass
@@ -1270,6 +1275,7 @@ class GenerationSession(object):
                         host_context_lengths: torch.Tensor):
         '''Allocate buffers and setup the post-processing decoder kernel
         '''
+
         batch_size = host_context_lengths.shape[0]
         scfg = sampling_config  # just to make a shorter name, no other meaning
         if isinstance(scfg.top_k, torch.Tensor):
@@ -1422,7 +1428,6 @@ class GenerationSession(object):
                                   dtype=torch.int32,
                                   device=self.device)
         max_context_length = host_context_lengths.max()
-
         # setup output ids buffer
         if input_ids.dim() == 1:
             # input_ids only have one dimension, which means remove_padding is enabled
@@ -3869,7 +3874,6 @@ class GenerationSession(object):
                 else:
                     final_output_ids = self.finalize_decoder(
                         context_lengths, batch_size, beam_width, scfg)
-
                 if self.mapping.is_first_pp_rank():
                     if return_dict:
                         return get_outputs_dict(final_output_ids, step + 1)
@@ -3891,6 +3895,7 @@ class GenerationSession(object):
 
         final_output_ids = self.finalize_decoder(context_lengths, batch_size,
                                                  beam_width, scfg)
+
         if self.mapping.is_first_pp_rank():
             if return_dict:
                 return get_outputs_dict(final_output_ids)
@@ -5920,7 +5925,6 @@ class T5TTSGenerationSession(GenerationSession):
                             device=padded_input_ids.device)),
                 axis=-1)
         else:
-            print(self._model_config)
             self.output_ids = torch.cat(
                 (padded_input_ids,
                  torch.full((batch_size, self._model_config.num_audio_codebooks,
