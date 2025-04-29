@@ -830,7 +830,7 @@ def optimize_model_with_config(model: PretrainedModel,
     if build_config.plugin_config.lora_plugin is not None:
         model.use_lora(build_config.lora_config)
 
-    is_enc_dec = model.config.architecture in ["EncoderModel", "DecoderModel"]
+    is_enc_dec = model.config.architecture in ["EncoderModel", "DecoderModel", "T5TTSEncoderModel", "T5TTSDecoderModel"]
     # FusedMLP does not support RecurrentGemma FP8 currently.
     is_recurrent_gemma = model.config.architecture in [
         "RecurrentGemmaForCausalLM"
@@ -1270,8 +1270,10 @@ def build(model: PretrainedModel, build_config: BuildConfig) -> Engine:
             build_config.lora_config.lora_target_modules
         }
 
-        if model.config.architecture == "DecoderModel" or "mllama" in model.config.architecture.lower(
-        ):
+        is_mllama = "mllama" in model.config.architecture.lower()
+        is_decoder_model = model.config.architecture == "DecoderModel"
+        is_t5tts_model = model.config.architecture == "T5TTSDecoderModel"
+        if is_mllama or is_decoder_model or is_t5tts_model:
             prepare_input_args["max_seq_len"] = build_config.max_seq_len
             prepare_input_args[
                 "max_decoder_input_len"] = build_config.max_input_len
