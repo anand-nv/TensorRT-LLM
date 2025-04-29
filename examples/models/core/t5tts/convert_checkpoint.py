@@ -203,6 +203,7 @@ def parse_model_config(args, ):
                 'encoder', 'num_heads')
             component_config.encoder_head_size = config.getint(
                 'encoder', 'd_kv')
+            #FIXME: check what is the correct generation process for the given checkpoint
             component_config.decoder_start_token_id = config.getint(
                 'decoder', 'decoder_start_token_id', fallback=106339 - 2)
             component_config.eos_token_id = config.getint('decoder',
@@ -448,6 +449,7 @@ def convert_checkpoint(args, model):
         'eos_token_id': decoder_config.eos_token_id,
         'bos_token_id': decoder_config.bos_token_id,
         'pad_token_id': decoder_config.pad_token_id,
+        'cross_attention': True,  #  this has to be provided explicitely
     }
     for additional_setting in additional_settings:
         if hasattr(decoder_config, additional_setting):

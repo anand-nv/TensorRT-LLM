@@ -577,9 +577,6 @@ class T5TTSDecoderLayer(Module):
             attention_params=attention_params,
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
-        print(
-            f"{attention_output=}, {attention_mask_params.cross_attention_mask.shape=}"
-        )
 
         if use_cache:
             attention_output, presents_cross = attention_output
@@ -972,7 +969,6 @@ class T5TTSDecoderModel(PretrainedModel):
 
         self.mapping = self.config.mapping
         self.num_vocabs = len(self.config.vocab_sizes)
-        print(f">>>>>got config inside T5TTSDecoderModel. number of vocabs: {self.num_vocabs}")
 
         self.has_position_embedding = self.config.has_position_embedding
         type_vocab_size = self.config.type_vocab_size
@@ -1113,8 +1109,6 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('has_pos_ff_bias', False)
         config.set_if_not_exist('has_encoder_input_layernorm', True)
         config.set_if_not_exist('has_model_final_layernorm', False)
-        config.set_if_not_exist('num_audio_codebooks', 8)
-        config.set_if_not_exist('num_audio_tokens_per_codebook', 2048)
         config.set_if_not_exist('audio_embedding_dim', 768)
 
         config.set_if_not_exist('encoder_hidden_size', None)
@@ -1698,9 +1692,11 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_kv_cache_pool_mapping = Tensor(
                     name=f"host_kv_cache_pool_mapping",
                     dtype=trt.int32,
-                    shape=[num_pp_layers],
+                    # 2: (Index of pool, Index of layer within pool)
+                    shape=[num_pp_layers, 2],
                     dim_range=OrderedDict([
                         ('pools_mapping', [num_pp_layers]),
+                        ('layer_cache_pool_locator', [2]),
                     ]))
 
                 # paged blocks for cross kv
@@ -1737,9 +1733,11 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_cross_kv_cache_pool_mapping = Tensor(
                     name=f"host_cross_kv_cache_pool_mapping",
                     dtype=trt.int32,
-                    shape=[num_pp_layers],
+                    # 2: (Index of pool, Index of layer within pool)
+                    shape=[num_pp_layers, 2],
                     dim_range=OrderedDict([
                         ('pools_mapping', [num_pp_layers]),
+                        ('layer_cache_pool_locator', [2]),
                     ]))
 
                 for i in layers_range:
