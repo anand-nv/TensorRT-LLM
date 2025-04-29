@@ -10,7 +10,6 @@ python3 ./scripts/build_wheel.py --cuda_architectures "90-real" --benchmarks --t
 pip install build/tensorrt_llm-0.20.0rc0-cp312-cp312-linux_x86_64.whl
 ```
 
-
 Convert the checkpoint and build the engine:
 ```bash
 # required to pip install omegaconf
@@ -25,6 +24,24 @@ trtllm-build --checkpoint_dir newmodels/t5tts_convert/encoder/ \
 --bert_attention_plugin float16 --gpt_attention_plugin float16 \
 --remove_input_padding enable --use_paged_context_fmha enable
 
-
-
+trtllm-build --checkpoint_dir newmodels/t5tts_convert/decoder \
+	--output_dir newmodels/t5tts_engine/decoder \
+	--moe_plugin disable \
+	--max_beam_width 1 \
+	--max_batch_size 64 \
+	--max_input_len 192 \
+	--max_seq_len 512 \
+	--max_encoder_input_len 512 \
+	--gemm_plugin float16 \
+	--bert_attention_plugin float16 \
+	--gpt_attention_plugin float16 \
+	--remove_input_padding enable \
+ 	--use_paged_context_fmha enable
 ```
+
+Finally run the model on the dummy input:
+```bash
+python examples/models/core/t5tts/run.py
+```
+
+
