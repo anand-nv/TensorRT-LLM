@@ -25,8 +25,8 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
-                                     minimum, recv, select, send, shape, view, mean,
-                                     squeeze, unsqueeze)
+                                     mean, minimum, recv, send, shape, squeeze,
+                                     unsqueeze, view)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
@@ -62,7 +62,7 @@ class PositionwiseConvFF(Module):
         has_bias: bool = False,
         is_causal: bool = True,
         hidden_act: str = 'gelu',
-        padding: int = 0,
+        padding: Optional[int] = None,
         dilation: int = 1,
         dtype=None,
         groups: int = 1,
@@ -79,6 +79,13 @@ class PositionwiseConvFF(Module):
             self.causal_padding = ((kernel_size - 1) * dilation, 0)
 
             padding = 0
+
+        elif padding is None:
+            if kernel_size % 2 == 0:
+                raise ValueError(
+                    "`kernel_size` must be odd when `padding` is None.")
+
+            padding = int(dilation * (kernel_size - 1) / 2)
 
         self.proj = Conv1d(hidden_size,
                            ffn_hidden_size,
@@ -246,10 +253,10 @@ class EncoderDecoderEmbedding(Module):
 
         x = self.vocab_embedding(input_ids, *args) * self.embedding_scale
         if self.num_vocabs > 1:
-            x = view(
-                x,
-                concat([shape(x, 0) / self.num_vocabs, self.num_vocabs, -1])
-            )  # shape [totalSeqLen, nVocab, embDim]
+            x = view(x,
+                     concat(
+                         [shape(x, 0) / self.num_vocabs, self.num_vocabs,
+                          -1]))  # shape [totalSeqLen, nVocab, embDim]
             # average across vocabs
             x = mean(x, 1)  # shape [totalSeqLen, embDim]
 
@@ -481,7 +488,8 @@ class T5TTSDecoderLayer(Module):
             tp_rank=mapping.tp_rank,
             dtype=dtype,
             cross_attention=True,
-            relative_attention=False,  # Cross attention has no relative attention bias
+            relative_attention=
+            False,  # Cross attention has no relative attention bias
             max_distance=max_distance,
             num_buckets=num_buckets,
             position_embedding_type=PositionEmbeddingType.learned_absolute,
@@ -1145,7 +1153,8 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
-            hidden_states = self.embedding(decoder_input_ids, position_ids, None)
+            hidden_states = self.embedding(decoder_input_ids, position_ids,
+                                           None)
             self.register_network_output('embedding_layer_output',
                                          hidden_states)
         else:
@@ -1295,7 +1304,9 @@ class T5TTSDecoderModel(PretrainedModel):
             max(max_decoder_input_len * max_batch_size,
                 max_beam_width * max_batch_size),
         ]
-        multivocab_decoder_num_tokens_range = [x * self.num_vocabs for x in decoder_num_tokens_range]
+        multivocab_decoder_num_tokens_range = [
+            x * self.num_vocabs for x in decoder_num_tokens_range
+        ]
 
         # No enable_two_optimization_profiles support yet
 
@@ -1374,7 +1385,8 @@ class T5TTSDecoderModel(PretrainedModel):
                                    shape=[-1, -1],
                                    dim_range=OrderedDict([
                                        ('batch_size_beam_width', [bb_range]),
-                                       ('multivocab_input_len', [multivocab_inlen_range]),
+                                       ('multivocab_input_len',
+                                        [multivocab_inlen_range]),
                                    ]))
                 if self.has_position_embedding:
                     position_ids = Tensor(name='position_ids',
@@ -1754,9 +1766,12 @@ class T5TTSDecoderModel(PretrainedModel):
                 host_kv_cache_pool_pointers=host_kv_cache_pool_pointers,
                 host_kv_cache_pool_mapping=host_kv_cache_pool_mapping,
                 cross_kv_cache_block_offsets=cross_kv_cache_block_offsets,
-                host_cross_kv_cache_block_offsets=host_cross_kv_cache_block_offsets,
-                host_cross_kv_cache_pool_pointers=host_cross_kv_cache_pool_pointers,
-                host_cross_kv_cache_pool_mapping=host_cross_kv_cache_pool_mapping,
+                host_cross_kv_cache_block_offsets=
+                host_cross_kv_cache_block_offsets,
+                host_cross_kv_cache_pool_pointers=
+                host_cross_kv_cache_pool_pointers,
+                host_cross_kv_cache_pool_mapping=
+                host_cross_kv_cache_pool_mapping,
             )
 
             attention_params = AttentionParams(

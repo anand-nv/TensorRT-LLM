@@ -1,0 +1,264 @@
+# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+import argparse
+import json
+import time
+from collections import OrderedDict
+
+import torch
+
+import tensorrt_llm
+from tensorrt_llm import logger
+from tensorrt_llm._utils import str_dtype_to_trt, trt_dtype_to_torch
+from tensorrt_llm.runtime import ModelRunnerCpp
+from tensorrt_llm.runtime.session import Session, TensorInfo
+
+
+def read_config(component, engine_dir):
+    config_path = f"{engine_dir}/{component}/config.json"
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    model_config = OrderedDict()
+    model_config.update(config['pretrained_config'])
+    model_config.update(config['build_config'])
+    return model_config
+
+
+class MagpieEncoding:
+
+    def __init__(self, engine_dir):
+        self.session = self.get_session(engine_dir)
+        config = read_config('encoder', engine_dir)
+        self.dtype = config['dtype']
+        self.encoder_config = config
+
+    def get_session(self, engine_dir):
+        serialize_path = f"{engine_dir}/encoder/rank0.engine"
+        with open(serialize_path, 'rb') as f:
+            session = Session.from_serialized_engine(f.read())
+        return session
+
+    def get_encoder_feature(self, ):
+        text_encodings = torch.IntTensor([[
+            96, 40, 29, 26, 93, 90, 55, 74, 52, 93, 29, 26, 39, 93, 90, 52, 77,
+            85, 58, 93, 90, 64, 66, 65, 93, 84, 61, 93, 28, 39, 26, 22, 40, 46,
+            93, 90, 68, 77, 86, 93, 44, 22, 41, 26, 39, 93, 90, 78, 59, 93, 90,
+            57, 84, 85, 97
+        ]])
+        encoder_input_lengths = torch.IntTensor([text_encodings.shape[1]])
+        encoder_input_ids = remove_tensor_padding(text_encodings,
+                                                  encoder_input_lengths)
+        output_list = [
+            TensorInfo('input_ids', str_dtype_to_trt('int32'),
+                       encoder_input_ids.shape),
+            TensorInfo('input_lengths', str_dtype_to_trt('int32'),
+                       encoder_input_lengths.shape),
+        ]
+        inputs = OrderedDict()
+        inputs['input_ids'] = encoder_input_ids
+        inputs['input_lengths'] = encoder_input_lengths
+        output_info = (self.session).infer_shapes(output_list)
+        for k in inputs:
+            print(f"{k}: {inputs[k].shape}")
+        print(f"output_info: {output_info}")
+        logger.debug(f'output info {output_info}')
+        outputs = {
+            t.name:
+            torch.empty(tuple(t.shape),
+                        dtype=trt_dtype_to_torch(t.dtype),
+                        device='cuda')
+            for t in output_info
+        }
+        stream = torch.cuda.current_stream()
+        ok = self.session.run(inputs=inputs,
+                              outputs=outputs,
+                              stream=stream.cuda_stream)
+        assert ok, 'Engine execution failed'
+        stream.synchronize()
+        encoder_output = outputs['encoder_output']
+        return encoder_output
+
+        #inputs['position_ids'] = position_ids
+        return inputs
+
+
+def remove_tensor_padding(input_tensor,
+                          input_tensor_lengths=None,
+                          pad_value=None):
+    if pad_value:
+        assert input_tensor_lengths is None, "input_tensor_lengths should be None when pad_value is provided"
+        # Text tensor case: batch, seq_len
+        assert torch.all(
+            input_tensor[:, 0] !=
+            pad_value), "First token in each sequence should not be pad_value"
+        assert input_tensor_lengths is None
+
+        # Create a mask for all non-pad tokens
+        mask = input_tensor != pad_value
+
+        # Apply the mask to input_tensor to remove pad tokens
+        output_tensor = input_tensor[mask].view(1, -1)
+
+    else:
+        # Audio tensor case: batch, seq_len, feature_len
+        # position_ids case: batch, seq_len
+        assert input_tensor_lengths is not None, "input_tensor_lengths must be provided for 3D input_tensor"
+
+        # Initialize a list to collect valid sequences
+        valid_sequences = []
+
+        for i in range(input_tensor.shape[0]):
+            valid_length = input_tensor_lengths[i]
+            valid_sequences.append(input_tensor[i, :valid_length])
+
+        # Concatenate all valid sequences along the batch dimension
+        output_tensor = torch.cat(valid_sequences, dim=0)
+    return output_tensor
+
+
+def evaluate(args):
+    # She had her dark suit in greasy wash water all year.
+    text_encodings = [
+        96, 40, 29, 26, 93, 90, 55, 74, 52, 93, 29, 26, 39, 93, 90, 52, 77, 85,
+        58, 93, 90, 64, 66, 65, 93, 84, 61, 93, 28, 39, 26, 22, 40, 46, 93, 90,
+        68, 77, 86, 93, 44, 22, 41, 26, 39, 93, 90, 78, 59, 93, 90, 57, 84, 85,
+        97
+    ]
+    text_encodings = torch.IntTensor(text_encodings)
+
+    audio_context = torch.load('context_codes_bos_scaled.pt').flatten().cuda()
+
+    eos_token_id = 2047,
+    #batch_input_ids = [audio_context[0:]]
+    #encoder = MagpieEncoding(args.engine_dir)
+    #encoder_output = encoder.get_encoder_feature()
+
+    runner_kwargs = dict(
+        engine_dir=args.engine_dir,
+        is_enc_dec=True,
+        max_input_len=1024,
+        cross_kv_cache_fraction=0.5,
+        rank=0,
+    )
+
+    tllm_model = ModelRunnerCpp.from_dir(**runner_kwargs)
+
+    #inference_dtype = tllm_model.encoder_model_config.dtype
+    batch_input_ids = [audio_context]
+    encoder_input_ids = [text_encodings]
+
+    torch.IntTensor([text_encodings.shape[0]])
+    print(f"{audio_context.shape=}, {text_encodings.shape=}")
+    return_dict = False  # when set return_dict=True, get outputs by key
+    tik = time.time()
+    return_dict = True
+
+    tllm_output = tllm_model.generate(
+        batch_input_ids=batch_input_ids,
+        encoder_input_ids=encoder_input_ids,
+        max_new_tokens=1024,
+        bos_token_id=2046,
+        pad_token_id=0,
+        eos_token_id=2047,
+        streaming=False,
+        return_dict=return_dict,
+    )
+    """
+    tllm_output = tllm_model.generate(
+        batch_input_ids=[audio_context],
+        encoder_input_ids=encoder_input_ids,
+        #encoder_input_lengths=encoder_input_lengths,
+        max_new_tokens=100,
+        num_beams=args.num_beams,
+        bos_token_id=2046,
+        pad_token_id=0,
+        eos_token_id=2047,
+        debug_mode=args.debug_mode,
+        output_sequence_lengths=True,
+        return_dict=True,
+        end_id=1,
+        pad_id=0,
+        streaming=False,
+    )"""
+    torch.cuda.synchronize()
+    tok = time.time()
+
+    if return_dict:
+        tllm_output_ids = tllm_output['output_ids']
+    else:
+        tllm_output_ids = tllm_output
+    print(f"{tllm_output_ids.shape=}")
+    if tensorrt_llm.mpi_rank() == 0:
+        output_ids = tllm_output_ids[:, :]
+        output_ids = output_ids[output_ids != eos_token_id]
+
+        print("--------------------------------------")
+        print("TRT-LLM output_ids: ", output_ids)
+        print(f"TRT-LLM E2E time {(tok-tik)*1000}ms")
+        print("--------------------------------------")
+    torch.save(output_ids, "output_ids.pt")
+    return output_ids
+
+
+def print_tensor(tensor_name, tensor, num_elements=10):
+    if tensor.dtype in (torch.int32, torch.int64):
+        tensor = tensor.to(dtype=float)
+    print(
+        f'{tensor_name}: mean={tensor.abs().mean().item():.3f}, sum={tensor.abs().sum().item():.3f}, max={tensor.abs().max().item():.3f}'
+    )
+    # Pass num_elements=-1 will print the whole tensor
+    if num_elements < 0:
+        num_elements = torch.numel(tensor)
+    print(f'{tensor.flatten()[:num_elements]}')
+    print("Tensor Shape: ", tensor.size())
+    print("")
+
+
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--max_new_tokens", type=int, default=64)
+    parser.add_argument("--log_level", type=str, default="error")
+    parser.add_argument("--engine_dir", "-i", type=str, default="engines")
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--model_name",
+                        type=str,
+                        help="HuggingFace model name or FairSeq model path",
+                        default="t5tts")
+    parser.add_argument("--num_beams",
+                        type=int,
+                        help="Use beam search if num_beams >1",
+                        default=1)
+    parser.add_argument("--debug_mode",
+                        help="Whether or not to turn on the debug mode",
+                        action='store_true')
+    parser.add_argument("--compare_hf_fp32",
+                        help="Compare results with HuggingFace FP32",
+                        action='store_true')
+    parser.add_argument('--lora_dir', type=str, default=None, nargs="+")
+    parser.add_argument('--lora_task_uids', type=str, default=None, nargs="+")
+    parser.add_argument("--output_npy",
+                        type=str,
+                        default=None,
+                        help="Store input/output tensors C++ runtime testing")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    import os
+
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    args = parse_arguments()
+    logger.set_level(args.log_level)
+    evaluate(args)
