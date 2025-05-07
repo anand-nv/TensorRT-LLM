@@ -324,7 +324,8 @@ class T5TTSEncoderLayer(Module):
 
         self.attention_layernorm = ln_type(normalized_shape=hidden_size,
                                            eps=layernorm_eps,
-                                           dtype=dtype)
+                                           dtype=dtype,
+                                           bias=False)
 
         self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
@@ -340,7 +341,8 @@ class T5TTSEncoderLayer(Module):
 
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                         eps=layernorm_eps,
-                                        dtype=dtype)
+                                        dtype=dtype,
+                                        bias=False)
 
         self.residual_scaling = residual_scaling
 
@@ -464,7 +466,8 @@ class T5TTSDecoderLayer(Module):
 
         self.self_attention_layernorm = ln_type(normalized_shape=hidden_size,
                                                 eps=layernorm_eps,
-                                                dtype=dtype)
+                                                dtype=dtype,
+                                                bias=False)
 
         # Note: self attn uses MMHA, mask is always causal triangular
         # cross attn has two scenarios:
@@ -498,11 +501,15 @@ class T5TTSDecoderLayer(Module):
         self.cache_cross_attention_memory = None
         if has_encoder_input_layernorm:
             self.cross_attention_memory_layernorm = ln_type(
-                normalized_shape=hidden_size, eps=layernorm_eps, dtype=dtype)
+                normalized_shape=hidden_size,
+                eps=layernorm_eps,
+                dtype=dtype,
+                bias=False)
 
         self.cross_attention_layernorm = ln_type(normalized_shape=hidden_size,
                                                  eps=layernorm_eps,
-                                                 dtype=dtype)
+                                                 dtype=dtype,
+                                                 bias=False)
 
         self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
@@ -518,7 +525,8 @@ class T5TTSDecoderLayer(Module):
 
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                         eps=layernorm_eps,
-                                        dtype=dtype)
+                                        dtype=dtype,
+                                        bias=False)
 
         self.residual_scaling = residual_scaling
 
@@ -712,7 +720,8 @@ class T5TTSEncoderModel(PretrainedModel):
                 self.final_layernorm = ln_type(
                     normalized_shape=self.config.hidden_size,
                     eps=self.config.norm_epsilon,
-                    dtype=self.config.dtype)
+                    dtype=self.config.dtype,
+                    bias=self.config.has_layer_norm_bias)
 
     def check_config(self, config: PretrainedConfig):
         config.set_if_not_exist('has_position_embedding', False)
@@ -733,6 +742,7 @@ class T5TTSEncoderModel(PretrainedModel):
         config.set_if_not_exist('has_embedding_scale', False)
         config.set_if_not_exist('residual_scaling', 1.0)
         config.set_if_not_exist('has_lm_head_bias', False)
+        config.set_if_not_exist('has_layer_norm_bias', False)
         config.set_if_not_exist('num_buckets', None)
         config.set_if_not_exist('max_distance', None)
         config.set_if_not_exist('relative_attention', False)
@@ -777,6 +787,7 @@ class T5TTSEncoderModel(PretrainedModel):
         else:
             hidden_states = send(hidden_states, self.mapping.next_pp_rank())
             hidden_states.mark_output('hidden_states_output', self._dtype)
+            self.register_network_output('hidden_states_output', hidden_states)
 
         return hidden_states
 
