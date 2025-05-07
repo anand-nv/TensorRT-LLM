@@ -1098,7 +1098,8 @@ class T5TTSDecoderModel(PretrainedModel):
                 self.final_layernorm = ln_type(
                     normalized_shape=self.config.hidden_size,
                     eps=self.config.norm_epsilon,
-                    dtype=self.config.dtype)
+                    dtype=self.config.dtype,
+                    bias=self.config.has_final_layernorm_bias)
 
             self.lm_head = ColumnLinear(
                 self.config.hidden_size,
@@ -1129,7 +1130,7 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('has_encoder_input_layernorm', True)
         config.set_if_not_exist('has_model_final_layernorm', False)
         config.set_if_not_exist('audio_embedding_dim', 768)
-
+        config.set_if_not_exist('has_final_layernorm_bias', False)
         config.set_if_not_exist('encoder_hidden_size', None)
         config.set_if_not_exist('encoder_num_heads', None)
         config.set_if_not_exist('encoder_num_kv_heads', None)

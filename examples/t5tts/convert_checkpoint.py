@@ -92,7 +92,7 @@ def parse_model_config(args, ):
     #config["encoder"]['has_token_type_embedding'] =
     config["encoder"]['layernorm_position'] = "pre_layernorm"
 
-    config["encoder"]['layernorm_type'] = "RmsNorm"
+    config["encoder"]['layernorm_type'] = "LayerNorm"
     config["encoder"]['num_layers'] = "6"
     # config["encoder"]['d_model'] /config["encoder"]["num_heads"]
     config["encoder"]['d_kv'] = f"{int(768/12)}"
@@ -105,7 +105,7 @@ def parse_model_config(args, ):
     config["decoder"]['has_position_embedding'] = "true"
     config["decoder"]['layernorm_position'] = "pre_layernorm"
 
-    config["decoder"]['layernorm_type'] = "RmsNorm"
+    config["decoder"]['layernorm_type'] = "LayerNorm"
     config["decoder"]['num_layers'] = "12"
     config["decoder"]["num_vocabs"] = "8"
 
