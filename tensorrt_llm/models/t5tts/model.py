@@ -721,7 +721,7 @@ class T5TTSEncoderModel(PretrainedModel):
                     normalized_shape=self.config.hidden_size,
                     eps=self.config.norm_epsilon,
                     dtype=self.config.dtype,
-                    bias=self.config.has_layer_norm_bias)
+                    bias=self.config.has_final_layernorm_bias)
 
     def check_config(self, config: PretrainedConfig):
         config.set_if_not_exist('has_position_embedding', False)
@@ -742,7 +742,7 @@ class T5TTSEncoderModel(PretrainedModel):
         config.set_if_not_exist('has_embedding_scale', False)
         config.set_if_not_exist('residual_scaling', 1.0)
         config.set_if_not_exist('has_lm_head_bias', False)
-        config.set_if_not_exist('has_layer_norm_bias', False)
+        config.set_if_not_exist('has_final_layernorm_bias', False)
         config.set_if_not_exist('num_buckets', None)
         config.set_if_not_exist('max_distance', None)
         config.set_if_not_exist('relative_attention', False)
