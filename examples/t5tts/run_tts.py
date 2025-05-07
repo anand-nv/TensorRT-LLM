@@ -50,7 +50,7 @@ class MagpieEncoding:
             session = Session.from_serialized_engine(f.read())
         return session
 
-    def get_encoder_feature(self, ):
+    def get_encoder_feature(self):
         text_encodings = torch.IntTensor([[
             96, 40, 29, 26, 93, 90, 55, 74, 52, 93, 29, 26, 39, 93, 90, 52, 77,
             85, 58, 93, 90, 64, 66, 65, 93, 84, 61, 93, 28, 39, 26, 22, 40, 46,
@@ -58,8 +58,8 @@ class MagpieEncoding:
             57, 84, 85, 97
         ]])
         encoder_input_lengths = torch.IntTensor([text_encodings.shape[1]])
-        encoder_input_ids = remove_tensor_padding(text_encodings,
-                                                  encoder_input_lengths)
+        encoder_input_ids = remove_tensor_padding(
+            text_encodings, encoder_input_lengths).flatten()
         output_list = [
             TensorInfo('input_ids', str_dtype_to_trt('int32'),
                        encoder_input_ids.shape),
@@ -130,6 +130,10 @@ def remove_tensor_padding(input_tensor,
 
 def evaluate(args):
     # She had her dark suit in greasy wash water all year.
+    audio_context_num_tokens = 2048
+    audio_num_codebooks = 8
+    batch_size = 1
+
     text_encodings = [
         96, 40, 29, 26, 93, 90, 55, 74, 52, 93, 29, 26, 39, 93, 90, 52, 77, 85,
         58, 93, 90, 64, 66, 65, 93, 84, 61, 93, 28, 39, 26, 22, 40, 46, 93, 90,
@@ -140,10 +144,10 @@ def evaluate(args):
 
     audio_context = torch.load('context_codes_bos_scaled.pt').flatten().cuda()
 
-    eos_token_id = 2047,
-    #batch_input_ids = [audio_context[0:]]
+    eos_token_id = 2047
     #encoder = MagpieEncoding(args.engine_dir)
     #encoder_output = encoder.get_encoder_feature()
+    #torch.save(encoder_output, "encoder_output.pt")
 
     runner_kwargs = dict(
         engine_dir=args.engine_dir,
@@ -156,10 +160,8 @@ def evaluate(args):
     tllm_model = ModelRunnerCpp.from_dir(**runner_kwargs)
 
     #inference_dtype = tllm_model.encoder_model_config.dtype
-    batch_input_ids = [audio_context]
-    encoder_input_ids = [text_encodings]
-
-    torch.IntTensor([text_encodings.shape[0]])
+    batch_input_ids = [audio_context] * batch_size
+    encoder_input_ids = [text_encodings] * batch_size
     print(f"{audio_context.shape=}, {text_encodings.shape=}")
     return_dict = False  # when set return_dict=True, get outputs by key
     tik = time.time()
@@ -171,38 +173,34 @@ def evaluate(args):
         max_new_tokens=1024,
         bos_token_id=2046,
         pad_token_id=0,
-        eos_token_id=2047,
+        eos_token_id=eos_token_id,
         streaming=False,
         return_dict=return_dict,
     )
-    """
-    tllm_output = tllm_model.generate(
-        batch_input_ids=[audio_context],
-        encoder_input_ids=encoder_input_ids,
-        #encoder_input_lengths=encoder_input_lengths,
-        max_new_tokens=100,
-        num_beams=args.num_beams,
-        bos_token_id=2046,
-        pad_token_id=0,
-        eos_token_id=2047,
-        debug_mode=args.debug_mode,
-        output_sequence_lengths=True,
-        return_dict=True,
-        end_id=1,
-        pad_id=0,
-        streaming=False,
-    )"""
+
     torch.cuda.synchronize()
     tok = time.time()
-
+    batch_size = len(batch_input_ids)
     if return_dict:
         tllm_output_ids = tllm_output['output_ids']
     else:
         tllm_output_ids = tllm_output
+    tllm_output_ids = tllm_output_ids % audio_context_num_tokens
+
     print(f"{tllm_output_ids.shape=}")
+
     if tensorrt_llm.mpi_rank() == 0:
-        output_ids = tllm_output_ids[:, :]
-        output_ids = output_ids[output_ids != eos_token_id]
+        __output_ids__ = tllm_output_ids.reshape(tllm_output_ids.shape[0], -1,
+                                                 audio_num_codebooks)
+
+        output_ids_is_eos = torch.where(__output_ids__ == eos_token_id, 1, 0)
+        trim_output_idx = torch.argmin(torch.where(
+            torch.sum(output_ids_is_eos, dim=-1) == 8, 0, 1),
+                                       dim=1)
+
+        output_ids = [
+            __output_ids__[i, :trim_output_idx[i], :] for i in range(batch_size)
+        ]
 
         print("--------------------------------------")
         print("TRT-LLM output_ids: ", output_ids)
