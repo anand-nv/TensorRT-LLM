@@ -107,6 +107,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
         eagle_dynamic_tree_max_top_k: Optional[int] = None,
         lookahead_config: list[int] | None = None,
         debug_mode: bool = False,
+        debug_tensor_names: List[str] = [],
         lora_ckpt_source: str = "hf",
         gpu_weights_percent: float = 1,
         max_tokens_in_paged_kv_cache: int | None = None,
@@ -159,6 +160,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 KV Cache fraction reserved for cross attention, should only be used with enc-dec models.
             debug_mode (bool):
                 Whether or not to turn on the debug mode.
+            debug_tensor_names (List[str]):
+                A list of tensor names to be debugged.
             medusa_choices (List[List[int]]):
                 Medusa choices to use when in Medusa decoding.
             eagle_choices (List[List[int]]):
@@ -367,16 +370,18 @@ class ModelRunnerCpp(ModelRunnerMixin):
             assert max_beam_width <= model_config.max_beam_width
 
         debug_config = None
+        print(f"{debug_tensor_names=}, {debug_mode=}")
         if debug_mode:
             # To debug specific tensors, add tensor names in the following list
             #   if none provided, all input and output tensors will be dumped
             #   if not none, it will disable all input/output dump
-            debug_tensor_names: List[str] = [
-            ]  # modify this list for specific tensor dump
+            #debug_tensor_names: List[str] = [
+            #]  # modify this list for specific tensor dump
             debug_config = trtllm.DebugConfig(
                 debug_input_tensors=True,
                 debug_output_tensors=True,
                 debug_tensor_names=debug_tensor_names)
+            print(f"{debug_config=}")
 
         trtllm_config = trtllm.ExecutorConfig(
             max_batch_size=max_batch_size,
@@ -461,7 +466,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                     f"Decoder prefix tokens ({decoder_max_length}) + maximum new tokens ({max_new_tokens}) exceeds the engine or specified limit ({self.max_seq_len})"
                 )
         else:
-            if max_length + max_new_tokens > self.max_seq_len * len(self.model_config.vocab_sizes):
+            if max_length + max_new_tokens > self.max_seq_len * len(
+                    self.model_config.vocab_sizes):
                 raise RuntimeError(
                     f"Maximum input length ({max_length}) + maximum new tokens ({max_new_tokens}) exceeds the engine or specified limit ({self.max_seq_len})"
                 )
@@ -1056,7 +1062,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
 
             input_lengths = torch.tensor([x.size(0) for x in batch_input_ids],
                                          dtype=torch.int32,
-                                         device=cuda_device) // len(self.model_config.vocab_sizes)
+                                         device=cuda_device) // len(
+                                             self.model_config.vocab_sizes)
 
             if output_sequence_lengths:
                 outputs['sequence_lengths'] = torch.tensor(sequence_lengths,
