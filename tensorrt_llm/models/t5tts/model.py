@@ -143,7 +143,7 @@ class PositionalEmbedding(Module):
         if has_embedding_layernorm:
             self.embedding_layernorm = ln_type(normalized_shape=hidden_size,
                                                eps=layernorm_eps,
-                                               dtype=dtype)
+                                               dtype=dtype, bias=False)
 
         self.embedding_scale = 1.0
         if has_embedding_scale:
@@ -221,7 +221,7 @@ class EncoderDecoderEmbedding(Module):
         if has_embedding_layernorm:
             self.embedding_layernorm = ln_type(normalized_shape=hidden_size,
                                                eps=layernorm_eps,
-                                               dtype=dtype)
+                                               dtype=dtype, bias=False)
 
         # e.g. BART true, T5 false
         self.embedding_scale = 1.0
@@ -317,7 +317,7 @@ class T5TTSEncoderLayer(Module):
 
         self.attention_layernorm = ln_type(normalized_shape=hidden_size,
                                            eps=layernorm_eps,
-                                           dtype=dtype)
+                                           dtype=dtype, bias=False)
 
         self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
@@ -333,7 +333,7 @@ class T5TTSEncoderLayer(Module):
 
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                         eps=layernorm_eps,
-                                        dtype=dtype)
+                                        dtype=dtype, bias=False)
 
         self.residual_scaling = residual_scaling
 
@@ -457,7 +457,7 @@ class T5TTSDecoderLayer(Module):
 
         self.self_attention_layernorm = ln_type(normalized_shape=hidden_size,
                                                 eps=layernorm_eps,
-                                                dtype=dtype)
+                                                dtype=dtype, bias=False)
 
         # Note: self attn uses MMHA, mask is always causal triangular
         # cross attn has two scenarios:
@@ -490,11 +490,11 @@ class T5TTSDecoderLayer(Module):
         self.cache_cross_attention_memory = None
         if has_encoder_input_layernorm:
             self.cross_attention_memory_layernorm = ln_type(
-                normalized_shape=hidden_size, eps=layernorm_eps, dtype=dtype)
+                normalized_shape=hidden_size, eps=layernorm_eps, dtype=dtype, bias=False)
 
         self.cross_attention_layernorm = ln_type(normalized_shape=hidden_size,
                                                  eps=layernorm_eps,
-                                                 dtype=dtype)
+                                                 dtype=dtype, bias=False)
 
         self.pos_ff = PositionwiseConvFF(
             hidden_size=hidden_size,
@@ -510,7 +510,7 @@ class T5TTSDecoderLayer(Module):
 
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
                                         eps=layernorm_eps,
-                                        dtype=dtype)
+                                        dtype=dtype, bias=False)
 
         self.residual_scaling = residual_scaling
 
@@ -704,7 +704,7 @@ class T5TTSEncoderModel(PretrainedModel):
                 self.final_layernorm = ln_type(
                     normalized_shape=self.config.hidden_size,
                     eps=self.config.norm_epsilon,
-                    dtype=self.config.dtype)
+                    dtype=self.config.dtype, bias=False)
 
     def check_config(self, config: PretrainedConfig):
         config.set_if_not_exist('has_position_embedding', False)
@@ -1079,7 +1079,7 @@ class T5TTSDecoderModel(PretrainedModel):
                 self.final_layernorm = ln_type(
                     normalized_shape=self.config.hidden_size,
                     eps=self.config.norm_epsilon,
-                    dtype=self.config.dtype)
+                    dtype=self.config.dtype, bias=False)
 
             self.lm_head = ColumnLinear(
                 self.config.hidden_size,
