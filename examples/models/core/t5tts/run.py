@@ -1,6 +1,7 @@
 from tensorrt_llm.runtime import ModelRunnerCpp
 import torch
 import numpy as np
+import os
 
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
