@@ -68,6 +68,7 @@ def parse_arguments():
     )
     parser.add_argument('engine_dir')
     args = parser.parse_args()
+    print(args)
     return args
 
 
@@ -585,6 +586,10 @@ if __name__ == "__main__":
         help=
         'Target inference dtype. Weights and Computation will be in this dtype, no matter what original dtype the weight checkpoint has.'
     )
+    parser.add_argument('--logits_dtype',
+                        type=str,
+                        default='float16',
+                        choices=['float16', 'float32'])
     parser.add_argument(
         '--skip_cross_kv',
         action='store_true',
