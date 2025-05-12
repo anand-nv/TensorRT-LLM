@@ -16,20 +16,20 @@ import argparse
 import json
 import logging
 import os
-import time
 import shutil
+import time
 
 import nemo.collections.asr.models as nemo_asr
-import onnx
-import torch
 import numpy as np
-from omegaconf import OmegaConf
-from safetensors.torch import save_file
+import onnx
 import onnx_graphsurgeon as gs
+import torch
+from omegaconf import OmegaConf
+from packaging.version import Version
+from safetensors.torch import save_file
 
 import tensorrt_llm
 from tensorrt_llm.functional import LayerNormPositionType, LayerNormType
-from tensorrt_llm.network import set_plugin_info
 from tensorrt_llm.quantization import QuantAlgo
 
 TORCH_DTYPES = {
@@ -182,52 +182,66 @@ class CanaryModel:
             with autocast, torch.no_grad(), torch.inference_mode():
                 logging.info(f"Exporting model {self.model.__class__.__name__}")
 
-
-
                 encoder_filename = 'encoder.onnx'
                 tmp_encoder_path = f"{encoder_path}.tmp"
 
                 os.makedirs(tmp_encoder_path, exist_ok=True)
                 tmp_export_file = os.path.join(tmp_encoder_path, "encoder.onnx")
 
-                self.model.encoder.export(tmp_export_file, onnx_opset_version=17)
+                self.model.encoder.export(tmp_export_file,
+                                          onnx_opset_version=17)
                 save_as_external_data = len(os.listdir(tmp_encoder_path)) > 1
                 print(f"Loading encoder from {encoder_path} for GS")
                 enc_graph = gs.import_onnx(onnx.load(tmp_export_file))
                 enc_outputs = enc_graph.outputs[0]
                 enc_len = enc_graph.outputs[1]
-                Y = gs.Variable(name='encoded_outputs', dtype=np.float32, shape=(None, None, 1024))
+                Y = gs.Variable(name='encoded_outputs',
+                                dtype=np.float32,
+                                shape=(None, None, 1024))
 
                 if isinstance(self.model.encoder_decoder_proj, torch.nn.Linear):
-                    proj_w=self.model.encoder_decoder_proj.weight.data.clone()
-                    proj_b=self.model.encoder_decoder_proj.bias.data.clone()
+                    proj_w = self.model.encoder_decoder_proj.weight.data.clone()
+                    proj_b = self.model.encoder_decoder_proj.bias.data.clone()
                     x = gs.Variable(name='x')
-                    w = gs.Constant(name='w', values=proj_w.transpose(1, 0).cpu().numpy())
+                    w = gs.Constant(name='w',
+                                    values=proj_w.transpose(1, 0).cpu().numpy())
                     b = gs.Constant(name='b', values=proj_b.cpu().numpy())
                     mul_out = gs.Variable(name="mul_out")
                     enc_graph.nodes.append(
-                        gs.Node(op="Transpose", inputs=[enc_outputs], outputs=[x], attrs={"perm": [0, 2, 1]}))
-                    enc_graph.nodes.append(gs.Node(op="MatMul", inputs=[x, w], outputs=[mul_out]))
-                    enc_graph.nodes.append(gs.Node(op="Add", inputs=[mul_out, b], outputs=[Y]))
-
-                elif isinstance(self.model.encoder_decoder_proj, torch.nn.Identity):
+                        gs.Node(op="Transpose",
+                                inputs=[enc_outputs],
+                                outputs=[x],
+                                attrs={"perm": [0, 2, 1]}))
                     enc_graph.nodes.append(
-                        gs.Node(op="Transpose", inputs=[enc_outputs], outputs=[Y], attrs={"perm": [0, 2, 1]}))
+                        gs.Node(op="MatMul", inputs=[x, w], outputs=[mul_out]))
+                    enc_graph.nodes.append(
+                        gs.Node(op="Add", inputs=[mul_out, b], outputs=[Y]))
+
+                elif isinstance(self.model.encoder_decoder_proj,
+                                torch.nn.Identity):
+                    enc_graph.nodes.append(
+                        gs.Node(op="Transpose",
+                                inputs=[enc_outputs],
+                                outputs=[Y],
+                                attrs={"perm": [0, 2, 1]}))
                 else:
-                    raise AssertionError(f"Projection layer {type(self.model.encoder_decoder_proj)} is not supported.")
+                    raise AssertionError(
+                        f"Projection layer {type(self.model.encoder_decoder_proj)} is not supported."
+                    )
 
                 enc_graph.outputs = [Y, enc_len]
                 print(f"exporting encoder from  GS")
 
                 model = gs.export_onnx(enc_graph)
                 print(f"Saving encoder from  GS")
-    
+
                 os.makedirs(encoder_path, exist_ok=True)
                 export_file = os.path.join(encoder_path, "encoder.onnx")
 
-                onnx.save(model, export_file, save_as_external_data=save_as_external_data)
+                onnx.save(model,
+                          export_file,
+                          save_as_external_data=save_as_external_data)
                 shutil.rmtree(tmp_encoder_path)
-
 
                 with open(os.path.join(encoder_path, "config.json"),
                           'w') as encoder_config_file:
@@ -238,7 +252,6 @@ class CanaryModel:
 
                 torch.save(self.model.preprocessor.featurizer.filter_banks,
                            mel_basis_file)
-
 
                 with open(os.path.join(preprocessor_path, "config.json"),
                           'w') as feat_config:
@@ -314,7 +327,6 @@ class CanaryModel:
     def convert_decoder(self):
         self.model.transf_decoder.freeze()
 
-
         try:
             weights = {}
             self.model.transf_decoder.to(dtype=TORCH_DTYPES[self.dtype])
@@ -325,25 +337,49 @@ class CanaryModel:
                 lm_head['mlp.layer0.weight'],
                 model_params['_embedding.token_embedding.weight'])
 
-            weights['embedding.vocab_embedding.weight'] = model_params[
+            if Version(tensorrt_llm.__version__) < Version("0.17.0"):
+                raise NotImplementedError("TensorRT-LLM version must be >= 0.17.0")
+            elif Version(tensorrt_llm.__version__) < Version("0.19.0alpha"):
+                layer_prefix = "decoder_layers"
+                layer_names = {
+                    'vocab_embedding': 'embedding.vocab_embedding',
+                    'position_embedding': 'embedding.position_embedding',
+                    'embedding_ln': 'embedding.embedding_layernorm',
+                    'final_layernorm': 'final_layernorm'
+                }
+            else:
+                layer_prefix = "transformer.layers"
+                layer_names = {
+                    'vocab_embedding': 'transformer.vocab_embedding',
+                    'position_embedding': 'transformer.position_embedding',
+                    'embedding_ln': 'transformer.ln_embed',
+                    'final_layernorm': 'transformer.ln_f'
+                }
+
+            weights[f'{layer_names["vocab_embedding"]}.weight'] = model_params[
                 '_embedding.token_embedding.weight'].contiguous().clone()
-            weights['lm_head.weight'] = lm_head['mlp.layer0.weight'].contiguous(
-            )
-            weights['lm_head.bias'] = lm_head['mlp.layer0.bias'].contiguous()
-            weights['embedding.position_embedding.weight'] = model_params[
+            weights[f'{layer_names["position_embedding"]}.weight'] = model_params[
                 '_embedding.position_embedding.pos_enc'].contiguous()
-            weights['embedding.embedding_layernorm.weight'] = model_params[
+            weights[f'{layer_names["embedding_ln"]}.weight'] = model_params[
                 '_embedding.layer_norm.weight'].contiguous()
-            weights['embedding.embedding_layernorm.bias'] = model_params[
+            weights[f'{layer_names["embedding_ln"]}.bias'] = model_params[
                 '_embedding.layer_norm.bias'].contiguous()
+            weights[f'{layer_names["final_layernorm"]}.weight'] = model_params[
+                '_decoder.final_layer_norm.weight'].contiguous()
+            weights[f'{layer_names["final_layernorm"]}.bias'] = model_params[
+                '_decoder.final_layer_norm.bias'].contiguous()
+            weights['lm_head.weight'] = lm_head[
+                'mlp.layer0.weight'].contiguous()
+            weights['lm_head.bias'] = lm_head['mlp.layer0.bias'].contiguous(
+            )
 
             for i in range(self.config['decoder_layers']):
-                trtllm_layer_name_prefix = f'decoder_layers.{i}'
+                layer_prefix_i = f'{layer_prefix}.{i}'
                 #layer_norm_1 aka self_attention_layernorm
-                weights[f'{trtllm_layer_name_prefix}.self_attention_layernorm.weight'] =  \
+                weights[f'{layer_prefix_i}.self_attention_layernorm.weight'] =  \
                     model_params[f'_decoder.layers.{i}.layer_norm_1.weight'].contiguous()
                 weights[
-                    f'{trtllm_layer_name_prefix}.self_attention_layernorm.bias'] = \
+                    f'{layer_prefix_i}.self_attention_layernorm.bias'] = \
                     model_params[f'_decoder.layers.{i}.layer_norm_1.bias'].contiguous()
 
                 #first_sub_layer
@@ -359,14 +395,14 @@ class CanaryModel:
                     dim=0,
                 ).contiguous()
                 dst = weights[
-                    f'{trtllm_layer_name_prefix}.self_attention.qkv.weight'] = t
+                    f'{layer_prefix_i}.self_attention.qkv.weight'] = t
                 t = model_params[
                     f'_decoder.layers.{i}.first_sub_layer.out_projection.weight'].contiguous(
                     )
                 dst = weights[
-                    f'{trtllm_layer_name_prefix}.self_attention.dense.weight'] = t
+                    f'{layer_prefix_i}.self_attention.dense.weight'] = t
 
-                weights[f'{trtllm_layer_name_prefix}.self_attention.qkv.bias'] = torch.cat(
+                weights[f'{layer_prefix_i}.self_attention.qkv.bias'] = torch.cat(
                     [
                         model_params[
                             f'_decoder.layers.{i}.first_sub_layer.query_net.bias'],
@@ -377,14 +413,14 @@ class CanaryModel:
                     ],
                     dim=0).contiguous()
 
-                weights[f'{trtllm_layer_name_prefix}.self_attention.dense.bias'] =  \
+                weights[f'{layer_prefix_i}.self_attention.dense.bias'] =  \
                     model_params[f'_decoder.layers.{i}.first_sub_layer.out_projection.bias'].contiguous()
 
                 #layer_norm_2 aka cross_attention_layernorm
-                weights[f'{trtllm_layer_name_prefix}.cross_attention_layernorm.weight'] = \
+                weights[f'{layer_prefix_i}.cross_attention_layernorm.weight'] = \
                     model_params[f'_decoder.layers.{i}.layer_norm_2.weight'].contiguous()
                 weights[
-                    f'{trtllm_layer_name_prefix}.cross_attention_layernorm.bias'] = \
+                    f'{layer_prefix_i}.cross_attention_layernorm.bias'] = \
                     model_params[f'_decoder.layers.{i}.layer_norm_2.bias'].contiguous()
 
                 #second_sub_layer
@@ -401,14 +437,14 @@ class CanaryModel:
                 ).contiguous()
 
                 dst = weights[
-                    f'{trtllm_layer_name_prefix}.cross_attention.qkv.weight'] = t
+                    f'{layer_prefix_i}.cross_attention.qkv.weight'] = t
 
                 t = model_params[
                     f'_decoder.layers.{i}.second_sub_layer.out_projection.weight'].contiguous(
                     )
 
                 dst = weights[
-                    f'{trtllm_layer_name_prefix}.cross_attention.dense.weight'] = t
+                    f'{layer_prefix_i}.cross_attention.dense.weight'] = t
 
                 cross_attn_qkv_bias = torch.cat([
                     model_params[
@@ -420,36 +456,30 @@ class CanaryModel:
                 ],
                                                 dim=0).contiguous()
                 weights[
-                    f'{trtllm_layer_name_prefix}.cross_attention.qkv.bias'] = cross_attn_qkv_bias
-                weights[f'{trtllm_layer_name_prefix}.cross_attention.dense.bias'] = \
+                    f'{layer_prefix_i}.cross_attention.qkv.bias'] = cross_attn_qkv_bias
+                weights[f'{layer_prefix_i}.cross_attention.dense.bias'] = \
                     model_params[f'_decoder.layers.{i}.second_sub_layer.out_projection.bias'].contiguous()
 
                 #layer_norm_3
-                weights[f'{trtllm_layer_name_prefix}.mlp_layernorm.weight'] = \
+                weights[f'{layer_prefix_i}.mlp_layernorm.weight'] = \
                     model_params[f'_decoder.layers.{i}.layer_norm_3.weight'].contiguous()
-                weights[f'{trtllm_layer_name_prefix}.mlp_layernorm.bias'] = \
+                weights[f'{layer_prefix_i}.mlp_layernorm.bias'] = \
                     model_params[f'_decoder.layers.{i}.layer_norm_3.bias'].contiguous()
 
                 #third_sub_layer
                 t = model_params[
                     f'_decoder.layers.{i}.third_sub_layer.dense_in.weight'].contiguous(
                     )
-                weights[f'{trtllm_layer_name_prefix}.mlp.fc.weight'] = t
+                weights[f'{layer_prefix_i}.mlp.fc.weight'] = t
                 t = model_params[
                     f'_decoder.layers.{i}.third_sub_layer.dense_out.weight'].contiguous(
                     )
-                weights[f'{trtllm_layer_name_prefix}.mlp.proj.weight'] = t
+                weights[f'{layer_prefix_i}.mlp.proj.weight'] = t
 
-                weights[f'{trtllm_layer_name_prefix}.mlp.fc.bias'] = \
+                weights[f'{layer_prefix_i}.mlp.fc.bias'] = \
                     model_params[f'_decoder.layers.{i}.third_sub_layer.dense_in.bias'].contiguous()
-                weights[f'{trtllm_layer_name_prefix}.mlp.proj.bias'] = \
+                weights[f'{layer_prefix_i}.mlp.proj.bias'] = \
                     model_params[f'_decoder.layers.{i}.third_sub_layer.dense_out.bias'].contiguous()
-
-            weights['final_layernorm.weight'] = model_params[
-                '_decoder.final_layer_norm.weight'].contiguous()
-            weights['final_layernorm.bias'] = model_params[
-                '_decoder.final_layer_norm.bias'].contiguous()
-
         except Exception as e:
             raise e
         component_save_dir = os.path.join(args.output_dir, "decoder")

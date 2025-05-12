@@ -6,5 +6,6 @@ kaldialign
 tensorrt_llm>=0.17.0
 datasets
 lhotse
-nemo_toolkit[asr]==2.2.0
+nemo_toolkit[asr]==2.3.0
 librosa
+protobuf>=4.25.4
