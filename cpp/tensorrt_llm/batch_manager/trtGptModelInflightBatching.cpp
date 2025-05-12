@@ -1920,7 +1920,7 @@ runtime::CudaEvent TrtGptModelInflightBatching::decoderStepAsync(ScheduledReques
         auto const genBufferId = mCtxGenFusion ? getFusedBufferId() : getGenerationBufferId();
         auto& genRuntimeBuffers = mBuffers.at(genBufferId);
         (*mHandleGenerationLogits)(genLogitsIndex, scheduledRequests.generationRequests, *mDecoderBuffers[vid],
-            mModelConfig, mRuntime->getBufferManager(), genRuntimeBuffers->logits, *genRuntimeBuffers);
+            mModelConfig, mRuntime->getBufferManager(), genRuntimeBuffers->logits, *genRuntimeBuffers, vid);
 
         // Copy indirection output into input
         // TODO: Could we avoid this by modifying batchDecoder to take a vector of tensors instead?
