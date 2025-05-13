@@ -189,13 +189,13 @@ def parse_model_config(args, ):
             component_config.has_lm_head_bias = config.getboolean(
                 component,  # TODO: T5 with bias
                 'has_lm_head_bias',
-                fallback=False)
+                fallback=True)
             component_config.relative_attention = config.getboolean(
                 component, 'relative_attention', fallback=False)
             component_config.rescale_before_lm_head = config.getboolean(
                 component,
                 'tie_word_embeddings',
-                fallback=True,
+                fallback=False,
             )  # default is True (for T5), but False for Flan-T5
             component_config.encoder_hidden_size = config.getint(
                 'encoder', 'd_model')
