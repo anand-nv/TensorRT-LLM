@@ -26,7 +26,7 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
                                      mean, minimum, recv, send, shape, squeeze,
-                                     unsqueeze, view)
+                                     transpose, unsqueeze, view)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
@@ -65,6 +65,7 @@ class PositionwiseConvFF(Module):
         padding: Optional[int] = None,
         dilation: int = 1,
         dtype=None,
+        encoder_reshape=False,
         groups: int = 1,
     ):
         super().__init__()
@@ -74,6 +75,7 @@ class PositionwiseConvFF(Module):
         self.pos_ffn_hidden_size = ffn_hidden_size
 
         self.hidden_act = ACT2FN[hidden_act]
+        self.encoder_reshape = encoder_reshape
 
         if self.is_causal:
             self.causal_padding = ((kernel_size - 1) * dilation, 0)
@@ -109,11 +111,22 @@ class PositionwiseConvFF(Module):
             # currently for T5TTS causal padding is only required for decoder
             # but is 0 because (kernel_size-1)=0 for decoder, padding=(kernel_size - 1) * dilation
             pass
-        x = unsqueeze(x, dim_sqz)
+        if self.encoder_reshape:
+            x = unsqueeze(x, 0)
+            x = transpose(x, 1, 2)
+        else:
+            x = unsqueeze(x, dim_sqz)
 
         x = self.proj(x)
         x = self.o_net(self.hidden_act(x))
-        x = squeeze(x, dim_sqz)
+        if self.encoder_reshape:
+            x = transpose(x, 2, 1)
+            x = squeeze(x, 0)
+        else:
+            x = squeeze(x, dim_sqz)
+        if default_net().plugin_config.remove_input_padding:
+            #B,T,D -> BxT,D
+            x = x.view([-1, self.hidden_size])
         return x
 
 
@@ -131,7 +144,7 @@ class PositionalEmbedding(Module):
                  embedding_sharding_dim=0,
                  mapping=Mapping()):
         super().__init__()
-
+        print(f"layernorm_type: {layernorm_type}")
         self.layernorm_type = layernorm_type
         ln_type = layernorm_map[layernorm_type]
 
@@ -252,6 +265,7 @@ class EncoderDecoderEmbedding(Module):
                 ] if prompt_embedding_table is not None else []
 
         x = self.vocab_embedding(input_ids, *args) * self.embedding_scale
+
         if self.num_vocabs > 1:
             x = view(x,
                      concat(
@@ -337,6 +351,7 @@ class T5TTSEncoderLayer(Module):
             groups=mapping.tp_group,
             dtype=dtype,
             is_causal=conv_is_causal,
+            encoder_reshape=True,
         )
 
         self.pos_ff_layernorm = ln_type(normalized_shape=hidden_size,
@@ -412,6 +427,9 @@ class T5TTSDecoderLayer(Module):
                  num_attention_heads,
                  num_kv_heads,
                  head_size,
+                 encoder_hidden_size,
+                 encoder_num_heads,
+                 encoder_head_size,
                  max_position_embeddings=None,
                  q_scaling=1.0,
                  has_attention_qkvo_bias=False,
@@ -433,8 +451,11 @@ class T5TTSDecoderLayer(Module):
         super().__init__()
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
-
+        self.local_layer_idx = local_layer_idx
         # e.g. BART regular, T5 RMS
+
+        print(f"layernorm_type: {layernorm_type}")
+
         self.layernorm_type = layernorm_type
         ln_type = layernorm_map[layernorm_type]
 
@@ -476,12 +497,17 @@ class T5TTSDecoderLayer(Module):
         # - context phase special handling is done in plugin by resetting mask type
         #
         # e.g. BART q_scaling = 1.f, T5 q_scaling = 1.f/sqrt(head_size)
+        print(
+            f"CROSS_ATTENTION_HEADS:  \n  {num_attention_heads=}, {hidden_size=}, {head_size=}"
+        )
+        print(
+            f"CROSS_ATTENTION_HEADS:  \n  {encoder_num_heads=}, {encoder_hidden_size=}, {encoder_head_size=}, {num_kv_heads=}"
+        )
+
         self.cross_attention = Attention(
             local_layer_idx=local_layer_idx,
-            hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            attention_head_size=head_size,
-            num_kv_heads=num_kv_heads,
+            hidden_size=encoder_hidden_size,
+            num_attention_heads=encoder_num_heads,
             max_position_embeddings=max_position_embeddings,
             q_scaling=q_scaling,
             bias=has_attention_qkvo_bias,
@@ -498,8 +524,10 @@ class T5TTSDecoderLayer(Module):
             position_embedding_type=PositionEmbeddingType.learned_absolute,
             skip_cross_kv=skip_cross_kv)
 
+        self.has_encoder_input_layernorm = has_encoder_input_layernorm
+
         self.cache_cross_attention_memory = None
-        if has_encoder_input_layernorm:
+        if self.has_encoder_input_layernorm:
             self.cross_attention_memory_layernorm = ln_type(
                 normalized_shape=hidden_size,
                 eps=layernorm_eps,
@@ -548,6 +576,8 @@ class T5TTSDecoderLayer(Module):
 
         if encoder_output:
             assert isinstance(encoder_output, Tensor)
+            encoder_output = self.cross_attention_memory_layernorm(
+                encoder_output)
 
         # self-attention
         residual = hidden_states * self.residual_scaling
@@ -615,7 +645,7 @@ class T5TTSDecoderLayer(Module):
             hidden_states = self.pos_ff_layernorm(hidden_states)
 
         hidden_states = self.pos_ff(hidden_states)
-        self.register_network_output('pos_ff_output', hidden_states)
+        self.register_network_output(f'pos_ff_output', hidden_states)
 
         hidden_states = residual + hidden_states
 
@@ -768,7 +798,7 @@ class T5TTSEncoderModel(PretrainedModel):
 
             hidden_states = self.embedding(input_ids, position_ids,
                                            token_type_ids, *ptuning_args)
-            self.register_network_output('embedding_layer_output',
+            self.register_network_output('encoder_embedding_layer_output',
                                          hidden_states)
         else:
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
@@ -787,7 +817,8 @@ class T5TTSEncoderModel(PretrainedModel):
         else:
             hidden_states = send(hidden_states, self.mapping.next_pp_rank())
             hidden_states.mark_output('hidden_states_output', self._dtype)
-            self.register_network_output('hidden_states_output', hidden_states)
+            self.register_network_output('encoder_hidden_states_output',
+                                         hidden_states)
 
         return hidden_states
 
@@ -815,7 +846,6 @@ class T5TTSEncoderModel(PretrainedModel):
 
         input_ids, position_ids, token_type_ids, hidden_states = None, None, None, None
         remove_input_padding = default_net().plugin_config.remove_input_padding
-
         attention_mask = None
         if remove_input_padding:
             if self.mapping.is_first_pp_rank():
@@ -996,6 +1026,7 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = self.config.layernorm_type
+        print(f"layernorm_type: {self.layernorm_type}")
         ln_type = layernorm_map[self.layernorm_type]
 
         # e.g. BART true, T5 false
@@ -1071,6 +1102,9 @@ class T5TTSDecoderModel(PretrainedModel):
                 num_attention_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
+                encoder_hidden_size=self.config.encoder_hidden_size,
+                encoder_num_heads=self.config.encoder_num_heads,
+                encoder_head_size=self.config.encoder_head_size,
                 max_position_embeddings=self.config.max_position_embeddings,
                 q_scaling=self.config.q_scaling,
                 has_attention_qkvo_bias=self.config.has_attention_qkvo_bias,
@@ -1165,6 +1199,8 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
+            self.register_network_output('decoder_input_ids', decoder_input_ids)
+
             hidden_states = self.embedding(decoder_input_ids, position_ids,
                                            None)
             self.register_network_output('embedding_layer_output',
@@ -1288,6 +1324,7 @@ class T5TTSDecoderModel(PretrainedModel):
         encoder_head_size = self.encoder_head_size
         encoder_num_kv_heads = (self.encoder_num_kv_heads + self.mapping.tp_size
                                 - 1) // self.mapping.tp_size
+        remove_input_padding = default_net().plugin_config.remove_input_padding
 
         bb_range = [
             1, (max_batch_size * max_beam_width + 1) // 2,
@@ -1351,7 +1388,6 @@ class T5TTSDecoderModel(PretrainedModel):
         attention_mask_params = AttentionMaskParams()
         use_gpt_attention_plugin = default_net(
         ).plugin_config.gpt_attention_plugin
-        remove_input_padding = default_net().plugin_config.remove_input_padding
         paged_kv_cache = default_net().plugin_config.paged_kv_cache
         tokens_per_block = default_net().plugin_config.tokens_per_block
 

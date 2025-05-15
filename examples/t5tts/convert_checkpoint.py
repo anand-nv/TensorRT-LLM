@@ -97,8 +97,11 @@ def parse_model_config(args, ):
     config["encoder"]['num_layers'] = "6"
     # config["encoder"]['d_model'] /config["encoder"]["num_heads"]
     config["encoder"]['d_kv'] = f"{int(768/12)}"
+    config["encoder"]['logits_dtype'] = args.logits_dtype
 
     config["decoder"]["num_heads"] = "12"
+    config["decoder"]["encoder_num_heads"] = "1"
+
     config["decoder"]['d_model'] = "768"  #hidden_size
     config["decoder"]['d_ffn'] = "3072"  #ffn_hidden_size
     config["decoder"]['vocab_size'] = "16384"  # 8 * 2048
@@ -109,11 +112,12 @@ def parse_model_config(args, ):
     config["decoder"]['layernorm_type'] = "LayerNorm"
     config["decoder"]['num_layers'] = "12"
     config["decoder"]["num_vocabs"] = "8"
+    config["decoder"]['logits_dtype'] = args.logits_dtype
 
     # manually set q_scaling to offset attention scaling's effect.
     # TODO: modify kernels to control whether to disable attention scaling
     def get_offset_q_scaling(config):
-        scaling = 1 / config.head_size**.5
+        scaling = config.head_size**(-0.5)
         return scaling
 
     config["structure"] = dict()
@@ -161,7 +165,7 @@ def parse_model_config(args, ):
             component, 'layernorm_position',
             fallback='pre_layernorm')]  # TODO: hardcoded here
         component_config.layernorm_type = layernorm_type_map[config.get(
-            component, 'layernorm_type', fallback='RmsNorm')]
+            component, 'layernorm_type', fallback='LayerNorm')]
         component_config.hidden_act = config.get(component,
                                                  'dense_act_fn',
                                                  fallback="gelu")
@@ -196,17 +200,16 @@ def parse_model_config(args, ):
             component_config.rescale_before_lm_head = config.getboolean(
                 component,
                 'tie_word_embeddings',
-                fallback=True,
+                fallback=False,
             )  # default is True (for T5), but False for Flan-T5
             component_config.encoder_hidden_size = config.getint(
                 'encoder', 'd_model')
             component_config.encoder_num_heads = config.getint(
-                'encoder', 'num_heads')
-            component_config.encoder_head_size = config.getint(
-                'encoder', 'd_kv')
+                'decoder', 'encoder_num_heads')
+            component_config.encoder_head_size = component_config.encoder_hidden_size // component_config.encoder_num_heads  # config.getint('encoder', 'd_kv')
             #FIXME: check what is the correct generation process for the given checkpoint
             component_config.decoder_start_token_id = config.getint(
-                'decoder', 'decoder_start_token_id', fallback=106339 - 2)
+                'decoder', 'decoder_start_token_id', fallback=2048 - 2)
             component_config.eos_token_id = config.getint('decoder',
                                                           'eos_token_id',
                                                           fallback=2048 - 1)
@@ -233,7 +236,7 @@ def parse_model_config(args, ):
 
     encoder_config = parse_t5_config_by_component(config, "encoder", args)
     decoder_config = parse_t5_config_by_component(config, "decoder", args)
-
+    print(f"decoder_config: {decoder_config}")
     return encoder_config, decoder_config
 
 
@@ -448,9 +451,10 @@ def convert_checkpoint(args, model):
         'num_buckets': decoder_config.num_buckets,
         'model_type': "t5tts",
         'rescale_before_lm_head': decoder_config.rescale_before_lm_head,
+        'has_lm_head_bias': decoder_config.has_lm_head_bias,
         'encoder_hidden_size': decoder_config.encoder_hidden_size,
         'encoder_num_heads': decoder_config.encoder_num_heads,
-        'encoder_head_size': decoder_config.encoder_head_size,
+        'encoder_head_size': decoder_config.encoder_hidden_size,
         'skip_cross_kv': args.skip_cross_kv,
         'use_implicit_relative_attention': args.use_implicit_relative_attention,
         'decoder_start_token_id': decoder_config.decoder_start_token_id,

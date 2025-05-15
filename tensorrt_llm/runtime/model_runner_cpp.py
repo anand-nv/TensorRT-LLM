@@ -370,7 +370,6 @@ class ModelRunnerCpp(ModelRunnerMixin):
             assert max_beam_width <= model_config.max_beam_width
 
         debug_config = None
-        print(f"{debug_tensor_names=}, {debug_mode=}")
         if debug_mode:
             # To debug specific tensors, add tensor names in the following list
             #   if none provided, all input and output tensors will be dumped
@@ -381,7 +380,6 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 debug_input_tensors=True,
                 debug_output_tensors=True,
                 debug_tensor_names=debug_tensor_names)
-            print(f"{debug_config=}")
 
         trtllm_config = trtllm.ExecutorConfig(
             max_batch_size=max_batch_size,
@@ -620,7 +618,6 @@ class ModelRunnerCpp(ModelRunnerMixin):
         batch_input_ids_list = [a.tolist() for a in batch_input_ids]
         encoder_input_ids_list = [a.tolist() for a in encoder_input_ids
                                   ] if encoder_input_ids else None
-
         if sampling_config is None:
             # Convert from old API of SamplingConfig
             # Note: Due to a Python3.10 bug one cannot use inspect on it currently

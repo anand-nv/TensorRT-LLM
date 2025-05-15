@@ -50,7 +50,9 @@ else()
       160
       192
       224
-      256)
+      256
+      512
+      768)
 endif()
 
 foreach(HEAD ${extra_heads})
