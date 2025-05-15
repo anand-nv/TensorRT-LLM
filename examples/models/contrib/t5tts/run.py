@@ -8,13 +8,14 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():
-
+    np.set_printoptions(threshold=np.inf)  # Ensure full array is printed
     runner = ModelRunnerCpp.from_dir(
         engine_dir='newmodels/magpie_engine/',
         is_enc_dec=True,
         max_input_len=512,
         cross_kv_cache_fraction=0.5,
         rank=0,
+        debug_mode=True,
     )
 
     encoder_tokens = torch.tensor(np.load(os.path.join(script_dir, "debug_io/text_tokens.npy"))[0], dtype=torch.int32)
@@ -34,10 +35,12 @@ def main():
         outputs = runner.generate(
             batch_input_ids=[decoder_input_ids],
             encoder_input_ids=[encoder_tokens],
-            max_new_tokens=64,
+            max_new_tokens=8 * 70,
             end_id=book_size - 1,
             pad_id=book_size - 1,
             streaming=False,
+            temperature=0.7,
+            top_k=80,
         )
         torch.cuda.synchronize()
 
@@ -46,14 +49,21 @@ def main():
 
     # select first 3 frames
     # skip prefix
-    output_ids = output_ids[0][0][(decoder_input_ids.shape[0] - books_num):]
+    output_ids = output_ids[0][0][decoder_input_ids.shape[0]:]
     output_ids = output_ids.reshape(-1, books_num)
     for i in range(books_num):
         output_ids[:, i] -= book_size * i
-    to_print = output_ids[:3, :]
-    np.set_printoptions(threshold=np.inf)  # Ensure full array is printed
-    print("First 3 frames:")
-    print(to_print)
+    print("Final output tokens shape: ", output_ids.shape)
+    
+    # find the occurrence of eos token and discard the rest
+    eos_token = book_size - 1
+    for row_idx in range(output_ids.shape[0]):
+        if eos_token in output_ids[row_idx, :]:
+            output_ids = output_ids[:row_idx, :]
+            break
+    
+    print("Final output tokens shape after removing EOS: ", output_ids.shape)
+    np.save("output_ids.npy", output_ids.T)
 
 
 if __name__ == "__main__":
