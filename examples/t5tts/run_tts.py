@@ -21,7 +21,8 @@ import torch
 
 import tensorrt_llm
 from tensorrt_llm import logger
-from tensorrt_llm._utils import str_dtype_to_trt, trt_dtype_to_torch
+from tensorrt_llm._utils import (str_dtype_to_torch, str_dtype_to_trt,
+                                 trt_dtype_to_torch)
 from tensorrt_llm.runtime import ModelRunnerCpp
 from tensorrt_llm.runtime.session import Session, TensorInfo
 
@@ -177,13 +178,17 @@ def evaluate_dec(args,
                  bos_token_id=2046,
                  pad_token_id=0):
     tllm_model = get_enc_dec_runner(args, is_enc_dec=False)
+    config = read_config('decoder', args.engine_dir)
+
     #encoder=MagpieEncoding(args.engine_dir)
     batch_size = len(batch_input_ids)
     #encoder_outputs = encoder.get_encoder_feature(encoder_input_ids)
 
     encoder_io = torch.load('datafiles/encoder_io.pt')
     encoder_outputs = [
-        encoder_io['output'][0, ::].to(device='cuda', dtype=torch.float16)
+        encoder_io['output'][0, ::].to(device='cuda',
+                                       dtype=str_dtype_to_torch(
+                                           config['dtype']))
     ]
     encoder_output_lengths = [encoder_outputs[0].shape[0]]
     decoder_max_input_length = len(batch_input_ids[0]) + max_new_tokens
