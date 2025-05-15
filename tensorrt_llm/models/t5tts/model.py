@@ -25,8 +25,8 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
-                                     minimum, recv, select, send, shape, view, mean,
-                                     squeeze, unsqueeze)
+                                     minimum, recv, select, send, shape, view, mean, add,
+                                     squeeze, unsqueeze, transpose)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
@@ -96,17 +96,15 @@ class PositionwiseConvFF(Module):
                             dtype=dtype)
 
     def forward(self, x: Tensor) -> Tensor:
-        dim_sqz = x.ndim()
-
-        if self.is_causal:
-            # currently for T5TTS causal padding is only required for decoder
-            # but is 0 because (kernel_size-1)=0 for decoder, padding=(kernel_size - 1) * dilation
-            pass
-        x = unsqueeze(x, dim_sqz)
+        # input is BT x DIM
+        x = transpose(x, 0, 1)  # DIM x BT
+        x = unsqueeze(x, 0)  # 1 x DIM x BT
 
         x = self.proj(x)
         x = self.o_net(self.hidden_act(x))
-        x = squeeze(x, dim_sqz)
+
+        x = squeeze(x, 0)  # DIM x BT
+        x = transpose(x, 1, 0)  # BT x DIM
         return x
 
 
@@ -467,9 +465,9 @@ class T5TTSDecoderLayer(Module):
         self.cross_attention = Attention(
             local_layer_idx=local_layer_idx,
             hidden_size=hidden_size,
-            num_attention_heads=num_attention_heads,
-            attention_head_size=head_size,
-            num_kv_heads=num_kv_heads,
+            num_attention_heads=1,
+            attention_head_size=hidden_size,
+            num_kv_heads=1,
             max_position_embeddings=max_position_embeddings,
             bias=has_attention_qkvo_bias,
             attention_mask_type=AttentionMaskType.causal,
@@ -531,38 +529,22 @@ class T5TTSDecoderLayer(Module):
             assert isinstance(encoder_output, Tensor)
 
         # self-attention
-        residual = hidden_states * self.residual_scaling
-
-        if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.self_attention_layernorm(hidden_states)
-
+        residual = hidden_states
+        hidden_states = self.self_attention_layernorm(hidden_states)
         attention_output = self.self_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask_params.self_attention_mask,
             use_cache=use_cache,
             kv_cache_params=kv_cache_params,
             attention_params=attention_params)
-
         if use_cache:
             attention_output, presents_self = attention_output
-
-        self.register_network_output('self_attention_output', attention_output)
-
         hidden_states = residual + attention_output
 
-        if self.fp16_clamping:
-            hidden_states = maximum(-64000.0, hidden_states)
-            hidden_states = minimum(64000.0, hidden_states)
-
-        if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.self_attention_layernorm(hidden_states)
-
         # cross attention
-        residual = hidden_states * self.residual_scaling
-
-        if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.cross_attention_layernorm(hidden_states)
-
+        residual = hidden_states
+        hidden_states = self.cross_attention_layernorm(hidden_states)
+        encoder_output = self.cross_attention_memory_layernorm(encoder_output)
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask_params.cross_attention_mask,
@@ -574,42 +556,19 @@ class T5TTSDecoderLayer(Module):
             attention_params=attention_params,
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
-
         if use_cache:
             attention_output, presents_cross = attention_output
-
-        self.register_network_output('cross_attention_output', attention_output)
-
         hidden_states = residual + attention_output
 
-        if self.fp16_clamping:
-            hidden_states = maximum(-64000.0, hidden_states)
-            hidden_states = minimum(64000.0, hidden_states)
-
-        if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.cross_attention_layernorm(hidden_states)
-
-        # MLP
-        residual = hidden_states * self.residual_scaling
-
-        if self.layernorm_position == LayerNormPositionType.pre_layernorm:
-            hidden_states = self.pos_ff_layernorm(hidden_states)
-
+        # conv ff (norm -> conv -> residual)
+        residual = hidden_states
+        hidden_states = self.pos_ff_layernorm(hidden_states)
         hidden_states = self.pos_ff(hidden_states)
-        self.register_network_output('pos_ff_output', hidden_states)
-
-        hidden_states = residual + hidden_states
-
-        if self.fp16_clamping:
-            hidden_states = maximum(-64000.0, hidden_states)
-            hidden_states = minimum(64000.0, hidden_states)
-
-        if self.layernorm_position == LayerNormPositionType.post_layernorm:
-            hidden_states = self.mlp_layernorm(hidden_states)
+        result = residual + hidden_states
 
         if use_cache:
-            return (hidden_states, presents_self, presents_cross)
-        return hidden_states
+            return (result, presents_self, presents_cross)
+        return result
 
 
 class T5TTSEncoderModel(PretrainedModel):
@@ -747,8 +706,6 @@ class T5TTSEncoderModel(PretrainedModel):
 
             hidden_states = self.embedding(input_ids, position_ids,
                                            token_type_ids, *ptuning_args)
-            self.register_network_output('embedding_layer_output',
-                                         hidden_states)
         else:
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
 
@@ -1143,8 +1100,6 @@ class T5TTSDecoderModel(PretrainedModel):
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
             hidden_states = self.embedding(decoder_input_ids, position_ids, None)
-            self.register_network_output('embedding_layer_output',
-                                         hidden_states)
         else:
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
 
@@ -1195,8 +1150,6 @@ class T5TTSDecoderModel(PretrainedModel):
                     2]
                 presents.append((presents_self, presents_cross))
                 hidden_states = hidden_states[0]
-            self.register_network_output(f'decoder_layer_{i}_output',
-                                         hidden_states)
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -1206,15 +1159,6 @@ class T5TTSDecoderModel(PretrainedModel):
             hidden_states = gather_last_token_logits(
                 hidden_states, last_token_ids,
                 default_net().plugin_config.remove_input_padding)
-            self.register_network_output('logits_before_lmhead', hidden_states)
-
-            # Rescale output before projecting on vocab (for T5)
-            # See https://github.com/huggingface/transformers/blob/0b192de1f353b0e04dad4813e02e2c672de077be/src/transformers/models/t5/modeling_t5.py#L1769-L1772
-            # Note: this is specific for T5, to make it more generic, one can pass in a config:
-            #   self.config.tie_word_embeddings - default to be True for T5
-            # openai whisper model didn't use this rescale
-            if self.rescale_before_lm_head:
-                hidden_states = hidden_states * (self.hidden_size**-0.5)
 
             # [bs, hidden_size] -> [bs, vocab_size]
             lm_logits = self.lm_head(hidden_states)
