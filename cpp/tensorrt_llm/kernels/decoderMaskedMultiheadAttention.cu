@@ -130,6 +130,7 @@ void multihead_attention_(const KERNEL_PARAMS_TYPE& params, KVCacheBuffer const&
     case 160: MMHA_LAUNCH_KERNEL(160);
     case 192: MMHA_LAUNCH_KERNEL(192);
     case 224: MMHA_LAUNCH_KERNEL(224);
+    case 768: MMHA_LAUNCH_KERNEL(768);
 #endif // FAST_BUILD
     default: TLLM_CHECK_WITH_INFO(false, "unsupported head_size %d", params.hidden_size_per_head);
     }
@@ -141,8 +142,8 @@ void multihead_attention_(const KERNEL_PARAMS_TYPE& params, KVCacheBuffer const&
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static constexpr std::array<int, 13> MMHA_SUPPORTED_HEAD_SIZES{
-    32, 48, 64, 80, 96, 104, 112, 128, 144, 160, 192, 224, 256};
+static constexpr std::array<int, 14> MMHA_SUPPORTED_HEAD_SIZES{
+    32, 48, 64, 80, 96, 104, 112, 128, 144, 160, 192, 224, 256, 768};
 
 bool mmha_supported(int head_size)
 {

@@ -141,6 +141,12 @@ struct Qk_vec_m_<float, 256>
 };
 
 template <>
+struct Qk_vec_m_<float, 1024>
+{
+    using Type = float4;
+};
+
+template <>
 struct Qk_vec_m_<uint16_t, 32>
 {
     using Type = uint32_t;
@@ -160,6 +166,11 @@ struct Qk_vec_m_<uint16_t, 128>
 
 template <>
 struct Qk_vec_m_<uint16_t, 256>
+{
+    using Type = uint4;
+};
+template <>
+struct Qk_vec_m_<uint16_t, 1024>
 {
     using Type = uint4;
 };
@@ -184,6 +195,12 @@ struct Qk_vec_m_<__nv_bfloat16, 128>
 
 template <>
 struct Qk_vec_m_<__nv_bfloat16, 256>
+{
+    using Type = bf16_8_t;
+};
+
+template <>
+struct Qk_vec_m_<__nv_bfloat16, 1024>
 {
     using Type = bf16_8_t;
 };
@@ -212,6 +229,12 @@ template <>
 struct Qk_vec_m_<__nv_fp8_e4m3, 256>
 {
     using Type = fp8_4_t;
+};
+
+template <>
+struct Qk_vec_m_<__nv_fp8_e4m3, 1024>
+{
+    using Type = fp8_8_t;
 };
 #endif // ENABLE_FP8
 
@@ -243,6 +266,12 @@ struct Qk_vec_k_<__nv_fp8_e4m3, 128>
 
 template <>
 struct Qk_vec_k_<__nv_fp8_e4m3, 256>
+{
+    using Type = float4;
+};
+
+template <>
+struct Qk_vec_k_<__nv_fp8_e4m3, 1024>
 {
     using Type = float4;
 };
