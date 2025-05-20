@@ -415,7 +415,13 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
         mLaunchParams.kernel_s = 0;
         mLaunchParams.force_unroll = true;
         // enable tiled kernels on Ampere/Ada
-        if ((isSm89 || isSm120) && mFixedParams.dataType == DATA_TYPE_E4M3)
+	if (mFixedParams.headSize == 768)
+	{
+            // special case, enable tiling, since non-tiled doesnt fit
+	    TLLM_LOG_WARNING("Enable tiling for head_size=768 as a special case");
+	    mLaunchParams.granular_tiling = true;
+	}
+	else if ((isSm89 || isSm120) && mFixedParams.dataType == DATA_TYPE_E4M3)
         {
             // so far Ada QMMA only supports non-tiled kernels.
             mLaunchParams.granular_tiling = false;
