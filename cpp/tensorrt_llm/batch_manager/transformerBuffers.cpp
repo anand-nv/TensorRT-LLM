@@ -474,6 +474,8 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     auto const& manager = runtime.getBufferManager();
+    auto const& stream = runtime.getStream();
+
 
     // Reshape the tensor to make sure the dim1 matches maxEncoderInputLengthInBatch.
     auto crossAttentionMaskShape = crossAttentionMaskDevice->getShape();
@@ -494,7 +496,6 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
         }
     }
     // If not all requests have cross attention mask, let us create the default ones.
-    auto const& stream = runtime.getStream();
     if (!allContextCrossAttentionMaskProvided)
     {
         TLLM_LOG_WARNING("Default padding attention mask will be used as not all requests have cross attention mask.");
@@ -651,6 +652,43 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
                     = numTokens * static_cast<SizeType64>(maxEncoderInputLengthInBatch);
                 batchedCopySizes.begin()[numCopiedTokens] = crossAttentionMaskRequestDim1;
             }
+            numCopiedTokens++;
+            numTokens++;
+        }
+        else if (llmReq->hasAttentionPriorIdx() && maxEncoderInputLengthInBatch > 5)
+        {
+            auto focusTimeIdx = llmReq->getAttentionPriorIdx();
+            //TODO: remove this debug print
+            TLLM_LOG_WARNING("At decoding step %d, focusing on encoder time %d",
+                (int)llmReq->getDecodingIter(), (int)focusTimeIdx
+            );
+            // Create a mask where only the token at focusTimeIdx is attended to
+            // Use std::unique_ptr with bool[] instead of vector<bool> to avoid bit packing
+            auto customMask = std::make_unique<bool[]>(maxEncoderInputLengthInBatch);
+            // Initialize all elements to false
+            std::fill_n(customMask.get(), maxEncoderInputLengthInBatch, false);
+            if (focusTimeIdx < maxEncoderInputLengthInBatch) {
+                // TODO: implement flooring, window, etc.
+                if (!llmReq->isAttentionPriorStuck()) {
+                    customMask[focusTimeIdx] = true;
+                }
+                customMask[std::min(focusTimeIdx + 1, maxEncoderInputLengthInBatch - 1)] = true;
+                customMask[std::min(focusTimeIdx + 2, maxEncoderInputLengthInBatch - 1)] = true;
+            } else {
+                std::fill_n(customMask.get(), maxEncoderInputLengthInBatch, true);
+                TLLM_LOG_WARNING("Time index %d exceeds encoder length %d, no position will be attended to", 
+                                 focusTimeIdx, maxEncoderInputLengthInBatch);
+            }
+            
+            // Copy the custom mask to pinned memory
+            std::memcpy(pinnedMemPtr, customMask.get(), maxEncoderInputLengthInBatch);
+            pinnedMemPtr += maxEncoderInputLengthInBatch;
+            
+            // Set up copy offsets the same way as before
+            batchedCopySrcOffsets.begin()[numCopiedTokens] = static_cast<SizeType64>(pinnedMemPtr - primarySrcPtr);
+            batchedCopyDstOffsets.begin()[numCopiedTokens] = numTokens * static_cast<SizeType64>(maxEncoderInputLengthInBatch);
+            batchedCopySizes.begin()[numCopiedTokens] = maxEncoderInputLengthInBatch;
+            
             numCopiedTokens++;
             numTokens++;
         }

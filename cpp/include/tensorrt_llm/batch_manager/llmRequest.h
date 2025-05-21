@@ -1767,6 +1767,31 @@ public:
         return mRequestedBlockHashes;
     }
 
+    void setAttentionPriorIdx(SizeType32 attentionPriorIdx)
+    {
+        if (mAttentionPriorIdx.has_value() && mAttentionPriorIdx.value() == attentionPriorIdx) {
+            mAttentionPriorCounter++;
+        } else {
+            mAttentionPriorCounter = 1;
+        }
+        mAttentionPriorIdx = attentionPriorIdx;
+    }
+
+    bool isAttentionPriorStuck() const
+    {
+        return mAttentionPriorCounter >= 10;
+    }
+
+    bool hasAttentionPriorIdx() const
+    {
+        return mAttentionPriorIdx.has_value();
+    }
+
+    [[nodiscard]] SizeType32 getAttentionPriorIdx() const
+    {
+        return mAttentionPriorIdx.value();
+    }
+
     RequestIdType mRequestId;
     SizeType32 mPromptLen;
     SizeType32 mMaxNewTokens;
@@ -1863,6 +1888,11 @@ protected:
     TensorPtr mEncoderOutput;       // [numTokens, hidden_size]
     TensorPtr mEncoderHiddenStates; // [numTokens, hiddenSize] for for Pipeline-Parallelism
     TensorPtr mEncoderOutputHost;   // [mEncoderOutputLength, encoderHiddenSize]
+
+    // for attention prior, placeholder for where to focus in encoder output
+    std::optional<SizeType32> mAttentionPriorIdx;
+    // counts how many times same attention prior idx is set
+    SizeType32 mAttentionPriorCounter{0};
 
     SizeType32 mDecodingIter{0};
 

@@ -26,7 +26,7 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
                                      minimum, recv, select, send, shape, view, mean, add,
-                                     squeeze, unsqueeze, transpose)
+                                     squeeze, unsqueeze, transpose, matmul, stack, cast)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
@@ -455,6 +455,26 @@ class T5TTSDecoderLayer(Module):
                                                 eps=layernorm_eps,
                                                 dtype=dtype, bias=False)
 
+        # to compute cross attention scores
+        self.q_proj = ColumnLinear(
+            hidden_size,
+            hidden_size,
+            bias=False,
+            dtype=dtype,
+            tp_group=mapping.tp_group,
+            tp_size=mapping.tp_size,
+            gather_output=True,
+        )
+        self.k_proj = ColumnLinear(
+            hidden_size,
+            hidden_size,
+            bias=False,
+            dtype=dtype,
+            tp_group=mapping.tp_group,
+            tp_size=mapping.tp_size,
+            gather_output=True,
+        )
+
         # Note: self attn uses MMHA, mask is always causal triangular
         # cross attn has two scenarios:
         # - in context phase, all ones mask, same as padding type
@@ -543,8 +563,13 @@ class T5TTSDecoderLayer(Module):
 
         # cross attention
         residual = hidden_states
+
         hidden_states = self.cross_attention_layernorm(hidden_states)
         encoder_output = self.cross_attention_memory_layernorm(encoder_output)
+        # compute attention scores
+        q = cast(self.q_proj(hidden_states), "float32")   # b * context x hidden
+        k = cast(self.k_proj(encoder_output), "float32")  # b * enc x hidden
+        scores = matmul(q, k, transb=True)  # b * context x b * enc
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask_params.cross_attention_mask,
@@ -567,8 +592,8 @@ class T5TTSDecoderLayer(Module):
         result = residual + hidden_states
 
         if use_cache:
-            return (result, presents_self, presents_cross)
-        return result
+            return (result, presents_self, presents_cross, scores)
+        return result, scores
 
 
 class T5TTSEncoderModel(PretrainedModel):
@@ -1108,6 +1133,7 @@ class T5TTSDecoderModel(PretrainedModel):
         if use_cache:
             presents = []
 
+        all_scores = []
         for i, (decoder_layer, past) in enumerate(
                 zip(self.decoder_layers, kv_cache_params.past_key_value)):
 
@@ -1146,10 +1172,15 @@ class T5TTSDecoderModel(PretrainedModel):
                 cross_kv_reuse=cross_kv_reuse)
 
             if use_cache:
-                presents_self, presents_cross = hidden_states[1], hidden_states[
-                    2]
+                hidden_states, presents_self, presents_cross, scores = hidden_states
                 presents.append((presents_self, presents_cross))
-                hidden_states = hidden_states[0]
+            else:
+                hidden_states, scores = hidden_states
+            all_scores.append(scores)
+
+        scores_stacked = stack(all_scores, 0)  # [layers x b*context_length x b*numEncoderTokens]
+        mean_scores = mean(scores_stacked, 0)  # [b*context length x b*numTokens]
+        mean_scores.mark_output("scores")
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
