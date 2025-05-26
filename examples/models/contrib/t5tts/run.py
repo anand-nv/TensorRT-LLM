@@ -15,7 +15,7 @@ def main():
         max_input_len=512,
         cross_kv_cache_fraction=0.5,
         rank=0,
-        debug_mode=True,
+       #debug_mode=True,
     )
 
     encoder_tokens = torch.tensor(np.load(os.path.join(script_dir, "debug_io/text_tokens.npy"))[0], dtype=torch.int32)
