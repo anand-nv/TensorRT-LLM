@@ -143,6 +143,7 @@ public:
         , mSkipCrossAttnBlocks(false)
         , mNumLanguages(0)
         , mVocabSizes{vocabSizes}
+        , mUseAttentionPrior(false)
     {
         TLLM_CHECK_WITH_INFO(mNbLayers >= mNbAttentionLayers + mNbRnnLayers,
             "Number of layers (%d) expected to be >= number of attention (%d) + number of rnn layers (%d)", mNbLayers,
@@ -175,6 +176,16 @@ public:
     {
         return mVocabSizes ? *mVocabSizes : std::vector<SizeType32>{mVocabSize};
     }
+
+    [[nodiscard]] bool constexpr useAttentionPrior() const noexcept
+    {
+        return mUseAttentionPrior;
+    }
+
+    void constexpr useAttentionPrior(bool useAttentionPrior) noexcept
+    {   
+        mUseAttentionPrior = useAttentionPrior;
+    } 
 
     [[nodiscard]] SizeType32 constexpr getVocabSizePadded(SizeType32 worldSize, SizeType32 vocabSize = 0) const noexcept
     {
@@ -959,6 +970,7 @@ private:
 
     // Size of each vocab if there are multiple vocabs
     std::optional<std::vector<SizeType32>> mVocabSizes;
+    bool mUseAttentionPrior;
 };
 
 } // namespace tensorrt_llm::runtime

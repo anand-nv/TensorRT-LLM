@@ -147,6 +147,7 @@ private:
     SizeType32 maxInputLen;
     SizeType32 maxEncoderOutputLen;
     SizeType32 maxNumTokens;
+    bool useAttentionPrior;
 };
 
 } // namespace tensorrt_llm::batch_manager

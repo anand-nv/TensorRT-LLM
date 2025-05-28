@@ -51,7 +51,7 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     executor::DecodingConfig const& decodingConfig, bool gatherGenerationLogits, std::optional<SizeType32> maxNumTokens,
-    std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs)
+    std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs) : useAttentionPrior(false)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
@@ -202,9 +202,11 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         tensor->reshape(shape);
     }
     // scores have shape (b * context_length, b * numEncoderTokens). Context length == 1 for generation requests
-    scores->reshape(ITensor::makeShape(
-        {numContextTokens + numGenRequests, getNumRequests() * encoderBuffers->encoderOutputLen}
-    ));
+    if (useAttentionPrior) {
+        scores->reshape(ITensor::makeShape(
+            {numContextTokens + numGenRequests, getNumRequests() * encoderBuffers->encoderOutputLen}
+        ));
+    }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -215,6 +217,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    useAttentionPrior = modelConfig.useAttentionPrior();
 
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -257,7 +260,9 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     logitsIdsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
     inputsIds = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
-    scores = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
+    if (useAttentionPrior) {
+        scores = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
+    }
     if (worldConfig.isPipelineParallel())
     {
         hiddenStates = manager.emptyTensor(MemoryType::kGPU, modelConfig.getDataType());
@@ -919,6 +924,10 @@ std::vector<float> RuntimeBuffers::getScoresHost(runtime::TllmRuntime const& run
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
     std::vector<float> scoresHost;
+    if (!useAttentionPrior) {
+        TLLM_LOG_WARNING("Getting scores, when attention prior is disabled");
+        return scoresHost;
+    }
     auto scoresShape = scores->getShape();
     auto scoresSize = ITensor::volume(scoresShape);
     if (scoresSize > 0) {
@@ -939,6 +948,10 @@ void RuntimeBuffers::setAttentionPriorIdx(
      * that means there is extra data to be ommitted
      */
     // compute total encoder output length among all requests
+    if (!useAttentionPrior) {
+        TLLM_LOG_WARNING("Setting attention prior index, when attention prior is disabled");
+        return;
+    }
     SizeType32 totalContextEncoderOutputLen = 0; 
     for (auto const& llmReq : contextRequests) {
         totalContextEncoderOutputLen += llmReq->getEncoderOutputLen();
@@ -1062,7 +1075,9 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     inputMap.insert_or_assign(kContextLengthsTensorName, contextLengthsDevice);
     inputMap.insert_or_assign(kHostContextLengthsTensorName, contextLengthsHost);
     inputMap.insert_or_assign(kSequenceLengthsTensorName, sequenceLengthsDevice);
-    outputMap.insert_or_assign(kScoresTensorName, scores);
+    if (useAttentionPrior) {
+        outputMap.insert_or_assign(kScoresTensorName, scores);
+    }
     if (modelConfig.useCrossAttention())
     {
         encoderBuffers->insertInputTensors(inputMap);

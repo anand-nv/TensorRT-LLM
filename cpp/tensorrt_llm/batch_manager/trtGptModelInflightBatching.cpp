@@ -962,11 +962,13 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             sync_check_cuda_error(mRuntime->getStream().get());
 
             // forward the attention prior index to llm requests for the next iteration
-            mBuffers[getFusedBufferId()]->setAttentionPriorIdx(
-                currRequests.contextRequests,
-                currRequests.generationRequests,
-                *mRuntime
-            );
+            if (mModelConfig.useAttentionPrior()) {
+                mBuffers[getFusedBufferId()]->setAttentionPriorIdx(
+                    currRequests.contextRequests,
+                    currRequests.generationRequests,
+                    *mRuntime
+                );
+            }
 
             // Postpone decoder setup if model does not need to setup buffers for the context phase.
             if (!mModelConfig.getSpeculativeDecodingMode().needsDecoderPrologue())

@@ -329,6 +329,8 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
             py::overload_cast<bool>(&tr::ModelConfig::useGptAttentionPlugin))
         .def_property("use_packed_input", py::overload_cast<>(&tr::ModelConfig::usePackedInput, py::const_),
             py::overload_cast<bool>(&tr::ModelConfig::usePackedInput))
+        .def_property("use_attention_prior", py::overload_cast<>(&tr::ModelConfig::useAttentionPrior, py::const_),
+            py::overload_cast<bool>(&tr::ModelConfig::useAttentionPrior))
         .def_property("kv_cache_type", py::overload_cast<>(&tr::ModelConfig::getKVCacheType, py::const_),
             py::overload_cast<tr::ModelConfig::KVCacheType>(&tr::ModelConfig::setKVCacheType))
         .def_property("tokens_per_block", &tr::ModelConfig::getTokensPerBlock, &tr::ModelConfig::setTokensPerBlock)

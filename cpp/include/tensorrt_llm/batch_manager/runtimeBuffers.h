@@ -152,6 +152,7 @@ private:
     std::unique_ptr<PromptTuningBuffers> promptTuningBuffers;
     // Time index of input token with the highest attention score
     TensorPtr scores;  // [b * context_length, b * numEncoderTokens]
+    bool useAttentionPrior;
 
     //! Mrope
     TensorPtr mropeRotaryCosSin;

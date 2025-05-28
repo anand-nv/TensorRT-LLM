@@ -231,6 +231,9 @@ ModelConfig createModelConfig(Json const& json, bool engineVersionNone, SizeType
         modelConfig.setNbKvHeads(numKvHeads);
     }
 
+    auto const useAttentionPrior = parseJsonFieldOr(config, "use_attention_prior", false);
+    modelConfig.useAttentionPrior(useAttentionPrior);
+
     if (!numKvHeadsPerCrossAttentionLayer.empty())
     {
         std::transform(numKvHeadsPerCrossAttentionLayer.cbegin(), numKvHeadsPerCrossAttentionLayer.cend(),

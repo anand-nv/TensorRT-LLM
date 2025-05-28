@@ -45,6 +45,7 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     runtime::WorldConfig const& worldConfig)
     : maxInputLen(modelConfig.getMaxInputLen())
     , maxEncoderOutputLen(modelConfig.getMaxEncoderLen())
+    , useAttentionPrior(modelConfig.useAttentionPrior())
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -655,7 +656,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             numCopiedTokens++;
             numTokens++;
         }
-        else if (llmReq->hasAttentionPriorIdx() && maxEncoderInputLengthInBatch > 5)
+        else if (useAttentionPrior && llmReq->hasAttentionPriorIdx() && maxEncoderInputLengthInBatch > 5)
         {
             auto focusTimeIdx = llmReq->getAttentionPriorIdx();
             //TODO: remove this debug print
