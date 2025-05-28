@@ -15,6 +15,7 @@ def main():
         max_input_len=512,
         cross_kv_cache_fraction=0.5,
         rank=0,
+        multi_block_mode=False,
        #debug_mode=True,
     )
 
