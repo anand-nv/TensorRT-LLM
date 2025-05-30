@@ -964,7 +964,7 @@ void RuntimeBuffers::setAttentionPriorIdx(
     SizeType32 offset = 0;
     // we skip all context requests
     for (auto const& llmReq : contextRequests) {
-        offset += llmReq->getContextCurrentPosition() * totalEncoderOutputLen;
+        offset += llmReq->getContextChunkSize() * totalEncoderOutputLen;
         // for context we just focusing at the beginning of the encoder sequence
         llmReq->setAttentionPriorIdx(0);
     }
@@ -996,7 +996,7 @@ void RuntimeBuffers::setAttentionPriorIdx(
                         maxScoreIdx = k;
                     }
                 }
-                
+
                 // Set the attention prior index to the position with maximum score
                 llmReq->setAttentionPriorIdx(maxScoreIdx);
             }
