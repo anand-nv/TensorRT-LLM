@@ -416,6 +416,7 @@ def convert_checkpoint(args, model):
         'norm_epsilon': decoder_config.layernorm_eps,
         'vocab_size': decoder_config.vocab_size,
         'vocab_sizes': decoder_config.vocab_sizes,
+        'use_attention_prior': True,
         'position_embedding_type': decoder_config.position_embedding_type,
         'hidden_act': decoder_config.hidden_act,
         'quantization': {
