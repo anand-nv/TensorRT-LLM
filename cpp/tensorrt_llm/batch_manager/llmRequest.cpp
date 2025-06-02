@@ -90,12 +90,12 @@ std::optional<executor::Response> LlmRequest::createResponse(bool useFastLogits,
     for (SizeType32 beam = 0; beam < nbBeams; ++beam)
     {
         auto const& tokens = getTokens(beam);
-        auto const nbTokensOut = calculateNbTokensOut(tokens.size());
+        auto const nbTokensOut = calculateNbTokensOut(tokens.size() / getNumVocabs());
 
         if (nbTokensOut > 0)
         {
-            auto const first = tokens.data() + startTokenPos;
-            result.outputTokenIds.at(beam).assign(first, first + nbTokensOut);
+            auto const first = tokens.data() + startTokenPos * getNumVocabs();
+            result.outputTokenIds.at(beam).assign(first, first + nbTokensOut * getNumVocabs());
         }
     }
 
