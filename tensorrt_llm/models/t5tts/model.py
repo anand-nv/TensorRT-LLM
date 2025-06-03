@@ -25,7 +25,7 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
-                                     minimum, recv, select, send, shape, view, mean, add,
+                                     minimum, recv, select, send, shape, view, mean, add, slice,
                                      squeeze, unsqueeze, transpose, matmul, stack, cast)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
@@ -428,6 +428,7 @@ class T5TTSDecoderLayer(Module):
 
         # e.g. BART post, T5 pre
         self.layernorm_position = layernorm_position
+        self.hidden_size = hidden_size
 
         # e.g. BART q_scaling = 1.f, T5 q_scaling = 1.f/sqrt(head_size)
         self.self_attention = Attention(
@@ -454,26 +455,6 @@ class T5TTSDecoderLayer(Module):
         self.self_attention_layernorm = ln_type(normalized_shape=hidden_size,
                                                 eps=layernorm_eps,
                                                 dtype=dtype, bias=False)
-
-        # to compute cross attention scores
-        self.q_proj = ColumnLinear(
-            hidden_size,
-            hidden_size,
-            bias=False,
-            dtype=dtype,
-            tp_group=mapping.tp_group,
-            tp_size=mapping.tp_size,
-            gather_output=True,
-        )
-        self.k_proj = ColumnLinear(
-            hidden_size,
-            hidden_size,
-            bias=False,
-            dtype=dtype,
-            tp_group=mapping.tp_group,
-            tp_size=mapping.tp_size,
-            gather_output=True,
-        )
 
         # Note: self attn uses MMHA, mask is always causal triangular
         # cross attn has two scenarios:
@@ -558,7 +539,9 @@ class T5TTSDecoderLayer(Module):
             kv_cache_params=kv_cache_params,
             attention_params=attention_params)
         if use_cache:
-            attention_output, presents_self = attention_output
+            attention_output, _, _, presents_self = attention_output
+        else:
+            attention_output, _, _ = attention_output
         hidden_states = residual + attention_output
 
         # cross attention
@@ -566,10 +549,6 @@ class T5TTSDecoderLayer(Module):
 
         hidden_states = self.cross_attention_layernorm(hidden_states)
         encoder_output = self.cross_attention_memory_layernorm(encoder_output)
-        # compute attention scores
-        q = cast(self.q_proj(hidden_states), "float32")   # b * context x hidden
-        k = cast(self.k_proj(encoder_output), "float32")  # b * enc x hidden
-        scores = matmul(q, k, transb=True)  # b * context x b * enc
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask_params.cross_attention_mask,
@@ -582,8 +561,20 @@ class T5TTSDecoderLayer(Module):
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
         if use_cache:
-            attention_output, presents_cross = attention_output
+            attention_output, qkv, cross_kv, presents_cross = attention_output
+        else:
+            attention_output, qkv, cross_kv = attention_output
         hidden_states = residual + attention_output
+
+        # compute attention scores
+        # TODO: assumes padding disabled
+        q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), self.hidden_size]))
+        k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), self.hidden_size]))
+        scores = matmul(
+            q,
+            k,
+            transb=True
+        )
 
         # conv ff (norm -> conv -> residual)
         residual = hidden_states

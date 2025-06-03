@@ -287,7 +287,6 @@ public:
         DecoderBuffers& decoderBuffers, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig,
         runtime::WorldConfig const& worldConfig);
 
-    std::vector<float> getScoresHost(runtime::TllmRuntime const& runtime);
     void setAttentionPriorIdx(RequestVector const& contextRequests, RequestVector const& genRequests,
         runtime::TllmRuntime const& runtime);
 

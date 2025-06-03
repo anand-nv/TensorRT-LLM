@@ -305,12 +305,6 @@ def convert_t5tts_decoder(
             model_dict[f't5_decoder.layers.{i}.cross_attention.q_net.weight'],
             model_dict[f't5_decoder.layers.{i}.cross_attention.kv_net.weight']
         ], dim=0).contiguous()
-        # projections to compute attention scores
-        weights[f'decoder_layers.{i}.q_proj.weight'] = model_dict[
-            f't5_decoder.layers.{i}.cross_attention.q_net.weight'].contiguous()
-        kv_weight = model_dict[f't5_decoder.layers.{i}.cross_attention.kv_net.weight']
-        dim = kv_weight.shape[0] // 2
-        weights[f'decoder_layers.{i}.k_proj.weight'] = kv_weight[:dim, :]
 
         weights[f'decoder_layers.{i}.cross_attention.qkv.weight'] = qkv_weight
         weights[f'decoder_layers.{i}.cross_attention.dense.weight'] = model_dict[

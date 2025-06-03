@@ -1555,9 +1555,9 @@ class Attention(Module):
             context = dense_conditional.add_output(skip_case, context)
 
         if use_cache:
-            return (context, past_key_value)
+            return (context, qkv, cross_kv, past_key_value)
         else:
-            return context
+            return (context, qkv, cross_kv)
 
     def set_rel_attn_table(self, max_seq_len, precomputed_relative_attention):
         self.rel_attn_table = Parameter(shape=(self.num_attention_heads,
