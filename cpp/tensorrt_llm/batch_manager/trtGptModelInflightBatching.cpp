@@ -780,7 +780,8 @@ void TrtGptModelInflightBatching::forwardSync()
                     {
                         llmReq->setNumPreDecodedTokens(0, beam);
                     }
-                    if (llmReq->isGenerationToCompleteState())
+                    bool crossAttnFinished = mModelConfig.useAttentionPrior() && llmReq->isAttentionPriorFinished();
+                    if (llmReq->isGenerationToCompleteState() || crossAttnFinished)
                     {
                         llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
                         terminateRequest(llmReq);

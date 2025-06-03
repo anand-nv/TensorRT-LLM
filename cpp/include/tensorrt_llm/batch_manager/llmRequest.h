@@ -1775,11 +1775,19 @@ public:
             mAttentionPriorCounter = 1;
         }
         mAttentionPriorIdx = attentionPriorIdx;
+        if (attentionPriorIdx >= getEncoderOutputLen() - 5) {
+            mAttentionPriorCounterCloseToEnd++;
+        }
     }
 
     bool isAttentionPriorStuck() const
     {
         return mAttentionPriorCounter >= 10;
+    }
+
+    bool isAttentionPriorFinished() const
+    {
+        return mAttentionPriorCounterCloseToEnd >= 20;
     }
 
     bool hasAttentionPriorIdx() const
@@ -1893,6 +1901,8 @@ protected:
     std::optional<SizeType32> mAttentionPriorIdx;
     // counts how many times same attention prior idx is set
     SizeType32 mAttentionPriorCounter{0};
+    // counts how many times attention prior idx is close to the end of sequence
+    SizeType32 mAttentionPriorCounterCloseToEnd{0};
 
     SizeType32 mDecodingIter{0};
 
