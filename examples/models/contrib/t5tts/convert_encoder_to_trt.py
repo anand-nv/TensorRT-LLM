@@ -54,6 +54,67 @@ def load_model(model_ckpt, model_cfg, audio_codec, engine_dir):
         return model
 
 
+class IntEncoder(torch.nn.Module):
+    def __init__(self, model, tokenizer_name):
+        super().__init__()
+        self.tokenizer_name=tokenizer_name
+        self.tokenizer=model.tokenizer
+        self.bos_id=model.bos_id
+        self.eos_id=model.eos_id
+        self.text_embedding=model.text_embedding
+        self.encoder=model.t5_encoder
+    
+    def forward(self,tokens, token_mask):
+        emb_text=self.text_embedding(tokens)
+        output=self.encoder(emb_text, token_mask, None, None, None, None)
+        return output
+
+    def export_to_onnx(self, onnx_file, opset_version=17):
+        text = "Hello world! How are you doing today?"
+        text_encoding = torch.IntTensor([[self.bos_id] +
+                            self.tokenizer.encode(text, self.tokenizer_name) +
+                            [self.eos_id]]).cuda()
+        
+        text_lens = torch.IntTensor([text_encoding.shape[1]]).cuda()
+        max_text_len = torch.max(text_lens).item()
+        text_mask = get_mask_from_lengths(text_lens).cuda()  # (B, T)
+
+        padded_text_encoding = stack_tensors(text_encoding,
+                                             max_lens=[max_text_len],
+                                             pad_value=self.tokenizer.pad)
+
+        with torch.no_grad():
+
+            input_names = ["tokens", "token_mask"]
+            output_names = ["output"]
+            dynamic_axes = {
+                "tokens": {
+                    0: "batch_size",
+                    1: "n_texts"
+                },
+                "token_mask": {
+                    0: "batch_size",
+                    1: "n_texts"
+                },
+            }
+            print(f"{text_encoding.shape=}")
+            inputs_args = {
+                'tokens': text_encoding,
+                'token_mask': text_mask,
+
+            }
+            torch.onnx.export(self,
+                              inputs_args,
+                              onnx_file,
+                              input_names=input_names,
+                              output_names=output_names,
+                              dynamic_axes=dynamic_axes,
+                              opset_version=17)
+
+            torch.onnx.export(self, inputs_args, onnx_file, 
+                              input_names=input_names, dynamic_axes=dynamic_axes,
+                              output_names=output_names, opset_version=opset_version)
+
 class MagpieEncoderExportTRT:
 
     def __init__(self,
@@ -109,20 +170,10 @@ class MagpieEncoderExportTRT:
         self.encoder_config['dtype'] = dtype
 
     def export_encoder_to_onnx(self, model, tokenizer_name="english_phoneme"):
-        onnx_file = os.path.join(self.checkpoint_dir, 'encoder/encoder.onnx')
-        texts = ["Hello world! How are you doing today?", "Second text"]
-        text_encoding = [
-            torch.IntTensor([model.bos_id] +
-                            model.tokenizer.encode(text, tokenizer_name) +
-                            [model.eos_id]).cuda() for text in texts
-        ]
-        text_lens = torch.IntTensor([len(text) for text in texts]).cuda()
-        max_text_len = torch.max(text_lens).item()
-        text_mask = get_mask_from_lengths(text_lens).cuda()  # (B, T)
+        int_encoder = IntEncoder(model, tokenizer_name)
 
-        padded_text_encoding = stack_tensors(text_encoding,
-                                             max_lens=[max_text_len],
-                                             pad_value=model.tokenizer.pad)
+        onnx_file = os.path.join(self.checkpoint_dir, 'encoder/encoder.onnx')
+       
         self.in_feat_dim = model.text_embedding.embedding_dim  #
         self.num_tokens = len(
             model.tokenizer.tokens) + 2  # add two for bos and eos
@@ -131,100 +182,8 @@ class MagpieEncoderExportTRT:
         self.encoder_config['eos_id'] = self.num_tokens - 1
         self.encoder_config['pad_id'] = model.tokenizer.pad
 
-        texts = ["Hello world! How are you doing today?", "Second text"]
-        text_encoding = [
-            torch.IntTensor([model.bos_id] +
-                            model.tokenizer.encode(text, tokenizer_name) +
-                            [model.eos_id]).cuda() for text in texts
-        ]
-        text_lens = torch.IntTensor([len(text) for text in texts]).cuda()
-        max_text_len = torch.max(text_lens).item()
-        text_mask = get_mask_from_lengths(text_lens).cuda()  # (B, T)
+        int_encoder.export_to_onnx(onnx_file)
 
-        padded_text_encoding = stack_tensors(text_encoding,
-                                             max_lens=[max_text_len],
-                                             pad_value=model.tokenizer.pad)
-
-        with torch.no_grad():
-
-            embedded_text = model.text_embedding(padded_text_encoding)
-
-            input_names = ["text", "text_mask"]
-            output_names = ["output"]
-            dynamic_axes = {
-                "text": {
-                    0: "batch_size",
-                    1: "n_texts"
-                },
-                "text_mask": {
-                    0: "batch_size",
-                    1: "n_texts"
-                },
-            }
-            print(f"{embedded_text.shape=}")
-            inputs_args = {
-                'x': embedded_text,
-                'x_mask': text_mask,
-                'cond': None,
-                'cond_mask': None,
-                'attn_prior': None,
-                'multi_encoder_mapping': None
-            }
-            torch.onnx.export(model.t5_encoder,
-                              inputs_args,
-                              onnx_file,
-                              input_names=input_names,
-                              output_names=output_names,
-                              dynamic_axes=dynamic_axes,
-                              opset_version=17)
-
-            # Add token embedding layer
-            W = model.text_embedding.weight.data.cpu().numpy()
-            W_emb = gs.Constant(name='w', values=W)
-            no_categories = W.shape[0]
-            token_dim = W.shape[1]
-            depth = gs.Constant(name='depth', values=np.array(no_categories))
-            values = gs.Constant(name='values',
-                                 values=np.array([0.0, 1.0], dtype="float32"))
-
-            x = gs.Variable(name='text_encoding',
-                            dtype="int64",
-                            shape=['batch_size', 'n_texts'])
-            x_oh = gs.Variable(name='one_hot_text',
-                               dtype="float32",
-                               shape=['batch_size', 'n_texts', token_dim])
-            text_embeddings = gs.Variable(
-                name='text_embeddings',
-                dtype="float32",
-                shape=['batch_size', 'n_texts', token_dim])
-            nodes = []
-            nodes.append(
-                gs.Node(op="OneHot",
-                        name="onehot",
-                        inputs=[x, depth, values],
-                        outputs=[x_oh]))
-            nodes.append(
-                gs.Node(op="MatMul",
-                        name="onehotemb",
-                        inputs=[x_oh, W_emb],
-                        outputs=[text_embeddings]))
-
-            emb_graph = gs.Graph(nodes=nodes,
-                                 inputs=[x],
-                                 outputs=[text_embeddings],
-                                 opset=17)
-
-            emb_onnx = gs.export_onnx(emb_graph.cleanup())
-            enc_onnx = onnx.load(onnx_file)
-            emb_onnx.ir_version = enc_onnx.ir_version
-
-            io_map = [('text_embeddings', 'text')]
-            outputs = ["output"]
-            merged_onnx = onnx.compose.merge_models(emb_onnx,
-                                                    enc_onnx,
-                                                    io_map,
-                                                    outputs=outputs)
-            onnx.save(merged_onnx, onnx_file)
 
     def generate_trt_engine(self):
         print("Start converting TRT engine!")
@@ -238,6 +197,10 @@ class MagpieEncoderExportTRT:
             config.set_flag(trt.BuilderFlag.BF16)
         elif self.dtype == "float16":
             config.set_flag(trt.BuilderFlag.FP16)
+        else:
+            print("Using FP32")
+        
+        print(f"{config.flags=}")
 
         #config.flags = config.flags
         parser = trt.OnnxParser(network, logger)
@@ -295,16 +258,22 @@ class MagpieEncoderExportTRT:
 
 
 @click.command()
+@click.option("--dtype", type=str, default="float16", help="dataype of model")
 @click.option("--model_ckpt", type=str, help="Path to model checkpoint")
 @click.option("--audio_codec", type=str, help="Output Path to audio codec")
 @click.option("--hparams_file", type=str, help="Path to hparams file")
+@click.option("--max_bs", type=int, default=2, help="maximum batch size")
+@click.option("--min_bs", type=int, default=1, help="minimum batch size")
+@click.option("--opt_bs", type=int, default=None, help="optimal batch size")
 @click.argument("tllm_checkpoint_dir", default="tllm_checkpoint", type=str)
-@click.argument("engine_dir", default="engine", type=str)
+@click.argument("engine_dir", default="engines", type=str)
 def convert_encoder_to_trt(model_ckpt, audio_codec, hparams_file,
-                           tllm_checkpoint_dir, engine_dir):
+                           tllm_checkpoint_dir, engine_dir, dtype,
+                           max_bs, min_bs, opt_bs):
     model_cfg = OmegaConf.load(hparams_file).cfg
     model = load_model(model_ckpt, model_cfg, audio_codec, engine_dir)
-    encoder = MagpieEncoderExportTRT(tllm_checkpoint_dir, engine_dir)
+    encoder = MagpieEncoderExportTRT(tllm_checkpoint_dir, engine_dir, dtype=dtype,
+                                     maxBS=max_bs, minBS=min_bs, optBS=opt_bs)
     encoder.export_encoder_to_onnx(model, tokenizer_name="english_phoneme")
     encoder.generate_trt_engine()
 
