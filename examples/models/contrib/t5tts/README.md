@@ -43,6 +43,16 @@ trtllm-build --checkpoint_dir newmodels/t5tts_convert/decoder \
  	--use_paged_context_fmha enable
 ```
 
+# Alternative onnx to trt export for Encoder
+This requires the correct branch of the nemo fork supporting t5tts
+```
+python3 convert_encoder_to_trt.py --dtype $dtype --max_bs 16\
+        --model_ckpt datafiles/dpo-T5TTS--val_loss\=0.4513-epoch\=3.ckpt\
+        --audio_codec datafiles/AudioCodec_21Hz_no_eliz_without_wavlm_disc.nemo\
+        --hparams_file datafiles/hparams.yaml\
+        newmodels/t5tts_convert/encoder newmodels/t5tts_engine/encoder
+```
+
 # Toy inference
 
 Finally run the model on the dummy input:
