@@ -69,7 +69,7 @@ class IntEncoder(torch.nn.Module):
         output=self.encoder(emb_text, token_mask, None, None, None, None)
         return output
 
-    def export_to_onnx(self, onnx_file, opset_version=17):
+    def export_to_onnx(self, onnx_file, opset_version):
         text = "Hello world! How are you doing today?"
         text_encoding = torch.IntTensor([[self.bos_id] +
                             self.tokenizer.encode(text, self.tokenizer_name) +
@@ -109,7 +109,7 @@ class IntEncoder(torch.nn.Module):
                               input_names=input_names,
                               output_names=output_names,
                               dynamic_axes=dynamic_axes,
-                              opset_version=17)
+                              opset_version=opset_version)
 
             torch.onnx.export(self, inputs_args, onnx_file, 
                               input_names=input_names, dynamic_axes=dynamic_axes,
@@ -126,10 +126,11 @@ class MagpieEncoderExportTRT:
                  minBS=1,
                  optBS=None,
                  maxBS=2,
-                 dtype="float16"):
+                 dtype="float16",
+                 opset_version=17):
         self.checkpoint_dir = checkpoint_dir
         self.engine_dir = engine_dir
-
+        self.opset_version = opset_version
         self.encoder_config = {}
 
         self.dtype = dtype
@@ -182,7 +183,12 @@ class MagpieEncoderExportTRT:
         self.encoder_config['eos_id'] = self.num_tokens - 1
         self.encoder_config['pad_id'] = model.tokenizer.pad
 
-        int_encoder.export_to_onnx(onnx_file)
+        int_encoder.export_to_onnx(onnx_file, opset_version=self.opset_version)
+        enc_graph = gs.import_onnx(onnx.load(onnx_file))
+        outputs=enc_graph.outputs
+        fix_outputs=[outputs[0]]
+        enc_graph.outputs=fix_outputs
+        onnx.save(gs.export_onnx(enc_graph), onnx_file)
 
 
     def generate_trt_engine(self):
@@ -265,15 +271,16 @@ class MagpieEncoderExportTRT:
 @click.option("--max_bs", type=int, default=2, help="maximum batch size")
 @click.option("--min_bs", type=int, default=1, help="minimum batch size")
 @click.option("--opt_bs", type=int, default=None, help="optimal batch size")
+@click.option("--opset_version", type=int, default=17, help="onnx opset version")
 @click.argument("tllm_checkpoint_dir", default="tllm_checkpoint", type=str)
 @click.argument("engine_dir", default="engines", type=str)
 def convert_encoder_to_trt(model_ckpt, audio_codec, hparams_file,
                            tllm_checkpoint_dir, engine_dir, dtype,
-                           max_bs, min_bs, opt_bs):
+                           max_bs, min_bs, opt_bs, opset_version):
     model_cfg = OmegaConf.load(hparams_file).cfg
     model = load_model(model_ckpt, model_cfg, audio_codec, engine_dir)
     encoder = MagpieEncoderExportTRT(tllm_checkpoint_dir, engine_dir, dtype=dtype,
-                                     maxBS=max_bs, minBS=min_bs, optBS=opt_bs)
+                                     maxBS=max_bs, minBS=min_bs, optBS=opt_bs, opset_version=opset_version)
     encoder.export_encoder_to_onnx(model, tokenizer_name="english_phoneme")
     encoder.generate_trt_engine()
 
