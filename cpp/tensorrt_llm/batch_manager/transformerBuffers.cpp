@@ -656,43 +656,6 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             numCopiedTokens++;
             numTokens++;
         }
-        else if (useAttentionPrior && llmReq->hasAttentionPriorIdx() && maxEncoderInputLengthInBatch > 5)
-        {
-            auto focusTimeIdx = llmReq->getAttentionPriorIdx();
-            //TODO: remove this debug print
-            TLLM_LOG_WARNING("At decoding step %d, focusing on encoder time %d",
-                (int)llmReq->getDecodingIter(), (int)focusTimeIdx
-            );
-            // Create a mask where only the token at focusTimeIdx is attended to
-            // Use std::unique_ptr with bool[] instead of vector<bool> to avoid bit packing
-            auto customMask = std::make_unique<bool[]>(maxEncoderInputLengthInBatch);
-            // Initialize all elements to false
-            std::fill_n(customMask.get(), maxEncoderInputLengthInBatch, false);
-            if (focusTimeIdx < maxEncoderInputLengthInBatch) {
-                // TODO: implement flooring, window, etc.
-                if (!llmReq->isAttentionPriorStuck()) {
-                    customMask[focusTimeIdx] = true;
-                }
-                customMask[std::min(focusTimeIdx + 1, maxEncoderInputLengthInBatch - 1)] = true;
-                customMask[std::min(focusTimeIdx + 2, maxEncoderInputLengthInBatch - 1)] = true;
-            } else {
-                std::fill_n(customMask.get(), maxEncoderInputLengthInBatch, true);
-                TLLM_LOG_WARNING("Time index %d exceeds encoder length %d, no position will be attended to", 
-                                 focusTimeIdx, maxEncoderInputLengthInBatch);
-            }
-            
-            // Copy the custom mask to pinned memory
-            std::memcpy(pinnedMemPtr, customMask.get(), maxEncoderInputLengthInBatch);
-            pinnedMemPtr += maxEncoderInputLengthInBatch;
-            
-            // Set up copy offsets the same way as before
-            batchedCopySrcOffsets.begin()[numCopiedTokens] = static_cast<SizeType64>(pinnedMemPtr - primarySrcPtr);
-            batchedCopyDstOffsets.begin()[numCopiedTokens] = numTokens * static_cast<SizeType64>(maxEncoderInputLengthInBatch);
-            batchedCopySizes.begin()[numCopiedTokens] = maxEncoderInputLengthInBatch;
-            
-            numCopiedTokens++;
-            numTokens++;
-        }
         else
         {
             numTokens++;
@@ -735,6 +698,38 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
 
         // Launch the pack mask kernel.
         tk::invokeBuildPackedMask(maskParams, stream.get());
+        sync_check_cuda_error(stream.get());
+    }
+
+    // directly adjust crossAttentionMaskDevice according to the attention prior
+    if (useAttentionPrior) {
+        SizeType32 qSeqOffset = 0;
+        for (auto const& llmReq : contextRequests) {
+            qSeqOffset += llmReq->getContextChunkSize();
+        }
+        for (auto const& llmReq : genRequests) {
+            if (llmReq->hasAttentionPriorIdx() && llmReq->getEncoderOutputLen() > 5) {
+                // need to adjust the mask
+                // 1. dont attend any of encoder tokens
+                auto reqMaskSlice = ITensor::slice(crossAttentionMaskDevice, {qSeqOffset, 0}, maxEncoderInputLengthInBatch);
+                manager.setMem(*reqMaskSlice, 0);
+                // 2. except those around focus time idx
+                auto focus = llmReq->getAttentionPriorIdx();
+                // TODO: this is a bigger window than a NeMo one [focus, focus + 3)
+                // but without attention_prior_floor, a bigger window is needed
+                // to get any sort of reasonable synthesis
+                auto from = std::max(0, focus - 2);
+                auto to = std::min(focus + 6, llmReq->getEncoderOutputLen());
+                TLLM_LOG_WARNING("For gen request %d, at decoding step %d, focusing on encoder time %d. window: [%d, %d)",
+                    llmReq->mRequestId, (int)llmReq->getDecodingIter(), (int)focus, (int)from, (int)to
+                );
+                auto len = to - from;
+                auto reqFocusMaskSlice = ITensor::slice(crossAttentionMaskDevice, {qSeqOffset, from}, len);
+                manager.setMem(*reqFocusMaskSlice, 1);
+            }
+            // for gen requests, the mask has shape [1, maxEncoderInputLengthInBatch]
+            qSeqOffset += 1;
+        }
         sync_check_cuda_error(stream.get());
     }
 
