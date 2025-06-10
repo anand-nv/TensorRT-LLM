@@ -88,8 +88,6 @@ void PromptTuningBuffers::validate(
 void PromptTuningBuffers::fill(RequestVector const& contextRequests, RequestVector const& genRequests,
     runtime::BufferManager const& manager, bool packed)
 {
-    manager.setZero(*mPromptTuningParams.embeddingTable);
-
     auto const numContextRequests = static_cast<SizeType32>(contextRequests.size());
 
     std::vector<SizeType32> reqBeamWidths;
