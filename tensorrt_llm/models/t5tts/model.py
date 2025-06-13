@@ -51,6 +51,8 @@ mlp_map = {
     MLPType.FusedGatedMLP: FusedGatedMLP,
 }
 
+COMPUTE_SCORES_FROM_LAYERS = [4, 5]
+
 
 class PositionwiseConvFF(Module):
 
@@ -421,6 +423,7 @@ class T5TTSDecoderLayer(Module):
         super().__init__()
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
+        self.compute_scores = local_layer_idx in COMPUTE_SCORES_FROM_LAYERS
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -568,13 +571,16 @@ class T5TTSDecoderLayer(Module):
 
         # compute attention scores
         # TODO: assumes padding disabled
-        q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), self.hidden_size]))
-        k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), self.hidden_size]))
-        scores = matmul(
-            q,
-            k,
-            transb=True
-        )
+        if self.compute_scores:
+            q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), self.hidden_size]))
+            k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), self.hidden_size]))
+            scores = matmul(
+                q,
+                k,
+                transb=True
+            )
+        else:
+            scores = None
 
         # conv ff (norm -> conv -> residual)
         residual = hidden_states
@@ -1167,7 +1173,8 @@ class T5TTSDecoderModel(PretrainedModel):
                 presents.append((presents_self, presents_cross))
             else:
                 hidden_states, scores = hidden_states
-            all_scores.append(scores)
+            if scores is not None:
+                all_scores.append(scores)
 
         scores_stacked = stack(all_scores, 0)  # [layers x b*context_length x b*numEncoderTokens]
         mean_scores = mean(scores_stacked, 0)  # [b*context length x b*numTokens]

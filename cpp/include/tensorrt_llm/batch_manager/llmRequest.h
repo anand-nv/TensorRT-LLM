@@ -1183,6 +1183,15 @@ public:
         return mCrossAttentionMask.value_or(nullptr);
     }
 
+    void setFocusCrossAttentionMask(runtime::BufferManager const& manager, int size=3)
+    {
+        if (!mCrossAttentionMask.has_value()) {
+            mCrossAttentionMask = std::move(manager.emptyTensor(runtime::MemoryType::kGPU, nvinfer1::DataType::kBOOL));
+            (*mCrossAttentionMask)->reshape(runtime::ITensor::makeShape({1, getEncoderOutputLen()}));
+            manager.setMem(**mCrossAttentionMask, 1);
+        }
+    }
+
     [[nodiscard]] TensorPtr getSkipCrossAttnBlocks() const
     {
         return mSkipCrossAttnBlocks.value_or(nullptr);
