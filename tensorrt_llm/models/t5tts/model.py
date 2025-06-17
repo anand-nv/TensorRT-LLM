@@ -51,7 +51,7 @@ mlp_map = {
     MLPType.FusedGatedMLP: FusedGatedMLP,
 }
 
-COMPUTE_SCORES_FROM_LAYERS = [4, 5]
+COMPUTE_SCORES_FROM_LAYERS = [4, 6, 10]
 
 
 class PositionwiseConvFF(Module):
@@ -470,7 +470,7 @@ class T5TTSDecoderLayer(Module):
             local_layer_idx=local_layer_idx,
             hidden_size=hidden_size,
             num_attention_heads=1,
-            attention_head_size=hidden_size,
+            attention_head_size=128,  # TODO: make this part of model config
             num_kv_heads=1,
             max_position_embeddings=max_position_embeddings,
             bias=has_attention_qkvo_bias,
@@ -570,10 +570,11 @@ class T5TTSDecoderLayer(Module):
         hidden_states = residual + attention_output
 
         # compute attention scores
-        # TODO: assumes padding disabled
+        # TODO: only implements disabled padding
+        # TODO: hardcodes head_size for cross attention
         if self.compute_scores:
-            q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), self.hidden_size]))
-            k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), self.hidden_size]))
+            q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), 128]))
+            k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), 128]))
             scores = matmul(
                 q,
                 k,

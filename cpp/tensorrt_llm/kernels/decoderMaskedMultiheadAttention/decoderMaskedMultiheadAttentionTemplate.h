@@ -1859,7 +1859,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     {
         relative_attention_bias = convert_to_float(relative_attention_bias_ptr[tlength]);
     }
-    if (has_attention_mask && tidx == 0)
+    if (has_attention_mask && tidx == 0 && !DO_CROSS_ATTENTION)
     {
         // Note: reuse the relative_attention_bias variable.
         // attention_mask = 1.0 means that the position is not masked.
@@ -2065,7 +2065,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             {
                 relative_attention_bias = convert_to_float(relative_attention_bias_ptr[local_time_now]);
             }
-            if (is_active && has_attention_mask)
+            if (is_active && has_attention_mask && !DO_CROSS_ATTENTION)
             {
                 // Note: reuse the relative_attention_bias variable.
                 // attention_mask = 1.0 means that the position is not masked.
@@ -2092,6 +2092,13 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 {
                     qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
                 }
+            }
+
+            if (is_active && has_attention_mask && DO_CROSS_ATTENTION) {
+                // TODO: This is a fix to take into account custom attention mask during cross attention.
+                // It is implicitely excludes EOS token from encoder sequence, this is to be checked.
+                // It penalizes masked tokens with -1e9, this can be adjusted to implement attention prior floor.
+                qk_ += (1e9 * (float(attention_mask_ptr[local_time_now]) - 1.0f));
             }
 
             // Apply attention logit softcapping scale.
