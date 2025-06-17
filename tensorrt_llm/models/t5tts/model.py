@@ -25,7 +25,7 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
-                                     minimum, recv, select, send, shape, view, mean, add, slice,
+                                     minimum, recv, select, send, shape, view, mean, add, slice, mul, expand_dims_like,
                                      squeeze, unsqueeze, transpose, matmul, stack, cast)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
@@ -52,6 +52,7 @@ mlp_map = {
 }
 
 COMPUTE_SCORES_FROM_LAYERS = [4, 6, 10]
+APPLY_PRIOR_TO_LAYERS = [4, 6, 10]
 
 
 class PositionwiseConvFF(Module):
@@ -424,6 +425,7 @@ class T5TTSDecoderLayer(Module):
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
         self.compute_scores = local_layer_idx in COMPUTE_SCORES_FROM_LAYERS
+        self.apply_prior = local_layer_idx in APPLY_PRIOR_TO_LAYERS
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -552,9 +554,21 @@ class T5TTSDecoderLayer(Module):
 
         hidden_states = self.cross_attention_layernorm(hidden_states)
         encoder_output = self.cross_attention_memory_layernorm(encoder_output)
+        # TODO: unnecessary computation, can be done just once for all layers
+        # TODO: ignores cross_attention_packed_mask, but they seems to be not changed anyways
+        cross_attention_mask = attention_mask_params.cross_attention_mask
+        if not self.apply_prior:
+            # TODO: this is ones_like operation, is there more efficient way to do it?
+            cross_attention_mask = add(
+                mul(
+                    cross_attention_mask.cast(dtype=trt.float32),
+                    expand_dims_like(float(0), cross_attention_mask)
+                ),
+                expand_dims_like(float(1), cross_attention_mask)
+            ).cast(dtype=cross_attention_mask.dtype)  # back to original type
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
-            attention_mask=attention_mask_params.cross_attention_mask,
+            attention_mask=cross_attention_mask,
             attention_packed_mask=attention_mask_params.
             cross_attention_packed_mask,
             encoder_output=encoder_output,
