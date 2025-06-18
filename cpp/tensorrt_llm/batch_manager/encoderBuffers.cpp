@@ -525,9 +525,7 @@ void EncoderBuffers::fill(
             auto const encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
             manager.copy(*llmReq->getEncoderOutput(), *encoderOutputSlice);
             offset += size;
-            // TODO: this is to ensure that EOS is included into cross-attention computation
-            // need to check if it has negative effect
-            inputLengthsAll.emplace_back(size + 1);
+            inputLengthsAll.emplace_back(size);
         }
     }
     manager.copy(inputLengthsAll.data(), *inputLengths);

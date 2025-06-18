@@ -1511,10 +1511,9 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         = params.relative_attention_bias_stride; // num_buckets might be modified below, save it beforehand
     [[maybe_unused]] int max_distance = params.max_distance;
 
-    // The actual sequence length excluding the paddings.
-    // minus 1 because it includes the current timestep while tlength denotes the kv cache length.
+    // Keep the EOS token for cross attention to attend to.
     int const tlength = DO_CROSS_ATTENTION
-        ? params.memory_length_per_sample[batch_beam_idx] - 1
+        ? params.memory_length_per_sample[batch_beam_idx]
         : (params.length_per_sample ? (params.length_per_sample[batch_beam_idx] - 1) : static_cast<int>(timestep));
     // We will use cyclic kv cache when it exceeds the limit.
     // The length position for storing new key and value.
