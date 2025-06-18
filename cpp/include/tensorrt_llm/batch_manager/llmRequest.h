@@ -1194,7 +1194,9 @@ public:
         std::fill(mask, mask + getEncoderOutputLen(), false);
         auto focus = getAttentionPriorIdx();
         for (int i = std::max(0, focus - 1); i < std::min(focus + 6, getEncoderOutputLen()); i++) {
-            mask[i] = true;
+            if (!isAttentionPriorStuck(i)) {
+                mask[i] = true;
+            }
         }
         // Copy array to tensor
         manager.copy(mask, **mCrossAttentionMask, runtime::MemoryType::kCPU);
@@ -1787,25 +1789,27 @@ public:
 
     void setAttentionPriorIdx(SizeType32 attentionPriorIdx)
     {
-        if (mAttentionPriorIdx.has_value() && mAttentionPriorIdx.value() == attentionPriorIdx) {
-            mAttentionPriorCounter++;
-        } else {
-            mAttentionPriorCounter = 1;
-        }
         mAttentionPriorIdx = attentionPriorIdx;
+        if (mAttentionPriorCounters.size() == 0) {
+            // TODO: lazy initialization due to inconsistencies between
+            // runtime::ITensor::SharedPtr and at::Tensor
+            mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
+        }
+        mAttentionPriorCounters[attentionPriorIdx]++;
         if (attentionPriorIdx >= getEncoderOutputLen() - 5) {
             mAttentionPriorCounterCloseToEnd++;
         }
     }
 
-    bool isAttentionPriorStuck() const
-    {
-        return mAttentionPriorCounter >= 8;
-    }
-
     bool isAttentionPriorFinished() const
     {
-        return mAttentionPriorCounterCloseToEnd >= 10;
+        bool isFinished = mAttentionPriorCounterCloseToEnd >= 20;
+        return isFinished;
+    }
+
+    bool isAttentionPriorStuck(int i) const
+    {
+        return mAttentionPriorCounters[i] >= 10;
     }
 
     bool hasAttentionPriorIdx() const
@@ -1917,8 +1921,8 @@ protected:
 
     // for attention prior, placeholder for where to focus in encoder output
     std::optional<SizeType32> mAttentionPriorIdx;
-    // counts how many times same attention prior idx is set
-    SizeType32 mAttentionPriorCounter{0};
+    // counts how many times certain attention prior idx was attended
+    std::vector<SizeType32> mAttentionPriorCounters;
     // counts how many times attention prior idx is close to the end of sequence
     SizeType32 mAttentionPriorCounterCloseToEnd{0};
 

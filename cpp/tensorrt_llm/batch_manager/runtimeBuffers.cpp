@@ -1031,6 +1031,13 @@ void RuntimeBuffers::setAttentionPriorIdx(
             if (i == j) {
                 // find attnetion prior idx in range [prev_prior_idx; prev_prior_idx + 10]
                 SizeType32 prevPriorIdx = llmReq->getAttentionPriorIdx();
+                if (llmReq->isAttentionPriorStuck(prevPriorIdx) && prevPriorIdx < encoderOutputLen - 5) {
+                    // since scores are recomputed, the `prevPriorIdx` can be selected again,
+                    // despite been masked. we skip it if its a sink to avoid this.
+                    // we allow sink at the very end of the sequence, becase it will be taken care of by
+                    // end-of-sequence detection.
+                    prevPriorIdx++;
+                }
                 // ignore last 3 tokens, move strictly forward, look up to 10 tokens forward
                 SizeType32 prevPriorIdxEnd = std::min(prevPriorIdx + searchLength, encoderOutputLen - 3);
                 SizeType32 prevPriorIdxLen = prevPriorIdxEnd - prevPriorIdx;
