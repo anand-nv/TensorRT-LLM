@@ -420,6 +420,10 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
             // special case, enable tiling, since non-tiled doesnt fit
 	    TLLM_LOG_WARNING("Enable tiling for head_size=768 as a special case");
 	    mLaunchParams.granular_tiling = true;
+        
+        //Following required for Hopper (SM90) - force ampere-style flash attention kernels
+        mLaunchParams.warp_specialization = false;
+        mLaunchParams.useKernelWithoutAlibi = false;
 	}
 	else if ((isSm89 || isSm120) && mFixedParams.dataType == DATA_TYPE_E4M3)
         {
@@ -446,12 +450,12 @@ void FusedMHARunnerV2::setupLaunchParams(MHARunnerParams runnerParams)
     }
 
     // when flash attention is enabled on Hopper, we need to set the tma descriptors
-    if (isSm90 && mLaunchParams.flash_attention)
+    if (isSm90 && mLaunchParams.flash_attention && mFixedParams.headSize != 768)
     {
-        mLaunchParams.warp_specialization = true;
-        mLaunchParams.use_tma = true;
-        // Enable dynamic tile scheduling for hopper ws kernel.
-        mLaunchParams.dynamic_scheduler = true;
+            mLaunchParams.warp_specialization = true;
+            mLaunchParams.use_tma = true;
+            // Enable dynamic tile scheduling for hopper ws kernel.
+            mLaunchParams.dynamic_scheduler = true;
     }
 
     // Use specialized ws kernels on Hopper for cases without alibi.
