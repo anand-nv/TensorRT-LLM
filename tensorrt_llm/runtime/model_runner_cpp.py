@@ -639,6 +639,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 "num_return_sequences",
                 "min_p",
                 "beam_width_array",
+                "cfg_scale",
             ]
             rename_params = {"num_beams": "beam_width", "random_seed": "seed"}
             sampling_params = {

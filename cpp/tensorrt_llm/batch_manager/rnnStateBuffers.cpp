@@ -52,7 +52,9 @@ void RnnStateBuffers::fillSlotMappings(
     SizeType32 batchIdx{0};
     for (auto const& llmReq : contextRequests)
     {
-        auto const seqSlot = llmReq->mSeqSlot.value();
+        // TODO: rnn state does not support CFG yet
+        TLLM_CHECK_WITH_INFO(!llmReq->isCfg(), "rnn state buffers do not support CFG yet");
+        auto const seqSlot = llmReq->mSeqSlots.at(0);
         auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
         rnnStateManager->fillSlotMapping(*slotMappingHost, batchIdx, seqSlot, reqBeamWidth);
         ++batchIdx;

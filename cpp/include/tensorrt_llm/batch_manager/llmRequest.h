@@ -34,6 +34,7 @@
 #include <utility>
 #include <valarray>
 #include <vector>
+#include <limits>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -520,6 +521,38 @@ public:
         return mNumReturnSequences;
     }
 
+    [[nodiscard]] bool isCfg() const
+    {
+        return mSamplingConfig.cfgScale.has_value() && mSamplingConfig.cfgScale->at(0) != 1.0f;
+    }
+
+    [[nodiscard]] SizeType32 getNumSequences() const
+    {
+        if (isCfg()) {
+            TLLM_CHECK_WITH_INFO(mSamplingConfig.beamWidth == 1, "cfgScale is only supported for beamWidth = 1");
+            return 2;
+        }
+        return 1;
+    }
+
+    [[nodiscard]] SizeType32 getSeqSlot(int idx) const
+    {
+        TLLM_CHECK_WITH_INFO(idx >= 0 && idx < getNumSequences(), "seq slot idx is out of range");
+        return mSeqSlots[idx];
+    }
+
+    [[nodiscard]] uint64_t getSeqSlotId(int idx = 0) const
+    {
+        if (idx == 0) {
+            return mRequestId;
+        }
+        if (isCfg() && idx == 1) {
+            return std::numeric_limits<uint64_t>::max() - mRequestId;
+        }
+        TLLM_CHECK_WITH_INFO(false, "Sequence slot id is implemented for CFG only");
+        return 0;
+    }
+
     /// @brief Get the number of subrequests, the expected number of responses under non-streaming mode. In sampling
     /// mode, it will be equal to mSamplingConfig.numReturnSequences, while it will be equal to 1 in beam search.
     /// @return  The number of subrequests in total  request size.
@@ -823,7 +856,7 @@ public:
                                                                      : LlmRequestState::kCONTEXT_INIT;
         mContextCurrentPosition = 0;
         mContextChunkSize = mPromptLen;
-        mSeqSlot.reset();
+        mSeqSlots.clear();
     }
 
     /// @brief Get the maximum length of tokens returned to the client. Use to ensure we don't return to
@@ -1826,7 +1859,7 @@ public:
     runtime::SamplingConfig mSamplingConfig;
     std::optional<TokenIdType> mEndId{std::nullopt};
     std::optional<TokenIdType> mPadId{std::nullopt};
-    std::optional<SizeType32> mSeqSlot{std::nullopt};
+    std::vector<SizeType32> mSeqSlots{};
     std::optional<LogitsPostProcessor> mLogitsPostProcessor{std::nullopt};
     bool mApplyLogitsPostProcessorBatched{false};
     std::optional<RequestIdType> mClientId{std::nullopt};

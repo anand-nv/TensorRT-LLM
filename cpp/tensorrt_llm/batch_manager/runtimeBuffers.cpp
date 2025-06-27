@@ -389,17 +389,20 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     NVTX3_SCOPED_RANGE(runtimeBuffersSetBufferSizes);
 
     // set context sizes
-    numContextRequests = static_cast<SizeType32>(contextRequests.size());
+    numContextRequests = 0;
+    for (auto const& llmReq : contextRequests) {
+        numContextRequests += llmReq->getNumSequences();
+    }
     auto numContextLogits = numContextRequests;
     numContextTokens = 0;
     maxContextLength = 0;
     for (auto const& llmReq : contextRequests)
     {
         auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
-        numContextLogits += draftLength;
+        numContextLogits += draftLength * llmReq->getNumSequences();
 
         auto const contextChunkSize = llmReq->getContextChunkSize();
-        numContextTokens += contextChunkSize + draftLength;
+        numContextTokens += (contextChunkSize + draftLength) * llmReq->getNumSequences();
         if (maxContextLength < llmReq->mPromptLen)
         {
             maxContextLength = llmReq->mPromptLen;
@@ -407,15 +410,18 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     }
 
     // set generation sizes
-    numGenRequests = static_cast<SizeType32>(genRequests.size());
+    numGenRequests = 0;
+    for (auto const& llmReq : genRequests) {
+        numGenRequests += llmReq->getNumSequences();
+    }
     numGenSequences = 0;
     numGenTokens = 0;
     for (auto const& llmReq : genRequests)
     {
-        auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-        numGenSequences += reqBeamWidth;
+        auto reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+        numGenSequences += reqBeamWidth * llmReq->getNumSequences();
         auto const draftLen = llmReq->getNumDraftTokens();
-        numGenTokens += draftLen + reqBeamWidth;
+        numGenTokens += (draftLen + reqBeamWidth) * llmReq->getNumSequences();
     }
 
     numLogits = numContextLogits + numGenTokens;
@@ -425,6 +431,7 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
         encoderBuffers->setBufferSizes(contextRequests, genRequests);
     }
 
+    TLLM_LOG_WARNING(">>>>>setBufferSizes: numContextRequests %d; numGenRequests %d", numContextRequests, numGenRequests);
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -500,21 +507,27 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             for (auto const& llmReq : requests)
             {
                 // Get position of the current sequence in the decoder
-                auto const seqSlot = llmReq->mSeqSlot.value();
-                seqSlotIndices[batchIdx] = seqSlot;
-                ++batchIdx;
+                for (const auto& seqSlot : llmReq->mSeqSlots) {
+                    seqSlotIndices[batchIdx] = seqSlot;
+                    ++batchIdx;
+                }
             }
         }
-
         TLLM_CHECK(seqSlots->getSize() == static_cast<std::size_t>(batchIdx));
         manager.copy(*seqSlots, *seqSlotsDevice);
     }
 
+    // count number of context sequences
+    SizeType32 contextRequestsSize = 0;
+    for (auto const& llmReq : contextRequests) {
+        contextRequestsSize += llmReq->getNumSequences();
+    }
+
     // context preparation loop
-    if (!contextRequests.empty())
+    if (contextRequestsSize > 0)
     {
         NVTX3_SCOPED_RANGE(contextPrepareLoop);
-        numContextLogits.resize(contextRequests.size());
+        numContextLogits.resize(contextRequestsSize);
 
         SizeType32 batchIdx{0};
         for (auto const& llmReq : contextRequests)
@@ -524,102 +537,118 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             TLLM_CHECK_WITH_INFO(
                 llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
 
-            auto const& reqTokens = llmReq->getTokens(0);
-            auto const& draftTokens = llmReq->getDraftTokens();
-            auto const draftLength = llmReq->getNumDraftTokens();
-            auto const& positionIds = llmReq->getPositionIds();
-
-            auto const contextChunkSize = llmReq->getContextChunkSize();
-            auto const beginCompute = llmReq->getContextCurrentPosition();
-            auto const endCompute = beginCompute + contextChunkSize;
-            inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute,
-                reqTokens.begin() + beginCompute + contextChunkSize * llmReq->getNumVocabs());
-
-            logitsIdsHostPtr[totalNumLogits++] = contextChunkSize;
-            numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? contextChunkSize : 1;
-
-            if (llmReq->isLastContextChunk())
-            {
-                inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
-                std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
-                totalNumLogits += draftLength;
+            // for CFG requests, add the inputs to the buffer twice
+            std::vector<bool> is_conditional_vec{true};
+            if (llmReq->isCfg()) {
+                is_conditional_vec.push_back(false);
             }
-            auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
-            contextLengthsHostPtr[batchIdx] = inputLength;
-            auto const sequenceLen = inputLength + llmReq->getContextCurrentPosition();
-            sequenceLengthsHostPtr[batchIdx] = sequenceLen;
-
-            if (static_cast<bool>(pastKeyValueLengthsPtr))
-            {
-                pastKeyValueLengthsPtr[batchIdx] = beginCompute + inputLength;
-            }
-
-            if (positionIds.has_value())
-            {
-                TLLM_CHECK_WITH_INFO(!(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
-                positionIdsHost.insert(positionIdsHost.end(), positionIds.value()->begin() + beginCompute,
-                    positionIds.value()->begin() + endCompute);
-            }
-            else
-            {
-                if (isChatGlm)
-                {
-                    // Specialize for ChatGLM-6B with 2D-Position-Embedding
-                    positionIdsHost.resize(totalInputSize + inputLength);
-                    std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                    positionIdsHost.back() = positionIdsHost.back() - 1;
-
-                    positionIdsHostRow2.resize(totalInputSize + inputLength);
-                    positionIdsHostRow2.back() = 1;
+            for (const auto& is_conditional : is_conditional_vec) {
+                auto const& origTokens = llmReq->getTokens(0);
+                std::vector<TokenIdType> dummyTokens;
+                if (!is_conditional) {
+                    // TODO: need a special token for unconditional input, which is expanded
+                    // to all zeros
+                    dummyTokens.assign(origTokens.size(), 0);
                 }
-                else if (isGlm)
+
+                auto const& reqTokens = is_conditional ? origTokens : dummyTokens;
+                auto const& draftTokens = llmReq->getDraftTokens();
+                auto const draftLength = llmReq->getNumDraftTokens();
+                auto const& positionIds = llmReq->getPositionIds();
+
+                auto const contextChunkSize = llmReq->getContextChunkSize();
+                auto const beginCompute = llmReq->getContextCurrentPosition();
+                auto const endCompute = beginCompute + contextChunkSize;
+                inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute,
+                    reqTokens.begin() + beginCompute + contextChunkSize * llmReq->getNumVocabs());
+
+                logitsIdsHostPtr[totalNumLogits++] = contextChunkSize;
+                numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? contextChunkSize : 1;
+
+                if (llmReq->isLastContextChunk())
                 {
-                    // Specialize for GLM-10B with 2D-Position-Embedding and special value of the mask id position
-                    auto start = inputHost.begin() + totalInputSize;
-                    auto end = start + inputLength;
-                    auto it = std::find_if(
-                        start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
-                    llmReq->mMaskPosition = (it != end) ? std::distance(start, it) : maxContextLength;
+                    inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
+                    std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
+                    totalNumLogits += draftLength;
+                }
+                auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
+                contextLengthsHostPtr[batchIdx] = inputLength;
+                auto const sequenceLen = inputLength + llmReq->getContextCurrentPosition();
+                sequenceLengthsHostPtr[batchIdx] = sequenceLen;
 
-                    positionIdsHost.resize(totalInputSize + inputLength);
-                    std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                    positionIdsHost.back() = llmReq->mMaskPosition;
+                if (static_cast<bool>(pastKeyValueLengthsPtr))
+                {
+                    pastKeyValueLengthsPtr[batchIdx] = beginCompute + inputLength;
+                }
 
-                    positionIdsHostRow2.resize(totalInputSize + inputLength);
-                    positionIdsHostRow2.back() = 1;
+                if (positionIds.has_value())
+                {
+                    TLLM_CHECK_WITH_INFO(!(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
+                    positionIdsHost.insert(positionIdsHost.end(), positionIds.value()->begin() + beginCompute,
+                        positionIds.value()->begin() + endCompute);
                 }
                 else
                 {
-                    // Other models
-                    positionIdsHost.resize(totalInputSize + inputLength);
-                    std::iota(std::begin(positionIdsHost) + totalInputSize,
-                        std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
+                    if (isChatGlm)
+                    {
+                        // Specialize for ChatGLM-6B with 2D-Position-Embedding
+                        positionIdsHost.resize(totalInputSize + inputLength);
+                        std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                        positionIdsHost.back() = positionIdsHost.back() - 1;
+
+                        positionIdsHostRow2.resize(totalInputSize + inputLength);
+                        positionIdsHostRow2.back() = 1;
+                    }
+                    else if (isGlm)
+                    {
+                        // Specialize for GLM-10B with 2D-Position-Embedding and special value of the mask id position
+                        auto start = inputHost.begin() + totalInputSize;
+                        auto end = start + inputLength;
+                        auto it = std::find_if(
+                            start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
+                        llmReq->mMaskPosition = (it != end) ? std::distance(start, it) : maxContextLength;
+
+                        positionIdsHost.resize(totalInputSize + inputLength);
+                        std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                        positionIdsHost.back() = llmReq->mMaskPosition;
+
+                        positionIdsHostRow2.resize(totalInputSize + inputLength);
+                        positionIdsHostRow2.back() = 1;
+                    }
+                    else
+                    {
+                        // Other models
+                        positionIdsHost.resize(totalInputSize + inputLength);
+                        std::iota(std::begin(positionIdsHost) + totalInputSize,
+                            std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
+                    }
                 }
-            }
-            if (modelConfig.useMrope())
-            {
-                auto optMropeRotaryCosSin = llmReq->getMropeRotaryCosSin().value();
-                TLLM_CHECK_WITH_INFO(optMropeRotaryCosSin->getShape().d[0] == mropeRotaryCosSinSize,
-                    "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotaryCosSin->getShape().d[0],
-                    int(mropeRotaryCosSinSize));
+                if (modelConfig.useMrope())
+                {
+                    auto optMropeRotaryCosSin = llmReq->getMropeRotaryCosSin().value();
+                    TLLM_CHECK_WITH_INFO(optMropeRotaryCosSin->getShape().d[0] == mropeRotaryCosSinSize,
+                        "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotaryCosSin->getShape().d[0],
+                        int(mropeRotaryCosSinSize));
 
-                auto const mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, batchIdx, 1);
-                manager.copy(*optMropeRotaryCosSin, *mropeRotaryCosSinCtx);
-            }
+                    auto const mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, batchIdx, 1);
+                    manager.copy(*optMropeRotaryCosSin, *mropeRotaryCosSinCtx);
+                }
 
-            if (modelConfig.useLanguageAdapter())
-            {
-                auto const languageAdapterRouting = llmReq->getLanguageAdapterRouting(
-                    modelConfig.getNumLanguages().value(), endCompute - beginCompute);
-                languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
-                    std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
+                if (modelConfig.useLanguageAdapter())
+                {
+                    auto const languageAdapterRouting = llmReq->getLanguageAdapterRouting(
+                        modelConfig.getNumLanguages().value(), endCompute - beginCompute);
+                    languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
+                        std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
+                }
+                totalInputSize += inputLength;
+                ++batchIdx;
             }
-            totalInputSize += inputLength;
-            ++batchIdx;
         }
 
         if (rnnStateBuffers)
-        {
+        {   
+            // TODO: dont implement CFG for rnn state buffers for now
             rnnStateBuffers->fillSlotMappings(contextRequests, rnnStateManagerPtr);
         }
 
@@ -635,108 +664,112 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     {
         NVTX3_SCOPED_RANGE(genPrepareLoop);
 
-        auto const numContextRequests = static_cast<SizeType32>(contextRequests.size());
-        auto numSequences = numContextRequests;
+        auto numSequences = contextRequestsSize;
         for (auto const& llmReq : genRequests)
         {
-            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+            for (int s = 0; s < llmReq->getNumSequences(); s++) {
+                auto reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
 
-            auto const draftLength = llmReq->getNumDraftTokens();
-            auto const& draftTokens = llmReq->getDraftTokens();
-            auto const numLogits = draftLength + reqBeamWidth;
-            TLLM_CHECK(draftLength == 0 || reqBeamWidth == 1);
+                auto const draftLength = llmReq->getNumDraftTokens();
+                auto const& draftTokens = llmReq->getDraftTokens();
+                auto const numLogits = draftLength + reqBeamWidth;
+                TLLM_CHECK(draftLength == 0 || reqBeamWidth == 1);
 
-            auto const promptLen = llmReq->mPromptLen;
-            auto const sequenceLen = promptLen + llmReq->getMaxNumGeneratedTokens();
-            auto const& positionIds = llmReq->getPositionIds();
-            for (int beam = 0; beam < reqBeamWidth; ++beam)
-            {
-                auto const lastToken = llmReq->getLastTokens(beam);
-                auto const numTokens = llmReq->getNumTokens(beam);
-                if (llmReq->getNumVocabs() > 1)
+                auto const promptLen = llmReq->mPromptLen;
+                auto const sequenceLen = promptLen + llmReq->getMaxNumGeneratedTokens();
+                auto const& positionIds = llmReq->getPositionIds();
+                for (int reqBeam = 0; reqBeam < reqBeamWidth; ++reqBeam)
                 {
-                    auto const& beamTokens = llmReq->getTokens(beam);
-                    TLLM_CHECK_WITH_INFO(
-                        beamTokens.size() % llmReq->getNumVocabs() == 0,
-                        "Number of tokens needs to be a multiple of number of vocabs!"
-                    );
-                    inputHost.insert(inputHost.end(), beamTokens.cend() - llmReq->getNumVocabs(), beamTokens.cend());
-                }
-                else
-                {
-                     inputHost.push_back(lastToken);
+                    // for CFG, simply use tokens from the 0th beam during generation
+                    int beam = llmReq->isCfg() ? 0 : reqBeam;
+                    auto const numTokens = llmReq->getNumTokens(beam);
+                    if (llmReq->getNumVocabs() > 1)
+                    {
+                        auto const& beamTokens = llmReq->getTokens(beam);
+                        TLLM_CHECK_WITH_INFO(
+                            beamTokens.size() % llmReq->getNumVocabs() == 0,
+                            "Number of tokens needs to be a multiple of number of vocabs!"
+                        );
+                        inputHost.insert(inputHost.end(), beamTokens.cend() - llmReq->getNumVocabs(), beamTokens.cend());
+                    }
+                    else
+                    {
+                        auto const lastToken = llmReq->getLastTokens(beam);
+                        inputHost.push_back(lastToken);
+                    }
+
+                    // If model updates generation position ids do not append them here.
+                    if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
+                    {
+                        if (positionIds.has_value())
+                        {
+                            TLLM_CHECK_WITH_INFO(
+                                !(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
+                            auto last_context_position_id = positionIds.value()->back();
+                            positionIdsHost.push_back(
+                                static_cast<SizeType32>(last_context_position_id + sequenceLen - promptLen));
+                        }
+                        else
+                        {
+                            if (isChatGlm) // ChatGLM-6B
+                            {
+                                positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
+                                positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                            }
+                            else if (isGlm)
+                            {
+                                positionIdsHost.push_back(llmReq->mMaskPosition);
+                                positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                            }
+                            else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
+                            {
+                                // positionIds is just the size of tokens -1
+                                positionIdsHost.push_back(numTokens - 1);
+                            }
+                        }
+                    }
+
+                    if (draftLength > 0)
+                    {
+                        inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
+                    }
+
+                    if (modelConfig.useMrope())
+                    {
+                        auto optMropePositionDeltas = llmReq->getMropePositionDeltas().value();
+                        mropePositionDeltasHost.push_back(optMropePositionDeltas);
+                    }
+
+                    if (modelConfig.useLanguageAdapter())
+                    {
+                        // Generation requests only have one token per sequence
+                        auto const languageAdapterRouting
+                            = llmReq->getLanguageAdapterRouting(modelConfig.getNumLanguages().value(), 1);
+                        languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
+                            std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
+                    }
                 }
 
-                // If model updates generation position ids do not append them here.
-                if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
+                if (static_cast<bool>(pastKeyValueLengthsPtr))
                 {
-                     if (positionIds.has_value())
-                     {
-                         TLLM_CHECK_WITH_INFO(
-                             !(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
-                         auto last_context_position_id = positionIds.value()->back();
-                         positionIdsHost.push_back(
-                             static_cast<SizeType32>(last_context_position_id + sequenceLen - promptLen));
-                     }
-                     else
-                     {
-                         if (isChatGlm) // ChatGLM-6B
-                         {
-                             positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
-                             positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
-                         }
-                         else if (isGlm)
-                         {
-                             positionIdsHost.push_back(llmReq->mMaskPosition);
-                             positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
-                         }
-                         else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
-                         {
-                             // positionIds is just the size of tokens -1
-                             positionIdsHost.push_back(numTokens - 1);
-                         }
-                     }
+                    SizeType32 pastKeyValueLength = sequenceLen - 1;
+                    std::fill_n(pastKeyValueLengthsPtr + numSequences, reqBeamWidth, pastKeyValueLength);
                 }
+                totalInputSize += numLogits;
 
-                if (draftLength > 0)
-                {
-                     inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
-                }
+                std::fill_n(logitsIdsHostPtr + totalNumLogits, numLogits, 1);
 
-                if (modelConfig.useMrope())
-                {
-                     auto optMropePositionDeltas = llmReq->getMropePositionDeltas().value();
-                     mropePositionDeltasHost.push_back(optMropePositionDeltas);
-                }
+                totalNumLogits += numLogits;
 
-                if (modelConfig.useLanguageAdapter())
+                if (rnnStateBuffers)
                 {
-                     // Generation requests only have one token per sequence
-                     auto const languageAdapterRouting
-                         = llmReq->getLanguageAdapterRouting(modelConfig.getNumLanguages().value(), 1);
-                     languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
-                         std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
+                    TLLM_CHECK_WITH_INFO(!llmReq->isCfg(), "CFG is not supported for rnn state buffers");
+                    auto const seqSlot = llmReq->mSeqSlots[0];
+                    auto& rnnStateManager = *rnnStateManagerPtr;
+                    rnnStateManager.fillSlotMapping(*rnnStateBuffers->slotMappingHost, numSequences, seqSlot, reqBeamWidth);
                 }
+                numSequences += reqBeamWidth;
             }
-
-            if (static_cast<bool>(pastKeyValueLengthsPtr))
-            {
-                SizeType32 pastKeyValueLength = sequenceLen - 1;
-                std::fill_n(pastKeyValueLengthsPtr + numSequences, reqBeamWidth, pastKeyValueLength);
-            }
-            totalInputSize += numLogits;
-
-            std::fill_n(logitsIdsHostPtr + totalNumLogits, numLogits, 1);
-
-            totalNumLogits += numLogits;
-
-            if (rnnStateBuffers)
-            {
-                auto const seqSlot = llmReq->mSeqSlot.value();
-                auto& rnnStateManager = *rnnStateManagerPtr;
-                rnnStateManager.fillSlotMapping(*rnnStateBuffers->slotMappingHost, numSequences, seqSlot, reqBeamWidth);
-            }
-            numSequences += reqBeamWidth;
         }
 
         if (transformerBuffers && maxBeamWidth > 1)
@@ -744,19 +777,20 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             transformerBuffers->copyCacheIndirection(genRequests, decoderBuffers.cacheIndirectionOutput, stream);
         }
 
-        numSequences = numContextRequests;
+        numSequences = contextRequestsSize;
         for (auto const& llmReq : genRequests)
         {
-            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+            for (int s = 0; s < llmReq->getNumSequences(); s++) {
+                auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+                auto const draftLength = llmReq->getNumDraftTokens();
 
-            auto const draftLength = llmReq->getNumDraftTokens();
+                auto const contextQLength = llmReq->mPromptLen + draftLength;
+                auto const sequenceLen = contextQLength + llmReq->getMaxNumGeneratedTokens();
 
-            auto const contextQLength = llmReq->mPromptLen + draftLength;
-            auto const sequenceLen = contextQLength + llmReq->getMaxNumGeneratedTokens();
-
-            std::fill_n(contextLengthsHostPtr + numSequences, reqBeamWidth, contextQLength);
-            std::fill_n(sequenceLengthsHostPtr + numSequences, reqBeamWidth, sequenceLen);
-            numSequences += reqBeamWidth;
+                std::fill_n(contextLengthsHostPtr + numSequences, reqBeamWidth, contextQLength);
+                std::fill_n(sequenceLengthsHostPtr + numSequences, reqBeamWidth, sequenceLen);
+                numSequences += reqBeamWidth;
+            }
         }
         if (modelConfig.getSpeculativeDecodingMode().needsKVCacheRewind())
         {
@@ -990,10 +1024,9 @@ void RuntimeBuffers::setAttentionPriorIdx(
     SizeType32 totalContextEncoderOutputLen = 0; 
     for (auto const& llmReq : contextRequests) {
         totalContextEncoderOutputLen += llmReq->getEncoderOutputLen();
-    }
-    SizeType32 totalEncoderOutputLen = totalContextEncoderOutputLen;
-    for (auto const& llmReq : genRequests) {
-        totalEncoderOutputLen += llmReq->getEncoderOutputLen();
+        if (llmReq->isCfg()) {
+            totalContextEncoderOutputLen += llmReq->getEncoderOutputLen();
+        }
     }
 
     // create a cpu buffer for scores to find max score in
@@ -1016,8 +1049,14 @@ void RuntimeBuffers::setAttentionPriorIdx(
                 llmReq->setAttentionPriorIdx(maxIdx);
             }
             kvOffset += encoderOutputLen;
+            if (llmReq->isCfg()) {
+                kvOffset += encoderOutputLen;
+            }
         }
         qOffset += contextRequests[i]->getContextChunkSize();
+        if (contextRequests[i]->isCfg()) {
+            qOffset += contextRequests[i]->getContextChunkSize();
+        }
     }
 
     // for generation requests, there is no context,
@@ -1045,8 +1084,14 @@ void RuntimeBuffers::setAttentionPriorIdx(
                 llmReq->setAttentionPriorIdx(prevPriorIdx + maxIdx);
             }
             kvOffset += encoderOutputLen;
+            if (llmReq->isCfg(  )) {
+                kvOffset += encoderOutputLen;
+            }
         }
         qOffset += 1;
+        if (genRequests[i]->isCfg()) {
+            qOffset += 1;
+        }
     }
 }
 

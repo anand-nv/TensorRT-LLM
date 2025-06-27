@@ -265,7 +265,7 @@ std::shared_ptr<LlmRequest> LlmRequest::createChildRequest(RequestIdType request
     childReq->mSequenceIndex = mChildRequests.size() + 1;
     childReq->mParentRequestId = this->mRequestId;
     childReq->mSequenceFinalVec = this->mSequenceFinalVec;
-    childReq->mSeqSlot.reset();
+    childReq->mSeqSlots.clear();
 
     // To ensure different randomness across children, assign a unique random seed to each child
     // by adding its sequence index to the base seed. If no seed is provided, the parent's seed defaults to 0.

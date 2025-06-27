@@ -179,7 +179,7 @@ GenerateRequestOptions::operator()(tr::ModelConfig const& modelConfig, tr::World
             decoderRequest.stopWordsList->squeeze(0);
         }
         // TODO: is this correct?
-        batchSlotsRange[batchIdx] = llmReq->mSeqSlot.value();
+        batchSlotsRange[batchIdx] = llmReq->mSeqSlots.at(0);
         decoderRequests.push_back(decoderRequest);
         samplingConfigs.push_back(llmReq->mSamplingConfig);
 

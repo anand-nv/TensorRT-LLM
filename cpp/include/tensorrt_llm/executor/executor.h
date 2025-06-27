@@ -76,7 +76,8 @@ public:
         std::optional<SizeType32> const& noRepeatNgramSize = std::nullopt,
         std::optional<SizeType32> const& numReturnSequences = std::nullopt,
         std::optional<FloatType> const& minP = std::nullopt,
-        std::optional<std::vector<SizeType32>> const& beamWidthArray = std::nullopt);
+        std::optional<std::vector<SizeType32>> const& beamWidthArray = std::nullopt,
+        std::optional<FloatType> const& cfgScale = std::nullopt);
 
     bool operator==(SamplingConfig const& other) const;
 
@@ -102,6 +103,7 @@ public:
     [[nodiscard]] std::optional<SizeType32> getNumReturnSequences() const;
     [[nodiscard]] std::optional<FloatType> getMinP() const;
     [[nodiscard]] std::optional<std::vector<SizeType32>> getBeamWidthArray() const;
+    [[nodiscard]] std::optional<FloatType> getCfgScale() const;
 
     void setBeamWidth(SizeType32 beamWidth);
     void setTopK(std::optional<SizeType32> const& topK);
@@ -124,6 +126,7 @@ public:
     void setNumReturnSequences(std::optional<SizeType32> const& numReturnSequences);
     void setMinP(std::optional<FloatType> const& minP);
     void setBeamWidthArray(std::optional<std::vector<SizeType32>> const& beamWidthArray);
+    void setCfgScale(std::optional<FloatType> const& cfgScale);
 
 private:
     static SizeType32 checkBeamWidth(SizeType32 beamWidth);
@@ -145,6 +148,9 @@ private:
     static std::optional<FloatType> const& checkMinP(std::optional<FloatType> const& minP);
     static std::optional<std::vector<SizeType32>> const& checkBeamWidthArray(
         std::optional<std::vector<SizeType32>> const& beamWidthArray, std::optional<SizeType32> const beamWidth);
+    static std::optional<FloatType> const& checkCfgScale(std::optional<FloatType> const& cfgScale);
+
+
     void updateNumReturnBeams();
 
     friend class Serialization;
@@ -196,6 +202,8 @@ private:
     std::optional<FloatType> mMinP;
     /// @brief Controls the beam width for each step for Variable-Beam-Width-Search.
     std::optional<std::vector<SizeType32>> mBeamWidthArray;
+    /// @brief Controls the cfg scale for sampling.
+    std::optional<FloatType> mCfgScale;
 };
 
 /// @brief Additional output that should be gathered.

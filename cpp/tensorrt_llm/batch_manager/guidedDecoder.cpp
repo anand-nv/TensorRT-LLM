@@ -79,7 +79,7 @@ void GuidedDecoder::build(ScheduledRequests const& scheduledRequests)
                 {
                     continue;
                 }
-                auto const seqSlot = llmReq->mSeqSlot.value();
+                auto const seqSlot = llmReq->mSeqSlots.at(0);
                 if (llmReq->isContextInitState()
                     && llmReq->getContextCurrentPosition() == llmReq->getPrepopulatedPromptLen())
                 {
@@ -162,7 +162,7 @@ void GuidedDecoder::execute(ScheduledRequests const& scheduledRequests, BufferMa
                 auto const& guidedDecodingParams = llmReq->getGuidedDecodingParams();
                 if (guidedDecodingParams.has_value())
                 {
-                    auto const seqSlot = llmReq->mSeqSlot.value();
+                    auto const seqSlot = llmReq->mSeqSlots.at(0);
 
                     auto const& logits = decoderBuffersLogits.at(seqSlot);
                     auto const logitsBitmask = ITensor::at(mLogitsBitmask, {seqSlot});

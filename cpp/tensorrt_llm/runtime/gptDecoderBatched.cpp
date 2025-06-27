@@ -65,7 +65,7 @@ void GptDecoderBatched::disableLookahead(RequestVector const& genRequests, Tenso
     for (auto const& llmReq : genRequests)
     {
         samplingConfigs.push_back(llmReq->mSamplingConfig);
-        batchSlotsRange[batchIdx] = llmReq->mSeqSlot.value();
+        batchSlotsRange[batchIdx] = llmReq->mSeqSlots.at(0);
         batchIdx += 1;
     }
     auto const batchSize = batchIdx;

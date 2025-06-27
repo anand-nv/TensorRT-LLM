@@ -114,9 +114,16 @@ SizeType32 HandleContextLogits::operator()(RequestVector const& contextRequests,
 
         // Get the logits from the last context token and draft tokens
         auto const numDecoderLogits = 1 + draftLength;
-        auto const seqSlot = llmReq->mSeqSlot.value();
         TensorPtr logitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
 
+        // this is CFG support implementation, where we advance the logits index through the unconditional logits
+        if (llmReq->isCfg()) {
+            logitsIndex += numContextLogits + draftLength;
+            TensorPtr uncondLogitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
+            // TODO: implement CFG, apply logitsView = logitsView * cfgScale + uncondLogitsView * (1 - cfgScale)
+        }
+
+        auto const seqSlot = llmReq->mSeqSlots.at(0);
         if (modelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
             TLLM_CHECK(medusaBuffers);
@@ -168,6 +175,9 @@ SizeType32 HandleContextLogits::operator()(RequestVector const& contextRequests,
                 curVocablogitsView, ITensor::makeShape({updateLogitsViewShape.d[0], 1, updateLogitsViewShape.d[1]}));
         }
         ++batchIndex;
+        if (llmReq->isCfg()) {
+            ++batchIndex;
+        }
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);

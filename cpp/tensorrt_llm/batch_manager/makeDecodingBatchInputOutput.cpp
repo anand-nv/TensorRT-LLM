@@ -103,7 +103,7 @@ std::vector<SizeType32> getActiveSlots(RequestVector const& contextRequests, Req
         {
             if (llmReq->isGenerationInProgressState() || llmReq->isLastContextChunk())
             {
-                activeSlots.push_back(llmReq->mSeqSlot.value());
+                activeSlots.push_back(llmReq->mSeqSlots.at(0));
             }
         }
     }
@@ -132,7 +132,7 @@ void copySequenceLengths(RequestVector const& contextRequests, RequestVector con
         {
             auto const currentSequenceLen = llmReq->mPromptLen + llmReq->getMaxNumGeneratedTokens();
             // Get position of the current sequence in the decoder
-            auto const seqSlot = llmReq->mSeqSlot.value();
+            auto const seqSlot = llmReq->mSeqSlots.at(0);
             batchSlotsRange[batchIdx] = seqSlot;
             fillValuesRange[batchIdx] = currentSequenceLen;
             ++batchIdx;

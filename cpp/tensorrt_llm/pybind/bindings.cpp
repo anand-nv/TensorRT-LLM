@@ -401,7 +401,7 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
     };
     auto SamplingConfigSetState = [](py::tuple t) -> tr::SamplingConfig
     {
-        assert(t.size() == 19);
+        assert(t.size() == 20);
 
         tr::SamplingConfig config;
         config.beamWidth = t[0].cast<SizeType32>();
@@ -423,6 +423,7 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
         config.numReturnSequences = t[16].cast<SizeType32>();
         config.minP = t[17].cast<OptVec<float>>();
         config.beamWidthArray = t[18].cast<OptVec<std::vector<SizeType32>>>();
+        config.cfgScale = t[19].cast<OptVec<float>>();
 
         return config;
     };
@@ -450,6 +451,7 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
         .def_readwrite("num_return_sequences", &tr::SamplingConfig::numReturnSequences)
         .def_readwrite("min_p", &tr::SamplingConfig::minP)
         .def_readwrite("beam_width_array", &tr::SamplingConfig::beamWidthArray)
+        .def_readwrite("cfg_scale", &tr::SamplingConfig::cfgScale)
         .def(py::pickle(SamplingConfigGetState, SamplingConfigSetState))
         .def("__eq__", &tr::SamplingConfig::operator==);
 

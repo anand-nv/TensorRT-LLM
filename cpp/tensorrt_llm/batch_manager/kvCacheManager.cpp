@@ -915,7 +915,7 @@ void BlockManager::addSequence(
     mReusedTokens += static_cast<double>(prepopulatedPromptLen);
     mTotalInputTokens += static_cast<double>(uniqueTokens.size());
     llmRequest.setPrepopulatedPromptLen(prepopulatedPromptLen, getTokensPerBlock());
-    TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest.mRequestId,
+    TLLM_LOG_DEBUG("addSequence: Request %lu, inputLength %d, prepopulatedPromptLen %d", llmRequest.getSeqSlotId(),
         inputLength, prepopulatedPromptLen);
 }
 
@@ -1422,7 +1422,8 @@ SizeType32 KVCacheManager::getNeededBlocksOneStep(LlmRequest const& req, bool tw
         auto const numNextBlocks = tc::ceilDiv(numNextTokens, getTokensPerBlock());
         numRequiredBlocks = (numNextBlocks - numPastBlocks) * req.mSamplingConfig.beamWidth;
     }
-    return numRequiredBlocks;
+    // we need more blocks if there are multiple sequences in this request
+    return numRequiredBlocks * req.getNumSequences();
 }
 
 SizeType32 KVCacheManager::getRemainingBlocksToCompletion(LlmRequest const& req) const
@@ -1431,17 +1432,17 @@ SizeType32 KVCacheManager::getRemainingBlocksToCompletion(LlmRequest const& req)
     {
         if (req.isContextInitState() && req.getContextCurrentPosition() == 0)
         {
-            return tc::ceilDiv(req.getEncoderOutputLen(), getTokensPerBlock());
+            return tc::ceilDiv(req.getEncoderOutputLen(), getTokensPerBlock()) * req.getNumSequences();
         }
 
         return 0; // cross KV cache doesn't grow after the initial context phase
     }
     SizeType32 const numContextBlocks
-        = (std::min(req.mPromptLen, mMaxAttentionWindow + mTemporaryAttentionWindow) + mSinkBubbleLength)
+        = req.getNumSequences() * (std::min(req.mPromptLen, mMaxAttentionWindow + mTemporaryAttentionWindow) + mSinkBubbleLength)
         / getTokensPerBlock();
 
     SizeType32 const numTotalBlocksPerBeam
-        = tc::ceilDiv(std::min(req.mPromptLen + req.mMaxNewTokens, mMaxAttentionWindow + mTemporaryAttentionWindow)
+        = req.getNumSequences() * tc::ceilDiv(std::min(req.mPromptLen + req.mMaxNewTokens, mMaxAttentionWindow + mTemporaryAttentionWindow)
                 + mSinkBubbleLength,
             getTokensPerBlock());
 
@@ -1450,11 +1451,14 @@ SizeType32 KVCacheManager::getRemainingBlocksToCompletion(LlmRequest const& req)
     SizeType32 numAllocBlocksPerBeam = 0;
     {
         std::scoped_lock lck(mSequencesMtx);
-        auto const seqIt = mSequences.find(req.mRequestId);
-        if (seqIt != mSequences.end())
-        {
-            auto const& seq = seqIt->second;
-            numAllocBlocksPerBeam = seq.getCacheBlockIds().at(0).size();
+        for (int i = 0; i < req.getNumSequences(); i++) {
+            auto const requestId = req.getSeqSlotId(i);
+            auto const seqIt = mSequences.find(requestId);
+            if (seqIt != mSequences.end())
+            {
+                auto const& seq = seqIt->second;
+                numAllocBlocksPerBeam += seq.getCacheBlockIds().at(0).size();
+            }
         }
     }
 
@@ -1689,11 +1693,13 @@ void KVCacheManager::addSequence(
 
 void KVCacheManager::storeContextBlocks(LlmRequest const& llmRequest)
 {
-    auto const requestId = llmRequest.mRequestId;
-    auto& sequence = getSequence(requestId);
-    if (mEnableBlockReuse && !sequence.isCyclic())
-    {
-        mBlockManager.storeContextBlocks(sequence, llmRequest);
+    for (int i = 0; i < llmRequest.getNumSequences(); i++) {
+        auto const requestId = llmRequest.getSeqSlotId(i);
+        auto& sequence = getSequence(requestId);
+        if (mEnableBlockReuse && !sequence.isCyclic())
+        {
+            mBlockManager.storeContextBlocks(sequence, llmRequest);
+        }
     }
 }
 

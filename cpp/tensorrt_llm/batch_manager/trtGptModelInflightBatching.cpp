@@ -1730,7 +1730,7 @@ void TrtGptModelInflightBatching::postProcessRequest(
     LlmRequest& llmReq, std::vector<SizeType32> const& numDroppedTokens)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    auto const seqSlot = llmReq.mSeqSlot.value();
+    auto const seqSlot = llmReq.mSeqSlots.at(0);
     auto const reqBeamWidth = llmReq.mSamplingConfig.beamWidth;
     auto const& bufferManager = getBufferManager();
 
@@ -1923,7 +1923,7 @@ runtime::CudaEvent TrtGptModelInflightBatching::decoderStepAsync(ScheduledReques
         auto const genBufferId = mCtxGenFusion ? getFusedBufferId() : getGenerationBufferId();
         auto& genRuntimeBuffers = mBuffers.at(genBufferId);
         (*mHandleGenerationLogits)(genLogitsIndex, scheduledRequests.generationRequests, *mDecoderBuffers[vid],
-            mModelConfig, mRuntime->getBufferManager(), genRuntimeBuffers->logits, *genRuntimeBuffers, vid);
+            mModelConfig, mRuntime->getBufferManager(), mRuntime->getStream(), genRuntimeBuffers->logits, *genRuntimeBuffers, vid);
 
         // Copy indirection output into input
         // TODO: Could we avoid this by modifying batchDecoder to take a vector of tensors instead?
@@ -1985,14 +1985,16 @@ void TrtGptModelInflightBatching::copyCacheIndirectionFromOutputsToInputs(
     {
         for (auto const& llmReq : requests)
         {
-            auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-            auto const seqSlot = llmReq->mSeqSlot.value();
-            auto const copySize = static_cast<SizeType64>(cacheIndirShape.d[2]) * reqBeamWidth;
-            srcOffsetsPtr[batchIdx] = seqSlot * copySize;
-            dstOffsetsPtr[batchIdx] = seqSlot * copySize;
-            copySizesPtr[batchIdx] = copySize;
-            maxCopySize = std::max(maxCopySize, copySize);
-            batchIdx++;
+            for (int s = 0; s < llmReq->getNumSequences(); s++) {
+                auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+                auto const seqSlot = llmReq->getSeqSlot(s);
+                auto const copySize = static_cast<SizeType64>(cacheIndirShape.d[2]) * reqBeamWidth;
+                srcOffsetsPtr[batchIdx] = seqSlot * copySize;
+                dstOffsetsPtr[batchIdx] = seqSlot * copySize;
+                copySizesPtr[batchIdx] = copySize;
+                maxCopySize = std::max(maxCopySize, copySize);
+                batchIdx++;
+            }
         }
     }
     if (batchIdx != 0)
@@ -2162,7 +2164,7 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             {
                 continue;
             }
-            auto const seqSlot = llmReq->mSeqSlot.value();
+            auto const seqSlot = llmReq->mSeqSlots.at(0);
             auto const numGeneratedTokens = llmReq->getNumDraftTokens() + 1;
             auto const currentNumOfTokens = llmReq->getMaxBeamNumTokens();
 

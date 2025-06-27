@@ -72,7 +72,7 @@ void initRequestBindings(pybind11::module_& m)
     };
     auto samplingConfigSetstate = [](py::tuple const& state)
     {
-        if (state.size() != 19)
+        if (state.size() != 20)
         {
             throw std::runtime_error("Invalid SamplingConfig state!");
         }
@@ -94,7 +94,8 @@ void initRequestBindings(pybind11::module_& m)
             state[15].cast<std::optional<SizeType32>>(),             // NoRepeatNgramSize
             state[16].cast<std::optional<SizeType32>>(),             // NumReturnSequences
             state[17].cast<std::optional<FloatType>>(),              // MinP
-            state[18].cast<std::optional<std::vector<SizeType32>>>() // BeamWidthArray
+            state[18].cast<std::optional<std::vector<SizeType32>>>(), // BeamWidthArray
+            state[19].cast<std::optional<FloatType>>()                // CfgScale
         );
     };
     py::class_<tle::SamplingConfig>(m, "SamplingConfig")
@@ -116,7 +117,7 @@ void initRequestBindings(pybind11::module_& m)
                     std::optional<tle::SizeType32> const& earlyStopping,
                     std::optional<tle::SizeType32> const& noRepeatNgramSize,
                     std::optional<tle::SizeType32> const& numReturnSequences, std::optional<tle::FloatType> const& minP,
-                    std::optional<std::vector<tle::SizeType32>> const& beamWidthArray)
+                    std::optional<std::vector<tle::SizeType32>> const& beamWidthArray, std::optional<tle::FloatType> const& cfgScale)
                 {
                     if (randomSeed.has_value())
                     {
@@ -137,7 +138,7 @@ void initRequestBindings(pybind11::module_& m)
                     return std::make_unique<tle::SamplingConfig>(beamWidth, topK, topP, topPMin, topPResetIds,
                         topPDecay, seed, temperature, minTokens, beamSearchDiversityRate, repetitionPenalty,
                         presencePenalty, frequencyPenalty, lengthPenalty, earlyStopping, noRepeatNgramSize,
-                        numReturnSequences, minP, beamWidthArray);
+                        numReturnSequences, minP, beamWidthArray, cfgScale);
                 }),
             py::arg("beam_width") = 1, py::kw_only(), py::arg("top_k") = py::none(), py::arg("top_p") = py::none(),
             py::arg("top_p_min") = py::none(), py::arg("top_p_reset_ids") = py::none(),
@@ -147,7 +148,7 @@ void initRequestBindings(pybind11::module_& m)
             py::arg("presence_penalty") = py::none(), py::arg("frequency_penalty") = py::none(),
             py::arg("length_penalty") = py::none(), py::arg("early_stopping") = py::none(),
             py::arg("no_repeat_ngram_size") = py::none(), py::arg("num_return_sequences") = py::none(),
-            py::arg("min_p") = py::none(), py::arg("beam_width_array") = py::none())
+            py::arg("min_p") = py::none(), py::arg("beam_width_array") = py::none(), py::arg("cfg_scale") = py::none())
         .def_property("beam_width", &tle::SamplingConfig::getBeamWidth, &tle::SamplingConfig::setBeamWidth)
         .def_property("top_k", &tle::SamplingConfig::getTopK, &tle::SamplingConfig::setTopK)
         .def_property("top_p", &tle::SamplingConfig::getTopP, &tle::SamplingConfig::setTopP)
@@ -176,6 +177,7 @@ void initRequestBindings(pybind11::module_& m)
         .def_property("min_p", &tle::SamplingConfig::getMinP, &tle::SamplingConfig::setMinP)
         .def_property(
             "beam_width_array", &tle::SamplingConfig::getBeamWidthArray, &tle::SamplingConfig::setBeamWidthArray)
+        .def_property("cfg_scale", &tle::SamplingConfig::getCfgScale, &tle::SamplingConfig::setCfgScale)
         .def(py::pickle(samplingConfigGetstate, samplingConfigSetstate));
 
     auto additionalModelOutputGetstate

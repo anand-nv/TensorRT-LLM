@@ -46,7 +46,8 @@ public:
     HandleGenerationLogits() = default;
 
     void operator()(tr::SizeType32 logitsIndex, RequestVector const& generationRequests, DecoderBuffers& decoderBuffers,
-        tr::ModelConfig const& modelConfig, tr::BufferManager const& manager, tr::ITensor::SharedPtr const& logits,
+        tr::ModelConfig const& modelConfig, tr::BufferManager const& manager,
+        tensorrt_llm::runtime::CudaStream const& stream, tr::ITensor::SharedPtr const& logits,
         OptionalRef<RuntimeBuffers> genRuntimeBuffers, tr::SizeType32 vocabId = 0) const;
 };
 

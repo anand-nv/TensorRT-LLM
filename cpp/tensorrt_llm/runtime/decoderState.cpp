@@ -407,9 +407,9 @@ void DecoderState::disableLookahead(RequestVector const& genRequests)
 
     for (auto const& llmReq : genRequests)
     {
-        if (llmReq->mSeqSlot)
+        if (!llmReq->mSeqSlots.empty())
         {
-            setNumDecodingEngineTokens(llmReq->mSeqSlot.value(), 1);
+            setNumDecodingEngineTokens(llmReq->mSeqSlots.at(0), 1);
         }
     }
 
