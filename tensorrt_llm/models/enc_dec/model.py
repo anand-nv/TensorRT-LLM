@@ -98,9 +98,9 @@ class EncDecTransformer(Module):
                     if use_parallel_embedding else None,
                     sharding_dim=embedding_sharding_dim,
                     tp_rank=mapping.tp_rank)
-
             self.position_embedding = None
             self.max_position_embeddings = max_position_embeddings
+
             if has_position_embedding:
                 self.position_embedding = Embedding(
                     max_position_embeddings,
@@ -531,7 +531,9 @@ class DecoderLayer(Module):
             lora_layer_params=lora_layer_params)
 
         if use_cache:
-            attention_output, presents_self = attention_output
+            attention_output, _, _, presents_self = attention_output
+        else:
+            attention_output, _, _ = attention_output
 
         self.register_network_output('self_attention_output', attention_output)
 
@@ -564,7 +566,9 @@ class DecoderLayer(Module):
             cross_kv_reuse=cross_kv_reuse)
 
         if use_cache:
-            attention_output, presents_cross = attention_output
+            attention_output, _, _, presents_cross = attention_output
+        else:
+            attention_output, _, _ = attention_output
 
         self.register_network_output('cross_attention_output', attention_output)
 
@@ -1120,6 +1124,9 @@ class DecoderModel(PretrainedModel):
             self.config,
             'language_adapter_config') else LanguageAdapterConfig.from_dict(
                 self.config.language_adapter_config)
+
+        if not hasattr(self.config, 'vocab_sizes'):
+            self.config.vocab_sizes = [self.config.vocab_size]
 
         self.transformer = EncDecTransformer(
             self.config.vocab_size,
