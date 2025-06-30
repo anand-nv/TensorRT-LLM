@@ -1019,7 +1019,9 @@ class T5TTSDecoderModel(PretrainedModel):
 
         if self.mapping.is_first_pp_rank():
             self.embedding = EncoderDecoderEmbedding(
-                self.config.vocab_size,
+                # TODO: vocab is expanded to incorporate service token used for unconditional generation
+                # during CFG
+                self.config.vocab_size + 1,
                 self.num_vocabs,
                 self.config.hidden_size,
                 max_position_embeddings=self.config.max_position_embeddings,

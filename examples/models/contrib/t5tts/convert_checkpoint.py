@@ -277,17 +277,16 @@ def convert_t5tts_decoder(
     prefix: str = "decoder",
 ):
     weights = {}
-    #weights['embedding.vocab_embedding.weight'] = model_dict['final_proj.weight'].clone().contiguous()
-
-    weights['lm_head.weight'] = model_dict['final_proj.weight'].clone(
-    ).contiguous()
+    weights['lm_head.weight'] = model_dict['final_proj.weight'].clone().contiguous()
 
     weights['embedding.position_embedding.weight'] = model_dict[
         f'{prefix}.position_embeddings.weight'].contiguous()
 
-    weights[f'embedding.vocab_embedding.weight'] = torch.cat(
-        [model_dict[f'audio_embeddings.{i}.weight'] for i in range(len(config.vocab_sizes))], dim=0
-    ).contiguous()
+    embs = [model_dict[f'audio_embeddings.{i}.weight'] for i in range(len(config.vocab_sizes))]
+    embs.append(torch.zeros(1, 768, dtype=embs[0].dtype, device=embs[0].device))
+    # embeddings have shape (2024 x 768) * 8, pad them adding extra entry in vocab which expands to zeros
+    # we dont change the config, instead we change usage of the embedding dim in the model definition
+    weights[f'embedding.vocab_embedding.weight'] = torch.cat(embs, dim=0).contiguous()
     
     num_layers = config.n_layer
     for i in range(num_layers):

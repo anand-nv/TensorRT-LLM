@@ -546,9 +546,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 auto const& origTokens = llmReq->getTokens(0);
                 std::vector<TokenIdType> dummyTokens;
                 if (!is_conditional) {
-                    // TODO: need a special token for unconditional input, which is expanded
-                    // to all zeros
-                    dummyTokens.assign(origTokens.size(), 0);
+                    // TODO: that is special token added in "convert_checkpoint",
+                    // that is expanded to all zeros. Should be configurable.
+                    dummyTokens.assign(origTokens.size(), 16192);
                 }
 
                 auto const& reqTokens = is_conditional ? origTokens : dummyTokens;
