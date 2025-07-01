@@ -25,6 +25,7 @@
 #include "tensorrt_llm/common/nvtxUtils.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/utils/debugUtils.h"
+#include "tensorrt_llm/kernels/cfgKernels.h"
 
 namespace tru = tensorrt_llm::runtime::utils;
 
@@ -38,48 +39,6 @@ using SizeType32 = tensorrt_llm::runtime::SizeType32;
 
 namespace
 {
-
-template<typename T>
-static void addAndScale(ITensor* cond, ITensor* uncond, SizeType32 size, float cfgScale) {
-    auto* condPtr = tensorrt_llm::runtime::bufferCast<T>(*cond);
-    auto* uncondPtr = tensorrt_llm::runtime::bufferCast<T>(*uncond);
-    for (SizeType32 i = 0; i < size; i++) {
-        condPtr[i] = condPtr[i] * (T)cfgScale + uncondPtr[i] * (T)(1 - cfgScale);
-    }
-}
-
-static void applyCfgCpu(BufferManager const& manager, tensorrt_llm::runtime::CudaStream const& stream,
-    TensorPtr logitsView, TensorPtr uncondLogitsView,
-    float cfgScale, SizeType32 vocabOffset, SizeType32 vocabSize)
-{
-    // this is a temporary testing implementation where CFG is applied on CPU.
-    // it needs to become a kernel implemented with cublas
-    auto logitsVocabView = ITensor::slice(logitsView, {0, vocabOffset}, vocabSize); // [vocabSize,]
-    auto uncondLogitsVocabView = ITensor::slice(uncondLogitsView, {0, vocabOffset}, vocabSize); // [vocabSize,]
-
-    auto logitsCpu = manager.cpu(ITensor::makeShape({vocabSize}), logitsVocabView->getDataType());
-    auto uncondLogitsCpu = manager.cpu(ITensor::makeShape({vocabSize}), uncondLogitsVocabView->getDataType());
-    ITensor* logitsCpuPtr = logitsCpu.get();
-    ITensor* uncondLogitsCpuPtr = uncondLogitsCpu.get();
-
-    logitsCpuPtr->reshape(ITensor::makeShape({vocabSize}));
-    manager.copy(*logitsVocabView, *logitsCpuPtr);
-    uncondLogitsCpuPtr->reshape(ITensor::makeShape({vocabSize}));
-    manager.copy(*uncondLogitsVocabView, *uncondLogitsCpuPtr);
-    stream.synchronize();
-
-    if (logitsVocabView->getDataType() == nvinfer1::DataType::kFLOAT)
-    {
-        addAndScale<float>(logitsCpuPtr, uncondLogitsCpuPtr, vocabSize, cfgScale);
-    }
-    else if (logitsVocabView->getDataType() == nvinfer1::DataType::kHALF)
-    {
-        addAndScale<half>(logitsCpuPtr, uncondLogitsCpuPtr, vocabSize, cfgScale);
-    }
-    manager.copy(*logitsCpuPtr, *logitsVocabView);
-    stream.synchronize();
-}
-
 
 //! @brief Copy logits from generation phase under streaming mode.
 void copyStreamingGenerationLogits(BufferManager const& bufferManager, LlmRequest& llmReq)
@@ -157,7 +116,7 @@ void HandleGenerationLogits::operator()(SizeType32 logitsIndex, RequestVector co
             TensorPtr uncondLogitsView = ITensor::slice(logits, logitsIndex, numLogits);
             // TODO: implement CFG, apply logitsView = logitsView * cfgScale + uncondLogitsView * (1 - cfgScale)
             float cfgScale = llmReq->mSamplingConfig.cfgScale->at(0);
-            applyCfgCpu(manager, stream, logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
+            tensorrt_llm::kernels::invokeCfg(stream, logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
         }
 
         auto& decoderLogits = decoderBuffers.logits.at(seqSlot);
