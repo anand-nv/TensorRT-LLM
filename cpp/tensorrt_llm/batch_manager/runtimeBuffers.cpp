@@ -431,7 +431,6 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
         encoderBuffers->setBufferSizes(contextRequests, genRequests);
     }
 
-    TLLM_LOG_WARNING(">>>>>setBufferSizes: numContextRequests %d; numGenRequests %d", numContextRequests, numGenRequests);
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -546,9 +545,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 auto const& origTokens = llmReq->getTokens(0);
                 std::vector<TokenIdType> dummyTokens;
                 if (!is_conditional) {
-                    // TODO: that is special token added in "convert_checkpoint",
-                    // that is expanded to all zeros. Should be configurable.
-                    dummyTokens.assign(origTokens.size(), 16192);
+                    // that is special token added in "convert_checkpoint",
+                    // that is expanded to all zeros
+                    dummyTokens.assign(origTokens.size(), modelConfig.getVocabSize());
                 }
 
                 auto const& reqTokens = is_conditional ? origTokens : dummyTokens;
