@@ -806,7 +806,9 @@ void TrtGptModelInflightBatching::forwardSync()
                         mCacheTransceiver, "Disaggregated serving is not enabled, please check the configuration.");
                     mCacheTransceiver->respondAndSendAsync(llmReq.get());
                 }
-                mSeqSlotManager->freeSequenceSlot(llmReq->mRequestId);
+                for (int i = 0; i < llmReq->getNumSequences(); i++) {
+                    mSeqSlotManager->freeSequenceSlot(llmReq->getSeqSlotId(i));
+                }
             }
         }
     }
@@ -2283,7 +2285,10 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
 
                     // At this point, KV cache rows are already gathered and moved to the right location.
                     // We can safely rewind (draft - accepted) tokens
-                    mKvCacheManager->rewindKVCache(llmReq->mRequestId, rewindLength);
+                    for (int i = 0; i < llmReq->getNumSequences(); i++) {
+                        auto const requestId = llmReq->getSeqSlotId(i);
+                        mKvCacheManager->rewindKVCache(requestId, rewindLength);
+                    }
                 }
             }
 

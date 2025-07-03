@@ -390,9 +390,12 @@ std::tuple<RequestVector, RequestVector> MaxUtilizationScheduler::operator()(
                 // If we can't allocate a started request, we need to start freeing started requests
                 // from the end of the vector and try again
                 // Here we simulate freeing the kvCache blocks associated with that sequence
-                kvCacheManager.schedulingRemoveSequence((*lastStartedReqIt)->mRequestId);
+                for (int i = 0; i < (*lastStartedReqIt)->getNumSequences(); i++) {
+                    auto const requestId = (*lastStartedReqIt)->getSeqSlotId(i);
+                    kvCacheManager.schedulingRemoveSequence(requestId);
+                    TLLM_LOG_DEBUG("MaxUtilizationScheduler: request ID %lu -> pause", requestId);
+                }
                 pausedRequests.emplace_back(*lastStartedReqIt);
-                TLLM_LOG_DEBUG("MaxUtilizationScheduler: request ID %lu -> pause", (*lastStartedReqIt)->mRequestId);
                 reqItEnd = std::next(lastStartedReqIt).base();
             }
             else

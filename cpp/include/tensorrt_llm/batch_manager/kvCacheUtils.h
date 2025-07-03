@@ -39,6 +39,19 @@ public:
     {
     }
 
+    BlockRange(BaseKVCacheManager const& cacheManager, LlmRequest const& llmRequest, SizeType32 beam, SizeType32 poolIdx = 0)
+        : mManager(&cacheManager)
+        , mPool(cacheManager.getBlockManager().getPrimaryPool(poolIdx))
+    {
+        std::vector<SizeType32> blockIds;
+        for (int i = 0; i < llmRequest.getNumSequences(); i++) {
+            auto const requestId = llmRequest.getSeqSlotId(i);
+            const auto& thisBlockIds = cacheManager.getSequence(requestId).getCacheBlockIds().at(beam);
+            blockIds.insert(blockIds.end(), thisBlockIds.begin(), thisBlockIds.end());
+        }
+        mBlockIds = std::move(blockIds);
+    }
+
     BlockRange(BaseKVCacheManager const& cacheManager, std::vector<SizeType32> blockIds, SizeType32 poolIdx = 0)
         : mManager(&cacheManager)
         , mPool(cacheManager.getBlockManager().getPrimaryPool(poolIdx))
