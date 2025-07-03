@@ -17,6 +17,8 @@
  */
 
 #include "tensorrt_llm/executor/executor.h"
+#include "tensorrt_llm/executor/tensor.h"
+#include "tensorrt_llm/runtime/iTensor.h"
 
 #include <cstdint>
 #include <cxxopts.hpp>
@@ -87,6 +89,7 @@ struct BenchmarkParams
 
     std::optional<texec::EagleConfig> eagleConfig;
     std::optional<float> temperature;
+    std::optional<float> cfgScale;
 
     std::optional<texec::LookaheadDecodingConfig> executorLookaheadConfig;
     std::optional<texec::LookaheadDecodingConfig> requestLookaheadConfig;
@@ -225,6 +228,8 @@ struct Sample
 {
     std::vector<int32_t> inputIds;
     std::vector<int32_t> contextIds;
+    texec::Tensor inputFeat;
+    int32_t inputLen;
     int32_t outputLen;
     int32_t taskId;
 };

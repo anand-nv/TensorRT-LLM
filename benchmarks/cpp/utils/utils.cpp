@@ -22,6 +22,9 @@
 
 #include <filesystem>
 #include <fstream>
+#include "tensorrt_llm/runtime/bufferManager.h"
+#include "tensorrt_llm/runtime/iTensor.h"
+#include <algorithm>
 
 namespace tensorrt_llm::benchmark
 {
@@ -78,16 +81,19 @@ Samples parseWorkloadJson(
     auto constexpr ignoreComments = true;
     TLLM_CHECK_WITH_INFO(std::filesystem::exists(datasetPath), "File does not exist: %s", datasetPath.c_str());
     std::ifstream jsonStream(datasetPath);
-    auto json = nlohmann::json::parse(jsonStream, nullptr, allowExceptions, ignoreComments);
-
     Samples samples;
+    auto json = nlohmann::json::parse(jsonStream, nullptr, allowExceptions, ignoreComments);
 
     for (auto const& sample : json["samples"])
     {
         if (samples.size() >= maxNumSamples)
             break;
         int32_t taskId = sample.count("task_id") ? sample["task_id"].template get<int32_t>() : -1;
-        auto input_ids(sample["input_ids"].template get<std::vector<int32_t>>());
+        int32_t inputLen = sample["input_len"];
+        std::vector<int32_t> input_ids;
+        if (sample.count("input_ids")) {
+            input_ids = sample["input_ids"].template get<std::vector<int32_t>>();
+        }
         if (maxPromptLen && (input_ids.size() > maxPromptLen.value()))
         {
             input_ids.resize(maxPromptLen.value());
@@ -97,7 +103,23 @@ Samples parseWorkloadJson(
         {
             context_ids = sample["context_ids"].template get<std::vector<int32_t>>();
         }
-        samples.emplace_back(Sample{std::move(input_ids), std::move(context_ids), sample["output_len"], taskId});
+        texec::Tensor inputFeat;
+        if (sample.count("input_feat"))
+        {
+            auto inputFeatVec = sample["input_feat"].template get<std::vector<float>>();
+
+            if (!inputFeatVec.empty())
+            {
+                TLLM_CHECK_WITH_INFO(inputFeatVec.size() % static_cast<size_t>(inputLen) == 0,
+                    "input_feat size %zu is not divisible by input_len %d", inputFeatVec.size(), inputLen);
+
+                int32_t hiddenDim = static_cast<int32_t>(inputFeatVec.size() / inputLen);
+                inputFeat = texec::Tensor::of(inputFeatVec.data(), {inputLen, hiddenDim});
+            }
+        }
+
+        samples.emplace_back(Sample{std::move(input_ids), std::move(context_ids), inputFeat, inputLen,
+            sample["output_len"], taskId});
     }
 
     if (samples.size() < maxNumSamples)
