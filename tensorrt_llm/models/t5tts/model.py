@@ -25,7 +25,7 @@ from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
                                      concat, gather_last_token_logits, maximum,
-                                     minimum, recv, select, send, shape, view, mean, add, slice,
+                                     minimum, recv, select, send, shape, view, mean, add, slice, mul, expand_dims_like,
                                      squeeze, unsqueeze, transpose, matmul, stack, cast)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
@@ -50,6 +50,9 @@ mlp_map = {
     MLPType.GatedMLP: GatedMLP,
     MLPType.FusedGatedMLP: FusedGatedMLP,
 }
+
+COMPUTE_SCORES_FROM_LAYERS = [4, 6, 10]
+APPLY_PRIOR_TO_LAYERS = [4, 6, 10]
 
 
 class PositionwiseConvFF(Module):
@@ -421,6 +424,8 @@ class T5TTSDecoderLayer(Module):
         super().__init__()
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
+        self.compute_scores = local_layer_idx in COMPUTE_SCORES_FROM_LAYERS
+        self.apply_prior = local_layer_idx in APPLY_PRIOR_TO_LAYERS
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -467,7 +472,7 @@ class T5TTSDecoderLayer(Module):
             local_layer_idx=local_layer_idx,
             hidden_size=hidden_size,
             num_attention_heads=1,
-            attention_head_size=hidden_size,
+            attention_head_size=128,  # TODO: make this part of model config
             num_kv_heads=1,
             max_position_embeddings=max_position_embeddings,
             bias=has_attention_qkvo_bias,
@@ -549,9 +554,21 @@ class T5TTSDecoderLayer(Module):
 
         hidden_states = self.cross_attention_layernorm(hidden_states)
         encoder_output = self.cross_attention_memory_layernorm(encoder_output)
+        # TODO: unnecessary computation, can be done just once for all layers
+        # TODO: ignores cross_attention_packed_mask, but they seems to be not changed anyways
+        cross_attention_mask = attention_mask_params.cross_attention_mask
+        if not self.apply_prior:
+            # TODO: this is ones_like operation, is there more efficient way to do it?
+            cross_attention_mask = add(
+                mul(
+                    cross_attention_mask.cast(dtype=trt.float32),
+                    expand_dims_like(float(0), cross_attention_mask)
+                ),
+                expand_dims_like(float(1), cross_attention_mask)
+            ).cast(dtype=cross_attention_mask.dtype)  # back to original type
         attention_output = self.cross_attention(
             hidden_states=hidden_states,
-            attention_mask=attention_mask_params.cross_attention_mask,
+            attention_mask=cross_attention_mask,
             attention_packed_mask=attention_mask_params.
             cross_attention_packed_mask,
             encoder_output=encoder_output,
@@ -567,14 +584,18 @@ class T5TTSDecoderLayer(Module):
         hidden_states = residual + attention_output
 
         # compute attention scores
-        # TODO: assumes padding disabled
-        q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), self.hidden_size]))
-        k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), self.hidden_size]))
-        scores = matmul(
-            q,
-            k,
-            transb=True
-        )
+        # TODO: only implements disabled padding
+        # TODO: hardcodes head_size for cross attention
+        if self.compute_scores:
+            q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), 128]))
+            k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), 128]))
+            scores = matmul(
+                q,
+                k,
+                transb=True
+            )
+        else:
+            scores = None
 
         # conv ff (norm -> conv -> residual)
         residual = hidden_states
@@ -1167,7 +1188,8 @@ class T5TTSDecoderModel(PretrainedModel):
                 presents.append((presents_self, presents_cross))
             else:
                 hidden_states, scores = hidden_states
-            all_scores.append(scores)
+            if scores is not None:
+                all_scores.append(scores)
 
         scores_stacked = stack(all_scores, 0)  # [layers x b*context_length x b*numEncoderTokens]
         mean_scores = mean(scores_stacked, 0)  # [b*context length x b*numTokens]

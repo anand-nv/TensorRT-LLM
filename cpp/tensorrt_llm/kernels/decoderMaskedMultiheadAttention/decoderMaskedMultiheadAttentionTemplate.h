@@ -1511,10 +1511,9 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         = params.relative_attention_bias_stride; // num_buckets might be modified below, save it beforehand
     [[maybe_unused]] int max_distance = params.max_distance;
 
-    // The actual sequence length excluding the paddings.
-    // minus 1 because it includes the current timestep while tlength denotes the kv cache length.
+    // Keep the EOS token for cross attention to attend to.
     int const tlength = DO_CROSS_ATTENTION
-        ? params.memory_length_per_sample[batch_beam_idx] - 1
+        ? params.memory_length_per_sample[batch_beam_idx]
         : (params.length_per_sample ? (params.length_per_sample[batch_beam_idx] - 1) : static_cast<int>(timestep));
     // We will use cyclic kv cache when it exceeds the limit.
     // The length position for storing new key and value.
@@ -1859,7 +1858,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     {
         relative_attention_bias = convert_to_float(relative_attention_bias_ptr[tlength]);
     }
-    if (has_attention_mask && tidx == 0)
+    if (has_attention_mask && tidx == 0 && !DO_CROSS_ATTENTION)
     {
         // Note: reuse the relative_attention_bias variable.
         // attention_mask = 1.0 means that the position is not masked.
@@ -2065,7 +2064,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             {
                 relative_attention_bias = convert_to_float(relative_attention_bias_ptr[local_time_now]);
             }
-            if (is_active && has_attention_mask)
+            if (is_active && has_attention_mask && !DO_CROSS_ATTENTION)
             {
                 // Note: reuse the relative_attention_bias variable.
                 // attention_mask = 1.0 means that the position is not masked.
@@ -2092,6 +2091,13 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 {
                     qk_ = Qk_dot<T, THREADS_PER_KEY>::dot(q_vec, k_vec) * params.inv_sqrt_dh;
                 }
+            }
+
+            if (is_active && has_attention_mask && DO_CROSS_ATTENTION) {
+                // TODO: This is a fix to take into account custom attention mask during cross attention.
+                // It is implicitely excludes EOS token from encoder sequence, this is to be checked.
+                // It penalizes masked tokens with -1e9, this can be adjusted to implement attention prior floor.
+                qk_ += (1e9 * (float(attention_mask_ptr[local_time_now]) - 1.0f));
             }
 
             // Apply attention logit softcapping scale.

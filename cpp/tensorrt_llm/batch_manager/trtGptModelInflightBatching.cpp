@@ -2287,7 +2287,8 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
 
             // Terminate if request has finished or if it is speculative decoding target model
             if (decoderFinishedSumPtr[seqSlot] == reqBeamWidth
-                || (mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal() && llmReq->hasDraftTokens()))
+                || (mModelConfig.getSpeculativeDecodingMode().isDraftTokensExternal() && llmReq->hasDraftTokens())
+                || (mModelConfig.useAttentionPrior() && llmReq->isAttentionPriorFinished()))
             {
                 postProcessRequest(*llmReq, numDroppedTokens);
 

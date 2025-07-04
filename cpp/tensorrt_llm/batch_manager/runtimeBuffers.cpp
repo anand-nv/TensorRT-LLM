@@ -934,6 +934,45 @@ static SizeType32 processScoresWithType(ITensor* scoresHost, SizeType32 prevPrio
     return maxScoreIdx;
 }
 
+/**
+ * Copies a slice of the `scores` tensor (device) to the provided host buffer, synchronises the
+ * CUDA stream, and returns the local index of the maximum element.
+ *
+ * The helper is kept `static` to allow inlining by the compiler while providing a single
+ * implementation that can be re-used across both context and generation request loops.
+ */
+static SizeType32 computeMaxScoreIdx(
+    const runtime::ITensor::SharedPtr& scores,
+    SizeType32 qOff, SizeType32 kvOff, SizeType32 len,
+    ITensor* scoresHost,
+    BufferManager const& manager, CudaStream const& stream)
+{
+    if (len == 0)
+    {
+        return 0;
+    }
+
+    // Slice the relevant section of scores from device memory
+    auto scoresSlice = ITensor::slice(scores, {qOff, kvOff}, len);
+
+    // Copy slice to host buffer (scoresHost has enough capacity but may be larger than `len`)
+    scoresHost->reshape(ITensor::makeShape({len}));
+    manager.copy(*scoresSlice, *scoresHost);
+    stream.synchronize();
+
+    // Determine the maximum-score index depending on the underlying data type
+    if (scores->getDataType() == nvinfer1::DataType::kFLOAT)
+    {
+        return processScoresWithType<float>(scoresHost, len);
+    }
+    else if (scores->getDataType() == nvinfer1::DataType::kHALF)
+    {
+        return processScoresWithType<half>(scoresHost, len);
+    }
+    TLLM_LOG_WARNING("Unsupported scores data type");
+    return 0;
+}
+
 void RuntimeBuffers::setAttentionPriorIdx(
     RequestVector const& contextRequests, RequestVector const& genRequests, TllmRuntime const& runtime)
 {
@@ -957,54 +996,53 @@ void RuntimeBuffers::setAttentionPriorIdx(
         totalEncoderOutputLen += llmReq->getEncoderOutputLen();
     }
 
-    SizeType32 qOffset = 0;
-    // we skip all context requests
-    for (auto const& llmReq : contextRequests) {
-        qOffset += llmReq->getContextChunkSize();
-        // for context we just focusing at the beginning of the encoder sequence
-        llmReq->setAttentionPriorIdx(0);
-    }
-
     // create a cpu buffer for scores to find max score in
     SizeType32 searchLength = 10;
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
     auto scoresHost = manager.cpu(ITensor::makeShape({searchLength}), scores->getDataType());
 
+    SizeType32 qOffset = 0;
+    // set the focus for context requests based on last scores slice
+    for (SizeType32 i = 0; i < static_cast<SizeType32>(contextRequests.size()); ++i) {
+        SizeType32 kvOffset = 0;
+        for (SizeType32 j = 0; j < static_cast<SizeType32>(contextRequests.size()); ++j) {
+            auto const& llmReq = contextRequests[j];
+            SizeType32 encoderOutputLen = llmReq->getEncoderOutputLen();
+            if (i == j) {
+                auto const& llmReq = contextRequests[j];
+                SizeType32 prevPriorIdxLen = std::min(searchLength, encoderOutputLen - 3);
+                SizeType32 maxIdx = computeMaxScoreIdx(scores, qOffset, kvOffset, prevPriorIdxLen, scoresHost.get(), manager, stream);
+                llmReq->setAttentionPriorIdx(maxIdx);
+            }
+            kvOffset += encoderOutputLen;
+        }
+        qOffset += contextRequests[i]->getContextChunkSize();
+    }
+
     // for generation requests, there is no context,
     // but we need to find correct section in (b * encoder_output_len)
-    for (SizeType32 i = 0; i < (SizeType32)genRequests.size(); ++i) {
+    for (SizeType32 i = 0; i < static_cast<SizeType32>(genRequests.size()); ++i) {
         // skip the context
         SizeType32 kvOffset = totalContextEncoderOutputLen;
-        for (SizeType32 j = 0; j < (SizeType32)genRequests.size(); ++j) {
+        for (SizeType32 j = 0; j < static_cast<SizeType32>(genRequests.size()); ++j) {
             auto const& llmReq = genRequests[j];
             SizeType32 encoderOutputLen = llmReq->getEncoderOutputLen();
             if (i == j) {
                 // find attnetion prior idx in range [prev_prior_idx; prev_prior_idx + 10]
                 SizeType32 prevPriorIdx = llmReq->getAttentionPriorIdx();
-                // ignore last 3 tokens, move strictly forward, look up to 10 tokens forward
-                SizeType32 prevPriorIdxEnd = std::min(prevPriorIdx + searchLength, encoderOutputLen);
-                SizeType32 prevPriorIdxLen = prevPriorIdxEnd - prevPriorIdx;
-
-                // slice relevant section of scores
-                auto scoresSlice = ITensor::slice(scores, {qOffset, kvOffset + prevPriorIdx}, prevPriorIdxLen);
-                // copies and converts to float
-                scoresHost->reshape(ITensor::makeShape({prevPriorIdxLen}));
-                manager.copy(*scoresSlice, *scoresHost);
-                stream.synchronize();
-
-                // find index of maximum score in the window
-                SizeType32 maxScoreIdx = 0;
-                if (scores->getDataType() == nvinfer1::DataType::kFLOAT) {
-                    maxScoreIdx = processScoresWithType<float>(scoresHost.get(), prevPriorIdxLen);
-                } else if (scores->getDataType() == nvinfer1::DataType::kHALF) {
-                    maxScoreIdx = processScoresWithType<half>(scoresHost.get(), prevPriorIdxLen);
-                } else {
-                    TLLM_LOG_WARNING("Unsupported scores data type");
+                if (llmReq->isAttentionPriorStuck(prevPriorIdx) && prevPriorIdx < encoderOutputLen - 5) {
+                    // since scores are recomputed, the `prevPriorIdx` can be selected again,
+                    // despite been masked. we skip it if its a sink to avoid this.
+                    // we allow sink at the very end of the sequence, becase it will be taken care of by
+                    // end-of-sequence detection.
+                    prevPriorIdx++;
                 }
-
-                // Set the attention prior index to the position with maximum score
-                llmReq->setAttentionPriorIdx(prevPriorIdx + maxScoreIdx);
+                // ignore last 3 tokens, move strictly forward, look up to 10 tokens forward
+                SizeType32 prevPriorIdxEnd = std::min(prevPriorIdx + searchLength, encoderOutputLen - 3);
+                SizeType32 prevPriorIdxLen = prevPriorIdxEnd - prevPriorIdx;
+                SizeType32 maxIdx = computeMaxScoreIdx(scores, qOffset, kvOffset + prevPriorIdx, prevPriorIdxLen, scoresHost.get(), manager, stream);
+                llmReq->setAttentionPriorIdx(prevPriorIdx + maxIdx);
             }
             kvOffset += encoderOutputLen;
         }

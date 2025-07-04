@@ -1183,6 +1183,25 @@ public:
         return mCrossAttentionMask.value_or(nullptr);
     }
 
+    void setFocusCrossAttentionMask(runtime::BufferManager const& manager, int size=3)
+    {
+        if (!mCrossAttentionMask.has_value()) {
+            mCrossAttentionMask = std::move(manager.emptyTensor(runtime::MemoryType::kGPU, nvinfer1::DataType::kBOOL));
+            (*mCrossAttentionMask)->reshape(runtime::ITensor::makeShape({1, getEncoderOutputLen()}));
+        }
+        // Create array of booleans
+        auto mask = std::make_unique<bool[]>(getEncoderOutputLen());
+        std::fill(mask.get(), mask.get() + getEncoderOutputLen(), false);
+        auto focus = getAttentionPriorIdx();
+        for (int i = std::max(0, focus - 1); i < std::min(focus + 6, getEncoderOutputLen()); i++) {
+            if (!isAttentionPriorStuck(i)) {
+                mask[i] = true;
+            }
+        }
+        // Copy array to tensor
+        manager.copy(mask.get(), **mCrossAttentionMask, runtime::MemoryType::kCPU);
+    }
+
     [[nodiscard]] TensorPtr getSkipCrossAttnBlocks() const
     {
         return mSkipCrossAttnBlocks.value_or(nullptr);
@@ -1769,25 +1788,26 @@ public:
 
     void setAttentionPriorIdx(SizeType32 attentionPriorIdx)
     {
-        if (mAttentionPriorIdx.has_value() && mAttentionPriorIdx.value() == attentionPriorIdx) {
-            mAttentionPriorCounter++;
-        } else {
-            mAttentionPriorCounter = 1;
-        }
         mAttentionPriorIdx = attentionPriorIdx;
+        if (mAttentionPriorCounters.size() == 0) {
+            // TODO: lazy initialization due to inconsistencies between
+            // runtime::ITensor::SharedPtr and at::Tensor
+            mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
+        }
+        mAttentionPriorCounters[attentionPriorIdx]++;
         if (attentionPriorIdx >= getEncoderOutputLen() - 5) {
             mAttentionPriorCounterCloseToEnd++;
         }
     }
 
-    bool isAttentionPriorStuck() const
-    {
-        return mAttentionPriorCounter >= 10;
-    }
-
     bool isAttentionPriorFinished() const
     {
         return mAttentionPriorCounterCloseToEnd >= 20;
+    }
+
+    bool isAttentionPriorStuck(int i) const
+    {
+        return mAttentionPriorCounters[i] >= 10;
     }
 
     bool hasAttentionPriorIdx() const
@@ -1899,8 +1919,8 @@ protected:
 
     // for attention prior, placeholder for where to focus in encoder output
     std::optional<SizeType32> mAttentionPriorIdx;
-    // counts how many times same attention prior idx is set
-    SizeType32 mAttentionPriorCounter{0};
+    // counts how many times certain attention prior idx was attended
+    std::vector<SizeType32> mAttentionPriorCounters;
     // counts how many times attention prior idx is close to the end of sequence
     SizeType32 mAttentionPriorCounterCloseToEnd{0};
 

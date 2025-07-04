@@ -525,7 +525,6 @@ void EncoderBuffers::fill(
             auto const encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
             manager.copy(*llmReq->getEncoderOutput(), *encoderOutputSlice);
             offset += size;
-
             inputLengthsAll.emplace_back(size);
         }
     }

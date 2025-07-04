@@ -100,7 +100,7 @@ def parse_model_config(args, ):
     config["decoder"]["num_heads"] = "12"
     config["decoder"]['d_model'] = "768"  #hidden_size
     config["decoder"]['d_ffn'] = "3072"  #ffn_hidden_size
-    config["decoder"]['vocab_size'] = "16384"  # 8 * 2048
+    config["decoder"]['vocab_size'] = "16192"  # 8 * 2024
     config["decoder"]['n_positions'] = "2048"
     config["decoder"]['has_position_embedding'] = "true"
     config["decoder"]['layernorm_position'] = "pre_layernorm"
@@ -238,33 +238,34 @@ def convert_t5tts_encoder(
     config,
     model_dict,
     quant_algo: str = None,
+    prefix: str = "encoder",
 ):
     weights = {}
     weights['embedding.vocab_embedding.weight'] = model_dict[
         'text_embedding.weight'].contiguous()
     weights['embedding.position_embedding.weight'] = model_dict[
-        't5_encoder.position_embeddings.weight'].contiguous()
+        f'{prefix}.position_embeddings.weight'].contiguous()
 
     num_layers = config.n_layer
     for i in range(num_layers):
         weights[f'encoder_layers.{i}.attention_layernorm.weight'] = model_dict[
-            f't5_encoder.layers.{i}.norm_self.weight'].contiguous()
+            f'{prefix}.layers.{i}.norm_self.weight'].contiguous()
         weights[f'encoder_layers.{i}.attention.qkv.weight'] = model_dict[
-            f't5_encoder.layers.{i}.self_attention.qkv_net.weight'].contiguous(
+            f'{prefix}.layers.{i}.self_attention.qkv_net.weight'].contiguous(
             )
         weights[f'encoder_layers.{i}.attention.dense.weight'] = model_dict[
-            f't5_encoder.layers.{i}.self_attention.o_net.weight'].contiguous()
+            f'{prefix}.layers.{i}.self_attention.o_net.weight'].contiguous()
         weights[f'encoder_layers.{i}.pos_ff_layernorm.weight'] = model_dict[
-            f't5_encoder.layers.{i}.norm_pos_ff.weight'].contiguous()
+            f'{prefix}.layers.{i}.norm_pos_ff.weight'].contiguous()
         weights[f'encoder_layers.{i}.pos_ff.proj.weight'] = model_dict[
-            f't5_encoder.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(
+            f'{prefix}.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(
                 3).contiguous()
         weights[f'encoder_layers.{i}.pos_ff.o_net.weight'] = model_dict[
-            f't5_encoder.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(
+            f'{prefix}.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(
                 3).contiguous()
 
     weights['final_layernorm.weight'] = model_dict[
-        f't5_encoder.norm_out.weight'].contiguous()
+        f'{prefix}.norm_out.weight'].contiguous()
 
     return weights
 
@@ -273,6 +274,7 @@ def convert_t5tts_decoder(
     config,
     model_dict,
     quant_algo: str = None,
+    prefix: str = "decoder",
 ):
     weights = {}
     #weights['embedding.vocab_embedding.weight'] = model_dict['final_proj.weight'].clone().contiguous()
@@ -281,7 +283,7 @@ def convert_t5tts_decoder(
     ).contiguous()
 
     weights['embedding.position_embedding.weight'] = model_dict[
-        't5_decoder.position_embeddings.weight'].contiguous()
+        f'{prefix}.position_embeddings.weight'].contiguous()
 
     weights[f'embedding.vocab_embedding.weight'] = torch.cat(
         [model_dict[f'audio_embeddings.{i}.weight'] for i in range(len(config.vocab_sizes))], dim=0
@@ -291,38 +293,38 @@ def convert_t5tts_decoder(
     for i in range(num_layers):
         weights[
             f'decoder_layers.{i}.self_attention_layernorm.weight'] = model_dict[
-                f't5_decoder.layers.{i}.norm_self.weight'].contiguous()
+                f'{prefix}.layers.{i}.norm_self.weight'].contiguous()
         weights[f'decoder_layers.{i}.self_attention.qkv.weight'] = model_dict[
-            f't5_decoder.layers.{i}.self_attention.qkv_net.weight'].contiguous(
+            f'{prefix}.layers.{i}.self_attention.qkv_net.weight'].contiguous(
             )
         weights[f'decoder_layers.{i}.self_attention.dense.weight'] = model_dict[
-            f't5_decoder.layers.{i}.self_attention.o_net.weight'].contiguous()
+            f'{prefix}.layers.{i}.self_attention.o_net.weight'].contiguous()
         weights[
             f'decoder_layers.{i}.cross_attention_layernorm.weight'] = model_dict[
-                f't5_decoder.layers.{i}.norm_xattn_query.weight'].contiguous()
+                f'{prefix}.layers.{i}.norm_xattn_query.weight'].contiguous()
 
         qkv_weight = torch.cat([
-            model_dict[f't5_decoder.layers.{i}.cross_attention.q_net.weight'],
-            model_dict[f't5_decoder.layers.{i}.cross_attention.kv_net.weight']
+            model_dict[f'{prefix}.layers.{i}.cross_attention.q_net.weight'],
+            model_dict[f'{prefix}.layers.{i}.cross_attention.kv_net.weight']
         ], dim=0).contiguous()
 
         weights[f'decoder_layers.{i}.cross_attention.qkv.weight'] = qkv_weight
         weights[f'decoder_layers.{i}.cross_attention.dense.weight'] = model_dict[
-            f't5_decoder.layers.{i}.cross_attention.o_net.weight'].contiguous()
+            f'{prefix}.layers.{i}.cross_attention.o_net.weight'].contiguous()
         weights[f'decoder_layers.{i}.pos_ff_layernorm.weight'] = model_dict[
-            f't5_decoder.layers.{i}.norm_pos_ff.weight'].contiguous()
+            f'{prefix}.layers.{i}.norm_pos_ff.weight'].contiguous()
         weights[
             f'decoder_layers.{i}.cross_attention_memory_layernorm.weight'] = model_dict[
-                f't5_decoder.layers.{i}.norm_xattn_memory.weight'].contiguous()
+                f'{prefix}.layers.{i}.norm_xattn_memory.weight'].contiguous()
         weights[f'decoder_layers.{i}.pos_ff.proj.weight'] = model_dict[
-            f't5_decoder.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(
+            f'{prefix}.layers.{i}.pos_ff.proj.conv.weight'].unsqueeze(
                 3).contiguous()
         weights[f'decoder_layers.{i}.pos_ff.o_net.weight'] = model_dict[
-            f't5_decoder.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(
+            f'{prefix}.layers.{i}.pos_ff.o_net.conv.weight'].unsqueeze(
                 3).contiguous()
 
     weights['final_layernorm.weight'] = model_dict[
-        f't5_decoder.norm_out.weight'].contiguous()
+        f'{prefix}.norm_out.weight'].contiguous()
 
     component_save_dir = os.path.join(args.output_dir, "decoder")
     os.makedirs(component_save_dir, exist_ok=True)
