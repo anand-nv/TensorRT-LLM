@@ -1004,9 +1004,9 @@ void RuntimeBuffers::setAttentionPriorIdx(
 
     SizeType32 qOffset = 0;
     // set the focus for context requests based on last scores slice
-    for (SizeType32 i = 0; i < (SizeType32)contextRequests.size(); ++i) {
+    for (SizeType32 i = 0; i < static_cast<SizeType32>(contextRequests.size()); ++i) {
         SizeType32 kvOffset = 0;
-        for (SizeType32 j = 0; j < (SizeType32)contextRequests.size(); ++j) {
+        for (SizeType32 j = 0; j < static_cast<SizeType32>(contextRequests.size()); ++j) {
             auto const& llmReq = contextRequests[j];
             SizeType32 encoderOutputLen = llmReq->getEncoderOutputLen();
             if (i == j) {
@@ -1022,10 +1022,10 @@ void RuntimeBuffers::setAttentionPriorIdx(
 
     // for generation requests, there is no context,
     // but we need to find correct section in (b * encoder_output_len)
-    for (SizeType32 i = 0; i < (SizeType32)genRequests.size(); ++i) {
+    for (SizeType32 i = 0; i < static_cast<SizeType32>(genRequests.size()); ++i) {
         // skip the context
         SizeType32 kvOffset = totalContextEncoderOutputLen;
-        for (SizeType32 j = 0; j < (SizeType32)genRequests.size(); ++j) {
+        for (SizeType32 j = 0; j < static_cast<SizeType32>(genRequests.size()); ++j) {
             auto const& llmReq = genRequests[j];
             SizeType32 encoderOutputLen = llmReq->getEncoderOutputLen();
             if (i == j) {

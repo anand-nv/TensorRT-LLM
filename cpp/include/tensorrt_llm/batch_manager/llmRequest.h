@@ -1190,8 +1190,8 @@ public:
             (*mCrossAttentionMask)->reshape(runtime::ITensor::makeShape({1, getEncoderOutputLen()}));
         }
         // Create array of booleans
-        bool* mask = new bool[getEncoderOutputLen()];
-        std::fill(mask, mask + getEncoderOutputLen(), false);
+        auto mask = std::make_unique<bool[]>(getEncoderOutputLen());
+        std::fill(mask.get(), mask.get() + getEncoderOutputLen(), false);
         auto focus = getAttentionPriorIdx();
         for (int i = std::max(0, focus - 1); i < std::min(focus + 6, getEncoderOutputLen()); i++) {
             if (!isAttentionPriorStuck(i)) {
@@ -1199,8 +1199,7 @@ public:
             }
         }
         // Copy array to tensor
-        manager.copy(mask, **mCrossAttentionMask, runtime::MemoryType::kCPU);
-        delete[] mask;
+        manager.copy(mask.get(), **mCrossAttentionMask, runtime::MemoryType::kCPU);
     }
 
     [[nodiscard]] TensorPtr getSkipCrossAttnBlocks() const
@@ -1803,8 +1802,7 @@ public:
 
     bool isAttentionPriorFinished() const
     {
-        bool isFinished = mAttentionPriorCounterCloseToEnd >= 20;
-        return isFinished;
+        return mAttentionPriorCounterCloseToEnd >= 20;
     }
 
     bool isAttentionPriorStuck(int i) const
