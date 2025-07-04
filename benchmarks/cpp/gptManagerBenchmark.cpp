@@ -126,9 +126,12 @@ texec::Tensor castInputFeatHalf(texec::Tensor const& inputFeat, std::string cons
         {
             targetData[i] = static_cast<half>(sourceData[i]);
         }
-
         TLLM_LOG_DEBUG("Casted inputFeat tensor from fp32 to fp16");
-        return castedTensor;
+
+        auto stream = std::make_shared<tensorrt_llm::runtime::CudaStream>();
+        texec::Tensor castedTensorGpu = castedTensor.copyToGpu(stream);
+
+        return castedTensorGpu;
     }
     catch (std::exception const& e)
     {
