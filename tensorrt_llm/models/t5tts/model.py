@@ -51,8 +51,8 @@ mlp_map = {
     MLPType.FusedGatedMLP: FusedGatedMLP,
 }
 
-COMPUTE_SCORES_FROM_LAYERS = [4, 6, 10]
-APPLY_PRIOR_TO_LAYERS = [4, 6, 10]
+COMPUTE_SCORES_FROM_LAYERS = [4,6,10]
+APPLY_PRIOR_TO_LAYERS = [4,5,6,7,8,9,10,11]
 
 
 class PositionwiseConvFF(Module):

@@ -1029,7 +1029,7 @@ void RuntimeBuffers::setAttentionPriorIdx(
     }
 
     // create a cpu buffer for scores to find max score in
-    SizeType32 searchLength = 10;
+    SizeType32 searchLength = 5;
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
     auto scoresHost = manager.cpu(ITensor::makeShape({searchLength}), scores->getDataType());

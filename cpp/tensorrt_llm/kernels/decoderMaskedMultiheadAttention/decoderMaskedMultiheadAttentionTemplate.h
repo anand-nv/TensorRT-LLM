@@ -2093,7 +2093,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 }
             }
 
-            if (is_active && has_attention_mask && DO_CROSS_ATTENTION) {
+            if (is_active && has_attention_mask && DO_CROSS_ATTENTION && is_leader) {
                 // TODO: This is a fix to take into account custom attention mask during cross attention.
                 // It is implicitely excludes EOS token from encoder sequence, this is to be checked.
                 // It penalizes masked tokens with -1e9, this can be adjusted to implement attention prior floor.
