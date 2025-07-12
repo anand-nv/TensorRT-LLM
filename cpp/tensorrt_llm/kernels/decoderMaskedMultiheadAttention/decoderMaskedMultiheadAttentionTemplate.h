@@ -1513,7 +1513,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
 
     // Keep the EOS token for cross attention to attend to.
     int const tlength = DO_CROSS_ATTENTION
-        ? params.memory_length_per_sample[batch_beam_idx]
+        ? params.memory_length_per_sample[batch_beam_idx] - 1
         : (params.length_per_sample ? (params.length_per_sample[batch_beam_idx] - 1) : static_cast<int>(timestep));
     // We will use cyclic kv cache when it exceeds the limit.
     // The length position for storing new key and value.
@@ -1548,6 +1548,19 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     float const kv_scale_quant_orig_f = (ENABLE_8BITS_KV_CACHE ? params.kv_scale_quant_orig[0] : 1.0f);
     convert_from_float(&k_scale_quant_orig, k_scale_quant_orig_f);
     convert_from_float(&kv_scale_orig_quant, (ENABLE_8BITS_KV_CACHE ? params.kv_scale_orig_quant[0] : 1.0f));
+
+    // parameters related to attention prior
+    bool const apply_prior = params.attention_prior_focus != nullptr;
+    int focus = 0;
+    if (apply_prior) {
+        focus = params.attention_prior_focus[batch_beam_idx];
+    }
+    bool const store_scores = params.attention_prior_scores != nullptr;
+    float *scores_ptr = nullptr;
+    if (store_scores) {
+        // TODO: 5 is a hardcoded lookahead, need to make it configurable
+        scores_ptr = &params.attention_prior_scores[batch_beam_idx * 5];
+    }
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
     cudaGridDependencySynchronize();
@@ -1889,6 +1902,10 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         {
             // We need to store the qk result to the end of the qk_smem for cyclic kv cache (+ 1 for smem memory
             // allocation) because the previous cache will still write to the new_cache_pos of qk_smem.
+            if (DO_CROSS_ATTENTION && apply_prior && kv_loop_length - focus > 6) {
+                // this is hardcoded window that we keep unmasked
+                qk -= 1e9;
+            }
             qk_smem[kv_loop_length] = qk;
         }
     }
@@ -2093,11 +2110,14 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 }
             }
 
-            if (is_active && has_attention_mask && DO_CROSS_ATTENTION && is_leader) {
-                // TODO: This is a fix to take into account custom attention mask during cross attention.
-                // It is implicitely excludes EOS token from encoder sequence, this is to be checked.
-                // It penalizes masked tokens with -1e9, this can be adjusted to implement attention prior floor.
-                qk_ += (1e9 * (float(attention_mask_ptr[local_time_now]) - 1.0f));
+            if (is_active && DO_CROSS_ATTENTION && is_leader && apply_prior) {
+                // apply attention prior: values that are not within a window around `focus` are penalized
+                if (local_time_now < (focus - 1) || local_time_now >= (focus + 5)) {
+                    qk_ -= 1e9;
+                    printf("attention_mask[%d]=0 ", local_time_now);
+                } else {
+                    printf("attention_mask[%d]=1 ", local_time_now);
+                }
             }
 
             // Apply attention logit softcapping scale.
@@ -2142,6 +2162,11 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 qk_smem[local_ti] = qk_;
             }
         }
+    }
+
+    __syncthreads();
+    if (is_leader && tidx == 0 && DO_CROSS_ATTENTION) {
+        printf(" attn_mask_end\n");
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2283,7 +2308,14 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
 
         if (!MULTI_BLOCK_FLAG)
         {
-            convert_from_float(&logits_smem[ti], qk_smem[ti] * inv_sum);
+            float prob = qk_smem[ti] * inv_sum;
+            if (DO_CROSS_ATTENTION) {
+                printf("prob[%d]=%f ", ti, prob);
+                if (store_scores && ti >= focus && ti < focus + 5) {
+                    scores_ptr[ti - focus] += prob;
+                }
+            }
+            convert_from_float(&logits_smem[ti], prob);
         }
         else
         {
@@ -2297,6 +2329,11 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 convert_from_float(&logits_current_smem[0], qk_current_smem[0]);
             }
         }
+    }
+
+    __syncthreads();
+    if (is_leader && tidx == 0 && DO_CROSS_ATTENTION) {
+        printf(" prob_end\n");
     }
 
     // Put Values part below so we leverage __syncthreads

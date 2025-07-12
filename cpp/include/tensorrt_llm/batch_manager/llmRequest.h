@@ -1216,25 +1216,6 @@ public:
         return mCrossAttentionMask.value_or(nullptr);
     }
 
-    void setFocusCrossAttentionMask(runtime::BufferManager const& manager, int size=3)
-    {
-        if (!mCrossAttentionMask.has_value()) {
-            mCrossAttentionMask = std::move(manager.emptyTensor(runtime::MemoryType::kGPU, nvinfer1::DataType::kBOOL));
-            (*mCrossAttentionMask)->reshape(runtime::ITensor::makeShape({1, getEncoderOutputLen()}));
-        }
-        // Create array of booleans
-        auto mask = std::make_unique<bool[]>(getEncoderOutputLen());
-        std::fill(mask.get(), mask.get() + getEncoderOutputLen(), false);
-        auto focus = getAttentionPriorIdx();
-        for (int i = std::max(0, focus - 1); i < std::min(focus + 6, getEncoderOutputLen()); i++) {
-            if (!isAttentionPriorStuck(i)) {
-                mask[i] = true;
-            }
-        }
-        // Copy array to tensor
-        manager.copy(mask.get(), **mCrossAttentionMask, runtime::MemoryType::kCPU);
-    }
-
     [[nodiscard]] TensorPtr getSkipCrossAttnBlocks() const
     {
         return mSkipCrossAttnBlocks.value_or(nullptr);
@@ -1831,6 +1812,10 @@ public:
         if (attentionPriorIdx >= getEncoderOutputLen() - 5) {
             mAttentionPriorCounterCloseToEnd++;
         }
+        if (mAttentionPriorCounters[attentionPriorIdx] >= 8) {
+            // increment to avoid getting stuck in the same encoder output
+            setAttentionPriorIdx(attentionPriorIdx + 1);
+        }
     }
 
     bool isAttentionPriorFinished() const
@@ -1838,18 +1823,18 @@ public:
         return mAttentionPriorCounterCloseToEnd >= 20;
     }
 
-    bool isAttentionPriorStuck(int i) const
-    {
-        return mAttentionPriorCounters[i] >= 10;
-    }
-
     bool hasAttentionPriorIdx() const
     {
         return mAttentionPriorIdx.has_value();
     }
 
-    [[nodiscard]] SizeType32 getAttentionPriorIdx() const
+    [[nodiscard]] SizeType32 getAttentionPriorIdx()
     {
+        if (!mAttentionPriorIdx.has_value()) {
+            setAttentionPriorIdx(1);
+        }
+        // `setAttentionPriorIdx` takes care to avoid getting stuck in the same encoder output,
+        // it is expected that `mAttentionPriorCounters[mAttentionPriorIdx]` is always < 8
         return mAttentionPriorIdx.value();
     }
 

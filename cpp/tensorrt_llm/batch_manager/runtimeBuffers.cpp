@@ -201,11 +201,10 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         shape.d[0] = numTokens;
         tensor->reshape(shape);
     }
-    // scores have shape (b * context_length, b * numEncoderTokens). Context length == 1 for generation requests
     if (useAttentionPrior) {
-        scores->reshape(ITensor::makeShape(
-            {numContextTokens + numGenRequests, getNumRequests() * encoderBuffers->encoderOutputLen}
-        ));
+        // TODO: make lookahead configurable
+        attentionPriorScores->reshape(ITensor::makeShape({5 * numGenSequences}));
+        attentionPriorFocus->reshape(ITensor::makeShape({numGenSequences}));
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -261,7 +260,9 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 
     inputsIds = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     if (useAttentionPrior) {
-        scores = manager.emptyTensor(MemoryType::kGPU, modelConfig.getDataType());
+        // probs in attention kernel are in full precision
+        attentionPriorScores = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
+        attentionPriorFocus = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     }
     if (worldConfig.isPipelineParallel())
     {
@@ -811,6 +812,19 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             lookaheadBuffers->setFromInputs(numContextRequests, numGenRequests, *requestTypes, *seqSlots,
                 decoderBuffers.lookaheadBuffers.value(), runtime, modelConfig, worldConfig);
         }
+        if (useAttentionPrior)
+        {
+            // set to zero attention prior scores, so scores from different layers can be accumulated
+            manager.setMem(*attentionPriorScores, 0);
+            // copy focus indices from llm requests to a buffer
+            std::vector<int> focus_lst;
+            for (SizeType32 i = 0; i < numGenSequences; i++) {
+                focus_lst.push_back(
+                    genRequests[i]->getAttentionPriorIdx()
+                );
+            }
+            manager.copy(focus_lst.data(), *attentionPriorFocus, runtime::MemoryType::kCPU);
+        }
     }
 
     // check skipCrossAttnBlocks
@@ -952,145 +966,58 @@ void RuntimeBuffers::prepareEagleBuffers(RequestVector const& contextRequests, R
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-template<typename T>
-static SizeType32 processScoresWithType(ITensor* scoresHost, SizeType32 prevPriorIdxLen) {
-    auto* scoresHostPtr = bufferCast<T>(*scoresHost);
-    T maxScore = scoresHostPtr[0];
-    SizeType32 maxScoreIdx = 0;
-    // Find the index with maximum score in the current subsection
-    for (SizeType32 k = 1; k < prevPriorIdxLen; ++k) {
-        if (scoresHostPtr[k] > maxScore) {
-            maxScore = scoresHostPtr[k];
-            maxScoreIdx = k;
-        }
-    }
-    return maxScoreIdx;
-}
-
-/**
- * Copies a slice of the `scores` tensor (device) to the provided host buffer, synchronises the
- * CUDA stream, and returns the local index of the maximum element.
- *
- * The helper is kept `static` to allow inlining by the compiler while providing a single
- * implementation that can be re-used across both context and generation request loops.
- */
-static SizeType32 computeMaxScoreIdx(
-    const runtime::ITensor::SharedPtr& scores,
-    SizeType32 qOff, SizeType32 kvOff, SizeType32 len,
-    ITensor* scoresHost,
-    BufferManager const& manager, CudaStream const& stream)
-{
-    if (len == 0)
-    {
-        return 0;
-    }
-
-    // Slice the relevant section of scores from device memory
-    auto scoresSlice = ITensor::slice(scores, {qOff, kvOff}, len);
-
-    // Copy slice to host buffer (scoresHost has enough capacity but may be larger than `len`)
-    scoresHost->reshape(ITensor::makeShape({len}));
-    manager.copy(*scoresSlice, *scoresHost);
-    stream.synchronize();
-
-    // Determine the maximum-score index depending on the underlying data type
-    if (scores->getDataType() == nvinfer1::DataType::kFLOAT)
-    {
-        return processScoresWithType<float>(scoresHost, len);
-    }
-    else if (scores->getDataType() == nvinfer1::DataType::kHALF)
-    {
-        return processScoresWithType<half>(scoresHost, len);
-    }
-    TLLM_LOG_WARNING("Unsupported scores data type");
-    return 0;
-}
-
-void RuntimeBuffers::setAttentionPriorIdx(
-    RequestVector const& contextRequests, RequestVector const& genRequests, TllmRuntime const& runtime)
+void RuntimeBuffers::processAttentionPriorScores(
+    RequestVector const& genRequests, TllmRuntime const& runtime)
 {
     /**
      * is called after inference is done. processes the "scores" buffer and sets up
      * the index with most attention focus for each request.
-     * scores buffer has shape (b * context_length, b * numEncoderTokens),
-     * that means there is extra data to be ommitted
      */
-    // compute total encoder output length among all requests
     if (!useAttentionPrior) {
-        TLLM_LOG_WARNING("Setting attention prior index, when attention prior is disabled");
+        TLLM_LOG_WARNING("processing attention prior scores, when attention prior is disabled");
         return;
     }
-    SizeType32 totalContextEncoderOutputLen = 0; 
-    for (auto const& llmReq : contextRequests) {
-        totalContextEncoderOutputLen += llmReq->getEncoderOutputLen();
-        if (llmReq->isCfg()) {
-            totalContextEncoderOutputLen += llmReq->getEncoderOutputLen();
-        }
-    }
 
-    // create a cpu buffer for scores to find max score in
-    SizeType32 searchLength = 5;
+    // copy scores to host
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
-    auto scoresHost = manager.cpu(ITensor::makeShape({searchLength}), scores->getDataType());
+    auto scoresHost = manager.cpu(ITensor::makeShape({numGenSequences * 5}), nvinfer1::DataType::kFLOAT);
+    manager.copy(*attentionPriorScores, *scoresHost);
+    stream.synchronize();
 
-    SizeType32 qOffset = 0;
-    // set the focus for context requests based on last scores slice
-    for (SizeType32 i = 0; i < static_cast<SizeType32>(contextRequests.size()); ++i) {
-        SizeType32 kvOffset = 0;
-        for (SizeType32 j = 0; j < static_cast<SizeType32>(contextRequests.size()); ++j) {
-            auto const& llmReq = contextRequests[j];
-            SizeType32 encoderOutputLen = llmReq->getEncoderOutputLen();
-            if (i == j) {
-                auto const& llmReq = contextRequests[j];
-                SizeType32 prevPriorIdxLen = std::min(searchLength, encoderOutputLen - 3);
-                SizeType32 maxIdx = computeMaxScoreIdx(scores, qOffset, kvOffset, prevPriorIdxLen, scoresHost.get(), manager, stream);
-                llmReq->setAttentionPriorIdx(maxIdx);
-            }
-            kvOffset += encoderOutputLen;
-            if (llmReq->isCfg()) {
-                kvOffset += encoderOutputLen;
+    // for each generation request, analyze scores and set the attention prior idx
+    size_t scoresOffset = 0;
+    // TODO: remove hardcode of lookahead size, move to modelConfig
+    size_t lookaheadSize = 5;
+    auto* scoresHostPtr = bufferCast<float>(*scoresHost);
+    for (auto const& llmReq : genRequests) {
+        size_t prevPriorIdx = llmReq->getAttentionPriorIdx();
+        float maxScore = scoresHostPtr[scoresOffset];
+        size_t idxShift = 0;
+        for (size_t i = 1; i < lookaheadSize; i++) {
+            if (scoresHostPtr[scoresOffset + i] > maxScore) {
+                maxScore = scoresHostPtr[scoresOffset + i];
+                idxShift = i;
             }
         }
-        qOffset += contextRequests[i]->getContextChunkSize();
-        if (contextRequests[i]->isCfg()) {
-            qOffset += contextRequests[i]->getContextChunkSize();
-        }
-    }
 
-    // for generation requests, there is no context,
-    // but we need to find correct section in (b * encoder_output_len)
-    for (SizeType32 i = 0; i < static_cast<SizeType32>(genRequests.size()); ++i) {
-        // skip the context
-        SizeType32 kvOffset = totalContextEncoderOutputLen;
-        for (SizeType32 j = 0; j < static_cast<SizeType32>(genRequests.size()); ++j) {
-            auto const& llmReq = genRequests[j];
-            SizeType32 encoderOutputLen = llmReq->getEncoderOutputLen();
-            if (i == j) {
-                // find attnetion prior idx in range [prev_prior_idx; prev_prior_idx + 10]
-                SizeType32 prevPriorIdx = llmReq->getAttentionPriorIdx();
-                if (llmReq->isAttentionPriorStuck(prevPriorIdx) && prevPriorIdx < encoderOutputLen - 5) {
-                    // since scores are recomputed, the `prevPriorIdx` can be selected again,
-                    // despite been masked. we skip it if its a sink to avoid this.
-                    // we allow sink at the very end of the sequence, becase it will be taken care of by
-                    // end-of-sequence detection.
-                    prevPriorIdx++;
-                }
-                // ignore last 3 tokens, move strictly forward, look up to 10 tokens forward
-                SizeType32 prevPriorIdxEnd = std::min(prevPriorIdx + searchLength, encoderOutputLen - 3);
-                SizeType32 prevPriorIdxLen = prevPriorIdxEnd - prevPriorIdx;
-                SizeType32 maxIdx = computeMaxScoreIdx(scores, qOffset, kvOffset + prevPriorIdx, prevPriorIdxLen, scoresHost.get(), manager, stream);
-                llmReq->setAttentionPriorIdx(prevPriorIdx + maxIdx);
-            }
-            kvOffset += encoderOutputLen;
-            if (llmReq->isCfg(  )) {
-                kvOffset += encoderOutputLen;
+        // TODO: remove this debug print
+        std::ostringstream oss;
+        oss << "[";
+        for (size_t i = 0; i < lookaheadSize; ++i) {
+            oss << scoresHostPtr[scoresOffset + i];
+            if (i != lookaheadSize - 1) {
+                oss << ", ";
             }
         }
-        qOffset += 1;
-        if (genRequests[i]->isCfg()) {
-            qOffset += 1;
-        }
+        oss << "]";
+        TLLM_LOG_WARNING(">>>> after focus %zu, values are %s. shifting focus by %zu", prevPriorIdx, oss.str().c_str(), idxShift);
+
+        llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift);
+
+
+        // TODO: remove hardcode of lookahead size
+        scoresOffset += lookaheadSize * llmReq->getNumSequences();
     }
 }
 
@@ -1165,7 +1092,8 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     inputMap.insert_or_assign(kHostContextLengthsTensorName, contextLengthsHost);
     inputMap.insert_or_assign(kSequenceLengthsTensorName, sequenceLengthsDevice);
     if (useAttentionPrior) {
-        outputMap.insert_or_assign(kScoresTensorName, scores);
+        inputMap.insert_or_assign(kAttentionPriorScoresTensorName, attentionPriorScores);
+        inputMap.insert_or_assign(kAttentionPriorFocusTensorName, attentionPriorFocus);
     }
     if (modelConfig.useCrossAttention())
     {

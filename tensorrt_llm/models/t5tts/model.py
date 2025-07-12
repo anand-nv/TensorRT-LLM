@@ -24,7 +24,7 @@ from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch
 from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
-                                     concat, gather_last_token_logits, maximum,
+                                     concat, gather_last_token_logits, maximum, softmax,
                                      minimum, recv, select, send, shape, view, mean, add, slice, mul, expand_dims_like,
                                      squeeze, unsqueeze, transpose, matmul, stack, cast)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
@@ -52,7 +52,7 @@ mlp_map = {
 }
 
 COMPUTE_SCORES_FROM_LAYERS = [4,6,10]
-APPLY_PRIOR_TO_LAYERS = [4,5,6,7,8,9,10,11]
+APPLY_PRIOR_TO_LAYERS = [4,5,6,7,8,9,10]
 
 
 class PositionwiseConvFF(Module):
@@ -424,8 +424,6 @@ class T5TTSDecoderLayer(Module):
         super().__init__()
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
-        self.compute_scores = local_layer_idx in COMPUTE_SCORES_FROM_LAYERS
-        self.apply_prior = local_layer_idx in APPLY_PRIOR_TO_LAYERS
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -482,6 +480,8 @@ class T5TTSDecoderLayer(Module):
             tp_rank=mapping.tp_rank,
             dtype=dtype,
             cross_attention=True,
+            compute_attention_prior=local_layer_idx in COMPUTE_SCORES_FROM_LAYERS,
+            apply_attention_prior=local_layer_idx in APPLY_PRIOR_TO_LAYERS,
             relative_attention=False,  # Cross attention has no relative attention bias
             max_distance=max_distance,
             num_buckets=num_buckets,
@@ -523,6 +523,8 @@ class T5TTSDecoderLayer(Module):
     def forward(self,
                 hidden_states: Tensor,
                 encoder_output: Optional[Tensor] = None,
+                attention_prior_scores: Optional[Tensor] = None,
+                attention_prior_focus: Optional[Tensor] = None,
                 attention_mask_params=None,
                 use_cache=False,
                 kv_cache_params=None,
@@ -544,9 +546,7 @@ class T5TTSDecoderLayer(Module):
             kv_cache_params=kv_cache_params,
             attention_params=attention_params)
         if use_cache:
-            attention_output, _, _, presents_self = attention_output
-        else:
-            attention_output, _, _ = attention_output
+            attention_output, presents_self = attention_output
         hidden_states = residual + attention_output
 
         # cross attention
@@ -572,30 +572,16 @@ class T5TTSDecoderLayer(Module):
             attention_packed_mask=attention_mask_params.
             cross_attention_packed_mask,
             encoder_output=encoder_output,
+            attention_prior_scores=attention_prior_scores,
+            attention_prior_focus=attention_prior_focus,
             use_cache=use_cache,
             kv_cache_params=kv_cache_params,
             attention_params=attention_params,
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
         if use_cache:
-            attention_output, qkv, cross_kv, presents_cross = attention_output
-        else:
-            attention_output, qkv, cross_kv = attention_output
+            attention_output, presents_cross = attention_output
         hidden_states = residual + attention_output
-
-        # compute attention scores
-        # TODO: only implements disabled padding
-        # TODO: hardcodes head_size for cross attention
-        if self.compute_scores:
-            q = slice(qkv, concat([0, 0]), concat([shape(qkv, 0), 128]))
-            k = slice(cross_kv, concat([0, 0]), concat([shape(cross_kv, 0), 128]))
-            scores = matmul(
-                q,
-                k,
-                transb=True
-            )
-        else:
-            scores = None
 
         # conv ff (norm -> conv -> residual)
         residual = hidden_states
@@ -604,8 +590,8 @@ class T5TTSDecoderLayer(Module):
         result = residual + hidden_states
 
         if use_cache:
-            return (result, presents_self, presents_cross, scores)
-        return result, scores
+            return (result, presents_self, presents_cross)
+        return result
 
 
 class T5TTSEncoderModel(PretrainedModel):
@@ -1121,6 +1107,8 @@ class T5TTSDecoderModel(PretrainedModel):
     def forward(self,
                 decoder_input_ids: Tensor,
                 encoder_output: Tensor,
+                attention_prior_scores: Optional[Tensor] = None,
+                attention_prior_focus: Optional[Tensor] = None,
                 position_ids=None,
                 token_type_ids=None,
                 use_cache=False,
@@ -1147,13 +1135,14 @@ class T5TTSDecoderModel(PretrainedModel):
         if use_cache:
             presents = []
 
-        all_scores = []
         for i, (decoder_layer, past) in enumerate(
                 zip(self.decoder_layers, kv_cache_params.past_key_value)):
 
             hidden_states = decoder_layer(
                 hidden_states,
                 encoder_output=encoder_output,
+                attention_prior_scores=attention_prior_scores,
+                attention_prior_focus=attention_prior_focus,
                 attention_mask_params=attention_mask_params,
                 use_cache=use_cache,
                 kv_cache_params=KeyValueCacheParams(
@@ -1186,16 +1175,8 @@ class T5TTSDecoderModel(PretrainedModel):
                 cross_kv_reuse=cross_kv_reuse)
 
             if use_cache:
-                hidden_states, presents_self, presents_cross, scores = hidden_states
+                hidden_states, presents_self, presents_cross = hidden_states
                 presents.append((presents_self, presents_cross))
-            else:
-                hidden_states, scores = hidden_states
-            if scores is not None:
-                all_scores.append(scores)
-
-        scores_stacked = stack(all_scores, 0)  # [layers x b*context_length x b*numEncoderTokens]
-        mean_scores = mean(scores_stacked, 0)  # [b*context length x b*numTokens]
-        mean_scores.mark_output("scores")
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -1425,6 +1406,27 @@ class T5TTSDecoderModel(PretrainedModel):
                     ("batch_size_beam_width_encoder", [bb_range]),
                     ("encoder_input_len", [encoder_input_len_range]),
                     ("encoder_hidden_size", [self.encoder_hidden_size]),
+                ]),
+            )
+        attention_prior_scores = None
+        attention_prior_focus = None
+        if remove_input_padding and use_gpt_attention_plugin:
+            # TODO: 5 is a lookahead, make configurable
+            scores_dim_range = [x * 5 for x in bb_range]
+            attention_prior_scores = Tensor(
+                name="attention_prior_scores",
+                dtype=trt.float32,
+                shape=[-1],
+                dim_range=OrderedDict([
+                    ("batch_size_beam_width_scores", [scores_dim_range]),
+                ]),
+            )
+            attention_prior_focus = Tensor(
+                name="attention_prior_focus",
+                dtype=trt.int32,
+                shape=[-1],
+                dim_range=OrderedDict([
+                    ("batch_size_beam_width_focus", [bb_range]),
                 ]),
             )
 
@@ -1793,6 +1795,8 @@ class T5TTSDecoderModel(PretrainedModel):
         result = {
             'decoder_input_ids': input_ids,
             'encoder_output': encoder_output,
+            'attention_prior_scores': attention_prior_scores,
+            'attention_prior_focus': attention_prior_focus,
             'position_ids': position_ids,
             'token_type_ids': token_type_ids,
             'use_cache': True,

@@ -59,7 +59,8 @@ GPTAttentionPlugin::GPTAttentionPlugin(int layer_idx, int num_heads, int vision_
     tensorrt_llm::kernels::ContextFMHAType context_fmha_type, int kv_cache_quant_mode, bool remove_input_padding,
     tensorrt_llm::kernels::AttentionMaskType mask_type, tensorrt_llm::kernels::BlockSparseParams block_sparse_params,
     bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
-    bool qkv_bias_enabled, bool cross_attention, int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
+    bool qkv_bias_enabled, bool cross_attention, bool compute_attention_prior, bool apply_attention_prior,
+    int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
     bool use_paged_context_fmha, bool use_fp8_context_fmha, bool has_full_attention_mask, bool use_cache,
     bool is_spec_decoding_enabled, bool spec_decoding_is_generation_length_variable,
     int spec_decoding_max_generation_length, bool is_mla_enabled, int q_lora_rank, int kv_lora_rank,
@@ -71,8 +72,9 @@ GPTAttentionPlugin::GPTAttentionPlugin(int layer_idx, int num_heads, int vision_
         rotary_embedding_short_m_scale, rotary_embedding_long_m_scale, rotary_embedding_max_positions,
         rotary_embedding_original_max_positions, tp_size, tp_rank, unfuse_qkv_gemm, use_logn_scaling, context_fmha_type,
         kv_cache_quant_mode, remove_input_padding, mask_type, block_sparse_params, paged_kv_cache, tokens_per_block,
-        type, max_context_length, qkv_bias_enabled, cross_attention, max_distance, pos_shift_enabled,
-        dense_context_fmha, use_paged_context_fmha, use_fp8_context_fmha, has_full_attention_mask, use_cache,
+        type, max_context_length, qkv_bias_enabled, cross_attention, compute_attention_prior, apply_attention_prior,
+        max_distance, pos_shift_enabled, dense_context_fmha,
+        use_paged_context_fmha, use_fp8_context_fmha, has_full_attention_mask, use_cache,
         is_spec_decoding_enabled, spec_decoding_is_generation_length_variable, spec_decoding_max_generation_length,
         is_mla_enabled, q_lora_rank, kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim, v_head_dim, fuse_fp4_quant,
         skip_attn, cp_size, cp_rank, cp_group)
@@ -123,6 +125,8 @@ std::string GPTAttentionPlugin::toString(IdxEntry const& entry) const
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(CROSS_KV);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(CROSS_KV_LENGTH);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(ENCODER_INPUT_LENGTH);
+        TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(ATTENTION_PRIOR_SCORES);
+        TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(ATTENTION_PRIOR_FOCUS);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(HOST_CONTEXT_LENGTH);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(QKV_BIAS_TENSOR);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(SPEC_DECODING_GENERATION_LENGTHS);
@@ -180,6 +184,8 @@ bool GPTAttentionPlugin::isEntryUsed(IdxEntry const& entry) const
     case IdxEntry::CROSS_KV_LENGTH: return isCrossAttention();
     case IdxEntry::LOGN_SCALING: return isLognScaling();
     case IdxEntry::ENCODER_INPUT_LENGTH: return isCrossAttention();
+    case IdxEntry::ATTENTION_PRIOR_SCORES: return ComputeAttentionPrior();
+    case IdxEntry::ATTENTION_PRIOR_FOCUS: return ApplyAttentionPrior();
     case IdxEntry::HOST_CONTEXT_LENGTH: return mRemovePadding;
     case IdxEntry::QKV_BIAS_TENSOR: return mQKVBiasEnabled;
     case IdxEntry::SPEC_DECODING_GENERATION_LENGTHS: return mIsSpecDecodingEnabled;
@@ -1119,6 +1125,10 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             enqueue_params.spec_decoding_is_generation_length_variable = mSpecDecodingIsGenerationLengthVariable;
             enqueue_params.spec_decoding_max_generation_length = mSpecDecodingMaxGenerationLength;
         }
+        if (isCrossAttention()) {
+            enqueue_params.attention_prior_scores = reinterpret_cast<float*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_SCORES)]);
+            enqueue_params.attention_prior_focus = reinterpret_cast<int*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]);
+        }
         if (mFuseFp4Quant)
         {
             enqueue_params.start_token_idx_sf = tokenIdxBeg;
@@ -1341,6 +1351,8 @@ IPluginV2* GPTAttentionPluginCreator::createPlugin(char const* name, PluginField
             p.getScalar<int32_t>("max_context_length").value(),
             static_cast<bool>(p.getScalar<int8_t>("qkv_bias_enabled").value()),
             static_cast<bool>(p.getScalar<int8_t>("do_cross_attention").value()),
+            static_cast<bool>(p.getScalar<int8_t>("compute_attention_prior").value()),
+            static_cast<bool>(p.getScalar<int8_t>("apply_attention_prior").value()),
             static_cast<int32_t>(p.getScalar<int32_t>("max_distance").value()),
             static_cast<bool>(p.getScalar<int8_t>("pos_shift_enabled").value()),
             static_cast<bool>(p.getScalar<int8_t>("dense_context_fmha").value()),

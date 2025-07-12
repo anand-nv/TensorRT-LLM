@@ -45,7 +45,6 @@ TransformerBuffers::TransformerBuffers(SizeType32 maxBatchSize, SizeType32 maxBe
     runtime::WorldConfig const& worldConfig)
     : maxInputLen(modelConfig.getMaxInputLen())
     , maxEncoderOutputLen(modelConfig.getMaxEncoderLen())
-    , useAttentionPrior(modelConfig.useAttentionPrior())
 {
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -489,16 +488,6 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
 
-    // set a cross attention mask for each of gen requests
-    if (useAttentionPrior) {
-        for (auto const& llmReq : genRequests) {
-            if (llmReq->hasAttentionPriorIdx() && llmReq->getEncoderOutputLen() > 5) {
-                llmReq->setFocusCrossAttentionMask(manager);
-            }
-        }
-        sync_check_cuda_error(stream.get());
-    }
-
     // Reshape the tensor to make sure the dim1 matches maxEncoderInputLengthInBatch.
     auto crossAttentionMaskShape = crossAttentionMaskDevice->getShape();
     crossAttentionMaskShape.d[1] = maxEncoderInputLengthInBatch;
@@ -558,7 +547,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             auto const& crossAttentionMaskRequest = llmReq->getCrossAttentionMask();
             auto const position = llmReq->getContextCurrentPosition();
             auto const size = llmReq->getContextChunkSize();
-            if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr && s == 0)
+            if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr)
             {
                 auto memType = crossAttentionMaskRequest->getMemoryType();
                 auto const crossAttentionMaskRequestDim0
@@ -621,8 +610,8 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             {
                 numTokens += size;
                 TLLM_LOG_WARNING(
-                    "CrossAttentionMask is not provided for the request. Default padding attention mask will be "
-                    "created.");
+                    "CrossAttentionMask is not provided for sequence %d of request. Default padding attention mask will be "
+                    "created.", s);
             }
         }
     }
@@ -634,7 +623,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             auto const promptLen = llmReq->mPromptLen;
             auto const decodingIter = llmReq->getDecodingIter();
             auto const& crossAttentionMaskRequest = llmReq->getCrossAttentionMask();
-            if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr && s == 0)
+            if (bufferCastOrNull<bool>(crossAttentionMaskRequest) != nullptr)
             {
                 auto const memType = crossAttentionMaskRequest->getMemoryType();
                 auto const crossAttentionMaskRequestDim0
@@ -646,9 +635,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
                 if (promptLen + decodingIter - 1 >= crossAttentionMaskRequestDim0)
                 {
                     TLLM_LOG_WARNING(
-                        "The provided crossAttentionMask input is not complete for generation phases, the last row "
-                        "will be "
-                        "used by default.");
+                        "The provided crossAttentionMask input [%d, %d] is not complete for generation phases: %d >= %d.", crossAttentionMaskRequestDim0, crossAttentionMaskRequestDim1, promptLen + decodingIter - 1, crossAttentionMaskRequestDim0);
                 }
                 // copy it to pinned memory if it is a cpu tensor.
                 if (memType == MemoryType::kCPU)
@@ -684,9 +671,9 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             {
                 numTokens++;
                 TLLM_LOG_WARNING(
-                    "CrossAttentionMask is not provided for the generation request. Full valid attentionMask will "
+                    "CrossAttentionMask is not provided for sequence %d of generation request. Full valid attentionMask will "
                     "be used "
-                    "by default.");
+                    "by default.", s);
             }
         }
     }

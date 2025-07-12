@@ -545,18 +545,29 @@ void EncoderBuffers::fill(
     {
         for (auto const& llmReq : requests)
         {
-            // copy encoder output to encoder output buffer for both ctx and gen requests,
-            // disable freeing enc buffer in llm request for it
-            size = llmReq->getEncoderOutputLen();
-            auto encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
-            manager.copy(*llmReq->getEncoderOutput(), *encoderOutputSlice);
-            offset += size;
-            inputLengthsAll.emplace_back(size);
-            if (llmReq->isCfg()) {
+            // 1. only ctx requests should gather the encoder output
+            // 2. only gen requests should tile encoder input lengths info by beam width
+            bool isCtx = llmReq->isContextInitState();
+            if (isCtx) {
+                // copy encoder output to encoder output buffer for both ctx and gen requests,
+                // disable freeing enc buffer in llm request for it
+                size = llmReq->getEncoderOutputLen();
                 auto encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
-                manager.setMem(*encoderOutputSlice, 0);
+                manager.copy(*llmReq->getEncoderOutput(), *encoderOutputSlice);
                 offset += size;
                 inputLengthsAll.emplace_back(size);
+                if (llmReq->isCfg()) {
+                    auto encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
+                    manager.setMem(*encoderOutputSlice, 0);
+                    offset += size;
+                    inputLengthsAll.emplace_back(size);
+                }
+            } else {
+                auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
+                auto const numSeq = llmReq->getNumSequences();
+                // although encoder output is not needed, gen phase still needs the
+                // encoder length info for cross kv cache. Also tile by beam width
+                std::fill_n(std::back_inserter(inputLengthsAll), reqBeamWidth * numSeq, llmReq->getEncoderOutputLen());
             }
         }
     }

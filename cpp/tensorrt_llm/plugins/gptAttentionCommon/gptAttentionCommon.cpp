@@ -40,7 +40,8 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads,
     tensorrt_llm::kernels::ContextFMHAType context_fmha_type, int kv_cache_quant_mode, bool remove_input_padding,
     tensorrt_llm::kernels::AttentionMaskType mask_type, tensorrt_llm::kernels::BlockSparseParams block_sparse_params,
     bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
-    bool qkv_bias_enabled, bool cross_attention, int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
+    bool qkv_bias_enabled, bool cross_attention, bool compute_attention_prior, bool apply_attention_prior,
+    int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
     bool use_paged_context_fmha, bool use_fp8_context_fmha, bool has_full_attention_mask, bool use_cache,
     bool is_spec_decoding_enabled, bool spec_decoding_is_generation_length_variable,
     int32_t spec_decoding_max_generation_length, bool is_mla_enabled, int q_lora_rank, int kv_lora_rank,
@@ -85,6 +86,8 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads,
     mMaxContextLength = max_context_length;
     mQKVBiasEnabled = qkv_bias_enabled;
     mCrossAttention = cross_attention;
+    mComputeAttentionPrior = compute_attention_prior;
+    mApplyAttentionPrior = apply_attention_prior;
     mMaxDistance = max_distance;
     mPosShiftEnabled = pos_shift_enabled;
     mDenseContextFMHA = dense_context_fmha;
@@ -147,6 +150,8 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(void const* data, size_t leng
     read(d, mMaxContextLength);
     read(d, mQKVBiasEnabled);
     read(d, mCrossAttention);
+    read(d, mComputeAttentionPrior);
+    read(d, mApplyAttentionPrior);
     read(d, mMaxDistance);
     read(d, mPosShiftEnabled);
     read(d, mDenseContextFMHA);
@@ -212,7 +217,8 @@ size_t GPTAttentionPluginCommon::getCommonSerializationSize() const noexcept
         + sizeof(mEnableXQA) + sizeof(unsigned int) // mKVCacheQuantMode
         + sizeof(mRemovePadding) + sizeof(mMaskType) + sizeof(mBlockSparseParams) + sizeof(mPagedKVCache)
         + sizeof(mTokensPerBlock) + sizeof(mType) + sizeof(mMaxContextLength) + sizeof(mQKVBiasEnabled)
-        + sizeof(mCrossAttention) + sizeof(mMaxDistance) + sizeof(mPosShiftEnabled) + sizeof(mDenseContextFMHA)
+        + sizeof(mCrossAttention) + sizeof(mComputeAttentionPrior) + sizeof(mApplyAttentionPrior)
+        + sizeof(mMaxDistance) + sizeof(mPosShiftEnabled) + sizeof(mDenseContextFMHA)
         + sizeof(mPagedContextFMHA) + sizeof(mFP8ContextFMHA) + sizeof(mHasFullAttentionMask) + sizeof(mUseKVCache)
         + sizeof(mUnfuseQkvGemm) + sizeof(mUseLognScaling) + sizeof(mIsSpecDecodingEnabled) + sizeof(mUseSpecDecoding)
         + sizeof(mSpecDecodingIsGenerationLengthVariable) + sizeof(mSpecDecodingMaxGenerationLength)
@@ -262,6 +268,8 @@ void GPTAttentionPluginCommon::serializeCommon(void* buffer) const noexcept
     write(d, mMaxContextLength);
     write(d, mQKVBiasEnabled);
     write(d, mCrossAttention);
+    write(d, mComputeAttentionPrior);
+    write(d, mApplyAttentionPrior);
     write(d, mMaxDistance);
     write(d, mPosShiftEnabled);
     write(d, mDenseContextFMHA);
@@ -344,6 +352,8 @@ GPTAttentionPluginCreatorCommon::GPTAttentionPluginCreatorCommon()
     mPluginAttributes.emplace_back(PluginField("max_context_length", nullptr, PluginFieldType::kINT32));
     mPluginAttributes.emplace_back(PluginField("qkv_bias_enabled", nullptr, PluginFieldType::kINT8));
     mPluginAttributes.emplace_back(PluginField("do_cross_attention", nullptr, PluginFieldType::kINT8));
+    mPluginAttributes.emplace_back(PluginField("compute_attention_prior", nullptr, PluginFieldType::kINT8));
+    mPluginAttributes.emplace_back(PluginField("apply_attention_prior", nullptr, PluginFieldType::kINT8));
     mPluginAttributes.emplace_back(PluginField("max_distance", nullptr, PluginFieldType::kINT32));
     mPluginAttributes.emplace_back(PluginField("pos_shift_enabled", nullptr, PluginFieldType::kINT8));
     mPluginAttributes.emplace_back(PluginField("dense_context_fmha", nullptr, PluginFieldType::kINT8));

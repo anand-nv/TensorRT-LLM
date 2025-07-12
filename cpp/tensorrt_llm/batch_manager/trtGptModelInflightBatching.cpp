@@ -966,8 +966,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
 
             // forward the attention prior index to llm requests for the next iteration
             if (mModelConfig.useAttentionPrior()) {
-                mBuffers[getFusedBufferId()]->setAttentionPriorIdx(
-                    currRequests.contextRequests,
+                mBuffers[getFusedBufferId()]->processAttentionPriorScores(
                     currRequests.generationRequests,
                     *mRuntime
                 );
@@ -1015,6 +1014,12 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
                                 COMM_SESSION.getRank(), llmReq->mRequestId);
 
                             llmReq->setState(LlmRequestState::kGENERATION_IN_PROGRESS);
+                            // for encoder-decoder models, free encoder output buffers after decoder context phase is
+                            // completed
+                            if (llmReq->getEncoderTokens().has_value())
+                            {
+                                llmReq->freeEncoderOutputBuffers();
+                            }
                             storeContextBlocks(llmReq);
                         }
                     }

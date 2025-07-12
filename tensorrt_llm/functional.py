@@ -5181,9 +5181,13 @@ def gpt_attention(
     host_kv_cache_pool_pointers: Tensor = None,
     host_kv_cache_pool_mapping: Tensor = None,
     do_cross_attention: bool = False,
+    compute_attention_prior: bool = False,
+    apply_attention_prior: bool = False,
     cross_kv: Optional[Tensor] = None,  # for cross attention
     cross_kv_length: Optional[Tensor] = None,  # for cross attention
     encoder_input_lengths: Optional[Tensor] = None,  # for cross attention
+    attention_prior_scores: Optional[Tensor] = None,  # when computing prior is enabled
+    attention_prior_focus: Optional[Tensor] = None,  # when applying prior is enabled
     relative_attention_bias: Optional[Tensor] = None,  # for relative attention
     logn_scaling: Optional[Tensor] = None,  # for logn scaling
     max_distance: int = 0,  # for relative attention
@@ -5405,6 +5409,16 @@ def gpt_attention(
         do_cross_attention: bool = False
             Do we use this as cross attention instead of self attention,
 
+        compute_attention_prior: bool = False,
+            Whether to accumulate attention prior scores in the kernel.
+            only valid for generation requests and cross attention.
+            uses attention_prior_scores provided lower
+
+        apply_attention_prior: bool = False,
+            Whether to apply attention prior.
+            only valid for generation requests and cross attention.
+            uses attention_prior_focus provided lower
+
         cross_kv: Tensor = None
             The KV tensor of encoder output hidden states. Its shape is [batch_size, max_seqlen, 2 * kvHeadNum * headSize] in padded mode and [1, num_tokens, 2 * kvHeadNum * headSize] in
             packed mode,
@@ -5414,6 +5428,13 @@ def gpt_attention(
 
         encoder_input_lengths: Tensor
             The tensor that stores the length of each encoder input sequence. Its shape is [batch_size],
+
+        attention_prior_scores: Optional[Tensor] = None
+            (B * 5,) accumulator to which a window of cross attention probabilities is added
+
+        attention_prior_focus: Optional[Tensor] = None
+            (B,) for each sequence specifies where start of the region on which to focus in cross attention.
+            rest of the encoder outputs are masked out.
 
         logn_scaling: Tensor = None
             The logn scaling tensor [max_position_embedding_len], which is applied to q in order to help extrapolation
@@ -5690,6 +5711,15 @@ def gpt_attention(
         "do_cross_attention",
         np.array(np.int8(do_cross_attention), dtype=np.int8),
         trt.PluginFieldType.INT8)
+
+    compute_attention_prior_field = trt.PluginField(
+        "compute_attention_prior",
+        np.array(np.int8(compute_attention_prior), dtype=np.int8),
+        trt.PluginFieldType.INT8)
+    apply_attention_prior_field = trt.PluginField(
+        "apply_attention_prior",
+        np.array(np.int8(apply_attention_prior), dtype=np.int8),
+
     max_distance = trt.PluginField("max_distance",
                                    np.array(max_distance, dtype=np.int32),
                                    trt.PluginFieldType.INT32)
@@ -5738,7 +5768,8 @@ def gpt_attention(
         block_sparse_block_size, block_sparse_homo_head_pattern,
         block_sparse_num_local_blocks, block_sparse_vertical_stride,
         paged_kv_cache, tokens_per_block, pf_type, max_context_length,
-        qkv_bias_enabled, do_cross_attention_field, max_distance,
+        qkv_bias_enabled, do_cross_attention_field, 
+        compute_attention_prior_field, apply_attention_prior_field, max_distance,
         pos_shift_enabled, dense_context_fmha, use_paged_context_fmha_field,
         use_fp8_context_fmha_field, has_full_attention_mask_field, use_cache_pf,
         is_spec_decoding_enabled, spec_decoding_is_generation_length_variable,
@@ -5812,6 +5843,11 @@ def gpt_attention(
 
     if do_cross_attention:
         plug_inputs += [cross_kv, cross_kv_length, encoder_input_lengths]
+
+        if compute_attention_prior:
+            plug_inputs += [attention_prior_scores]
+        if apply_attention_prior:
+            plug_inputs += [attention_prior_focus]
 
     if default_net().plugin_config.remove_input_padding:
         plug_inputs += [host_context_lengths]
