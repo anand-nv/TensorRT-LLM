@@ -1138,7 +1138,9 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     {
         eagleBuffers->insertInputTensors(inputMap, outputMap, worldConfig);
     }
-
+    if (useAttentionPrior) {
+        outputMap.insert_or_assign("attention_prior_scores", attentionPriorScores);
+    }
     for (auto const& outputTensor : mAdditionalOutputTensors)
     {
         outputMap.insert_or_assign(outputTensor.first, outputTensor.second);

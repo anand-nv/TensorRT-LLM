@@ -1551,7 +1551,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
 
     // parameters related to attention prior
     bool const apply_prior = params.attention_prior_focus != nullptr;
-    int focus = 0;
+    int focus;
     if (apply_prior) {
         focus = params.attention_prior_focus[batch_beam_idx];
     }

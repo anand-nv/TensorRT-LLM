@@ -205,7 +205,7 @@ public:
 
         // optional when attention prior is used.
         float* attention_prior_scores = nullptr;
-        int* attention_prior_focus = nullptr;
+        int const* attention_prior_focus = nullptr;
     };
 
     template <typename T, typename KVCacheBuffer>

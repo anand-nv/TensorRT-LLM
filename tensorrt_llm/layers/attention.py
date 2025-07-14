@@ -1096,7 +1096,7 @@ class Attention(Module):
                 assert long_rope_rotary_inv_freq is not None
                 assert long_rope_rotary_cos_sin is not None
 
-            context, past_key_value = gpt_attention(
+            attn_outputs = gpt_attention(
                 qkv=qkv,
                 past_key_value=past_key_value,
                 attention_mask=attention_mask,
@@ -1198,6 +1198,12 @@ class Attention(Module):
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
                 cp_group=self.cp_group)
+            # unpack attention outputs
+            if self.compute_attention_prior:
+                attention_prior_scores = attn_outputs.pop()
+            past_key_value = attn_outputs.pop()
+            # unpack if context is a single tensor
+            context = attn_outputs[0] if len(attn_outputs) == 1 else attn_outputs
 
         else:
             # plain TensorRT mode
@@ -1564,10 +1570,12 @@ class Attention(Module):
         ).plugin_config.use_fp8_context_fmha:
             context = dense_conditional.add_output(skip_case, context)
 
+        outputs = [context]
         if use_cache:
-            return (context, past_key_value)
-        else:
-            return context
+            outputs.append(past_key_value)
+        if self.compute_attention_prior:
+            outputs.append(attention_prior_scores)
+        return outputs
 
     def set_rel_attn_table(self, max_seq_len, precomputed_relative_attention):
         self.rel_attn_table = Parameter(shape=(self.num_attention_heads,

@@ -5719,6 +5719,7 @@ def gpt_attention(
     apply_attention_prior_field = trt.PluginField(
         "apply_attention_prior",
         np.array(np.int8(apply_attention_prior), dtype=np.int8),
+        trt.PluginFieldType.INT8)
 
     max_distance = trt.PluginField("max_distance",
                                    np.array(max_distance, dtype=np.int32),
@@ -5909,10 +5910,18 @@ def gpt_attention(
         expected_outputs += 1
 
     present_key_value = None
+    present_key_idx = -1
     if use_cache and not paged_kv_cache_flag:
         present_key_value = _create_tensor(layer.get_output(expected_outputs),
                                            layer)
         assert present_key_value is not None
+        present_key_idx = expected_outputs
+        expected_outputs += 1
+
+    attention_prior_scores_out = None
+    if compute_attention_prior:
+        attention_prior_scores_out = _create_tensor(layer.get_output(expected_outputs), layer)
+        assert attention_prior_scores_out is not None
         expected_outputs += 1
 
     assert layer.num_outputs == expected_outputs, \
@@ -5920,21 +5929,25 @@ def gpt_attention(
 
     if kv_cache_quant_mode.has_int8_kv_cache(
     ) and not default_net().strongly_typed:
+        if present_key_idx >= 0:
+            # present key value
+            layer.get_output(present_key_idx).set_dynamic_range(-127, 127)
         if not paged_kv_cache_flag:
             # past key value
             layer.get_input(8).set_dynamic_range(-127, 127)
-            # present key value
-            layer.get_output(expected_outputs - 1).set_dynamic_range(-127, 127)
         else:
             layer.get_input(0).set_dynamic_range(-127, 127)
             layer.get_input(1).set_dynamic_range(-127, 127)
-            layer.get_output(expected_outputs - 1).set_dynamic_range(-127, 127)
 
     assert output is not None
+    outputs = [output]
     if fuse_fp4_quant:
         assert output_sf is not None
-        return (output, output_sf), present_key_value
-    return output, present_key_value
+        outputs.append(output_sf)
+    outputs.append(present_key_value)
+    if compute_attention_prior:
+        outputs.append(attention_prior_scores_out)
+    return outputs
 
 
 def assertion(condition: Tensor, message: str = '') -> None:

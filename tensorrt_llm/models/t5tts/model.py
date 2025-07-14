@@ -424,6 +424,7 @@ class T5TTSDecoderLayer(Module):
         super().__init__()
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
+        self.compute_attention_prior = local_layer_idx in COMPUTE_SCORES_FROM_LAYERS
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -480,7 +481,7 @@ class T5TTSDecoderLayer(Module):
             tp_rank=mapping.tp_rank,
             dtype=dtype,
             cross_attention=True,
-            compute_attention_prior=local_layer_idx in COMPUTE_SCORES_FROM_LAYERS,
+            compute_attention_prior=self.compute_attention_prior,
             apply_attention_prior=local_layer_idx in APPLY_PRIOR_TO_LAYERS,
             relative_attention=False,  # Cross attention has no relative attention bias
             max_distance=max_distance,
@@ -539,14 +540,17 @@ class T5TTSDecoderLayer(Module):
         # self-attention
         residual = hidden_states
         hidden_states = self.self_attention_layernorm(hidden_states)
-        attention_output = self.self_attention(
+        attention_outputs = self.self_attention(
             hidden_states=hidden_states,
             attention_mask=attention_mask_params.self_attention_mask,
             use_cache=use_cache,
             kv_cache_params=kv_cache_params,
             attention_params=attention_params)
+        # pop past key value for self attention
         if use_cache:
-            attention_output, presents_self = attention_output
+            presents_self = attention_outputs.pop()
+        assert len(attention_outputs) == 1
+        attention_output = attention_outputs[0]
         hidden_states = residual + attention_output
 
         # cross attention
@@ -554,19 +558,8 @@ class T5TTSDecoderLayer(Module):
 
         hidden_states = self.cross_attention_layernorm(hidden_states)
         encoder_output = self.cross_attention_memory_layernorm(encoder_output)
-        # TODO: unnecessary computation, can be done just once for all layers
-        # TODO: ignores cross_attention_packed_mask, but they seems to be not changed anyways
         cross_attention_mask = attention_mask_params.cross_attention_mask
-        if not self.apply_prior:
-            # TODO: this is ones_like operation, is there more efficient way to do it?
-            cross_attention_mask = add(
-                mul(
-                    cross_attention_mask.cast(dtype=trt.float32),
-                    expand_dims_like(float(0), cross_attention_mask)
-                ),
-                expand_dims_like(float(1), cross_attention_mask)
-            ).cast(dtype=cross_attention_mask.dtype)  # back to original type
-        attention_output = self.cross_attention(
+        attention_outputs = self.cross_attention(
             hidden_states=hidden_states,
             attention_mask=cross_attention_mask,
             attention_packed_mask=attention_mask_params.
@@ -579,8 +572,12 @@ class T5TTSDecoderLayer(Module):
             attention_params=attention_params,
             cross_kv_cache_gen=cross_kv_cache_gen,
             cross_kv_reuse=cross_kv_reuse)
+        if self.compute_attention_prior:
+            attention_prior_scores = attention_outputs.pop()
         if use_cache:
-            attention_output, presents_cross = attention_output
+            presents_cross = attention_outputs.pop()
+        assert len(attention_outputs) == 1
+        attention_output = attention_outputs[0]
         hidden_states = residual + attention_output
 
         # conv ff (norm -> conv -> residual)
@@ -589,9 +586,12 @@ class T5TTSDecoderLayer(Module):
         hidden_states = self.pos_ff(hidden_states)
         result = residual + hidden_states
 
+        results = [result]
         if use_cache:
-            return (result, presents_self, presents_cross)
-        return result
+            results.extend([presents_self, presents_cross])
+        if self.compute_attention_prior:
+            results.append(attention_prior_scores)
+        return results
 
 
 class T5TTSEncoderModel(PretrainedModel):
@@ -1174,9 +1174,17 @@ class T5TTSDecoderModel(PretrainedModel):
                 cross_kv_cache_gen=cross_kv_cache_gen,
                 cross_kv_reuse=cross_kv_reuse)
 
+            if decoder_layer.compute_attention_prior:
+                attention_prior_scores = hidden_states.pop()
             if use_cache:
-                hidden_states, presents_self, presents_cross = hidden_states
+                presents_cross = hidden_states.pop()
+                presents_self = hidden_states.pop()
                 presents.append((presents_self, presents_cross))
+            assert len(hidden_states) == 1
+            hidden_states = hidden_states[0]
+
+        if attention_prior_scores is not None:
+            attention_prior_scores.mark_output('attention_prior_scores')
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -1413,6 +1421,7 @@ class T5TTSDecoderModel(PretrainedModel):
         if remove_input_padding and use_gpt_attention_plugin:
             # TODO: 5 is a lookahead, make configurable
             scores_dim_range = [x * 5 for x in bb_range]
+            scores_dim_range[0] = 0  # could be zero if not provided
             attention_prior_scores = Tensor(
                 name="attention_prior_scores",
                 dtype=trt.float32,
@@ -1421,12 +1430,14 @@ class T5TTSDecoderModel(PretrainedModel):
                     ("batch_size_beam_width_scores", [scores_dim_range]),
                 ]),
             )
+            focus_dim_range = list(bb_range)
+            focus_dim_range[0] = 0  # could be zero if not provided
             attention_prior_focus = Tensor(
                 name="attention_prior_focus",
                 dtype=trt.int32,
                 shape=[-1],
                 dim_range=OrderedDict([
-                    ("batch_size_beam_width_focus", [bb_range]),
+                    ("batch_size_beam_width_focus", [focus_dim_range]),
                 ]),
             )
 

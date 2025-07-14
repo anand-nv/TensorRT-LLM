@@ -112,7 +112,7 @@ struct FusedQKVMaskedAttentionDispatchParams
     KVLinearBuffer shift_k_cache_buffer;
     bool cross_attention = false;
     float *attention_prior_scores = nullptr;
-    int *attention_prior_focus = nullptr;
+    int const* attention_prior_focus = nullptr;
     int const* memory_length_per_sample = nullptr;
     int max_distance = 0;
     bool block_sparse_attention = false;

@@ -284,7 +284,6 @@ nvinfer1::DimsExprs GPTAttentionPlugin::getOutputDimensions(
 {
     if (mFuseFp4Quant)
     {
-        TLLM_CHECK(outputIndex == 0 || outputIndex == 1 || (!mPagedKVCache && useKVCache() && outputIndex == 2));
         // Compute the output dimension for FP4 quantized tensor. Consistent with QuantizeToFP4Plugin.
         if (outputIndex == 0)
         {
@@ -310,7 +309,6 @@ nvinfer1::DimsExprs GPTAttentionPlugin::getOutputDimensions(
     }
     else
     {
-        TLLM_CHECK(outputIndex == 0 || (!mPagedKVCache && useKVCache() && outputIndex == 1));
         if (outputIndex == 0)
         {
             auto ret = inputs[getIdx(IdxEntry::QKV_TENSOR)];
@@ -321,7 +319,24 @@ nvinfer1::DimsExprs GPTAttentionPlugin::getOutputDimensions(
             return ret;
         }
     }
-    return inputs[getIdx(IdxEntry::PAST_KEY_VALUE)];
+    int out_idx = mFuseFp4Quant ? 2 : 1;
+    if (!mPagedKVCache && useKVCache())
+    {
+        if (outputIndex == out_idx)
+        {
+            return inputs[getIdx(IdxEntry::PAST_KEY_VALUE)];
+        }
+        out_idx++;
+    }
+    if (mComputeAttentionPrior)
+    {
+        if (outputIndex == out_idx)
+        {
+            return inputs[getIdx(IdxEntry::ATTENTION_PRIOR_SCORES)];
+        }
+        out_idx++;
+    }
+    TLLM_CHECK_WITH_INFO(false, "Can't fetch output dimension for %d", outputIndex);
 }
 
 bool GPTAttentionPlugin::supportsFormatCombination(
@@ -444,6 +459,18 @@ bool GPTAttentionPlugin::supportsFormatCombination(
         posCaseLine = __LINE__;
         result = inOut[pos].type == nvinfer1::DataType::kINT32;
     }
+    else if (ComputeAttentionPrior()
+        && (pos == getIdx(IdxEntry::ATTENTION_PRIOR_SCORES) || pos == nbInputs + nbOutputs - 1))
+    {
+        posCaseLine = __LINE__;
+        result = inOut[pos].type == nvinfer1::DataType::kFLOAT;
+    }
+    else if (ApplyAttentionPrior()
+        && (pos == getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)))
+    {
+        posCaseLine = __LINE__;
+        result = inOut[pos].type == nvinfer1::DataType::kINT32;
+    }
     else if (isLognScaling() && pos == getIdx(IdxEntry::LOGN_SCALING))
     {
         return inOut[pos].type == nvinfer1::DataType::kFLOAT;
@@ -477,7 +504,7 @@ bool GPTAttentionPlugin::supportsFormatCombination(
         result = (inOut[pos].type == mType) && (inOut[pos].format == TensorFormat::kLINEAR);
     }
     TLLM_LOG_DEBUG(
-        "%s: pos: %d, result: %d, posCaseLine: %d", __PRETTY_FUNCTION__, pos, static_cast<int>(result), posCaseLine);
+        "%s: pos: %d, result: %d, posCaseLine: %d. Number of inputs %d, number of outputs %d", __PRETTY_FUNCTION__, pos, static_cast<int>(result), posCaseLine, nbInputs, nbOutputs);
     return result;
 }
 
@@ -795,7 +822,7 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
     int max_encoder_context_len = isCrossAttention() ? inputDesc[getIdx(IdxEntry::CROSS_KV_LENGTH)].dims.d[0] : 0;
     // for enc-dec model, since decoder_input_ids could be longer than 1,
     // such model has an encoder context (for cross attn) and an decoder context (for self attn)
-    // clarify 3 lens:
+    // clarify 3 lenses:
     // -- max_context_q_len: len of decoder input. No "max" concept, it's what it is given.
     //                     Also called (decoder_)input_seq_length, normally 1 for encoder-decoder start token
     // -- max_seq_len: max allowed len of decoder output, i.e. final results
@@ -1126,8 +1153,33 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             enqueue_params.spec_decoding_max_generation_length = mSpecDecodingMaxGenerationLength;
         }
         if (isCrossAttention()) {
-            enqueue_params.attention_prior_scores = reinterpret_cast<float*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_SCORES)]);
-            enqueue_params.attention_prior_focus = reinterpret_cast<int*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]);
+            if (mComputeAttentionPrior)
+            {
+                // the attention prior is always last
+                float* attention_prior_scores_out = static_cast<float*>(outputs[getNbOutputs() - 1]);
+                float const* attention_prior_scores_in
+                    = static_cast<float const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_SCORES)]);
+                // checking that TensorRT uses the same buffer for the input and output.
+                // This enforces an in-place update.
+                if (attention_prior_scores_in != attention_prior_scores_out) {
+                    //TLLM_LOG_WARNING("GptAttentionPlugin: attention_prior_scores_in != attention_prior_scores_out, scores are not modified inplace, doing extra copy");
+                    size_t size = sizeof(float) * localNbSeq * 5;
+                    cudaMemcpyAsync(attention_prior_scores_out, attention_prior_scores_in, size, cudaMemcpyDeviceToDevice, stream);
+                }
+                enqueue_params.attention_prior_scores = attention_prior_scores_out;
+            }
+            else
+            {
+                enqueue_params.attention_prior_scores = nullptr;
+            }
+            if (mApplyAttentionPrior)
+            {
+                enqueue_params.attention_prior_focus = static_cast<int const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]);
+            }
+            else 
+            {
+                enqueue_params.attention_prior_focus = nullptr;
+            }
         }
         if (mFuseFp4Quant)
         {
@@ -1234,29 +1286,44 @@ int GPTAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
 // IPluginV2Ext Methods
 nvinfer1::DataType GPTAttentionPlugin::getOutputDataType(
     int index, nvinfer1::DataType const* inputTypes, int nbInputs) const noexcept
-{
-    if (mFuseFp4Quant)
-    {
-        TLLM_CHECK(index == 0 || index == 1 || (!mPagedKVCache && useKVCache() && index == 2));
-    }
-    else
-    {
-        TLLM_CHECK(index == 0 || (!mPagedKVCache && useKVCache() && index == 1));
-    }
-    if (index == 0)
-    {
-        if (mFuseFp4Quant)
-        {
+{   
+    TLLM_LOG_WARNING("GPTAttentionPlugin::getOutputDataType: output type for index %d, %d outputs, paged kv cache %d, use kv cache %d, compute attention prior %d",
+        index, getNbOutputs(), (int)mPagedKVCache, (int)useKVCache(), (int)mComputeAttentionPrior);
+    
+
+    if (mFuseFp4Quant) {
+        if (index == 0) {
             return nvinfer1::DataType::kFP4;
         }
-        return mFP8ContextFMHA && mEnableContextFMHA ? nvinfer1::DataType::kFP8
-                                                     : inputTypes[getIdx(IdxEntry::QKV_TENSOR)];
+        if (index == 1) {
+            return nvinfer1::DataType::kFP8;
+        }
+    } else {
+        if (index == 0) {
+            return mFP8ContextFMHA && mEnableContextFMHA ? nvinfer1::DataType::kFP8 : inputTypes[getIdx(IdxEntry::QKV_TENSOR)];
+        }
     }
-    if (mFuseFp4Quant && index == 1)
+
+    int out_idx = mFuseFp4Quant ? 2 : 1;
+    if (!mPagedKVCache && useKVCache())
     {
-        return nvinfer1::DataType::kFP8;
+        if (index == out_idx)
+        {
+            return inputTypes[getIdx(IdxEntry::PAST_KEY_VALUE)];
+        }
+        out_idx++;
     }
-    return inputTypes[getIdx(IdxEntry::PAST_KEY_VALUE)];
+
+    if (mComputeAttentionPrior)
+    {
+        if (index == out_idx)
+        {
+            return nvinfer1::DataType::kFLOAT;
+        }
+        out_idx++;
+    }
+
+    TLLM_CHECK_WITH_INFO(false, "Can't fetch output type for %d", index);
 }
 
 // IPluginV2 Methods
@@ -1274,7 +1341,11 @@ char const* GPTAttentionPlugin::getPluginVersion() const noexcept
 int GPTAttentionPlugin::getNbOutputs() const noexcept
 {
     int nbOutputs = mFuseFp4Quant ? 2 : 1;
-    if (!mPagedKVCache && useKVCache())
+    if (!mPagedKVCache && useKVCache())  // corresponds to PAST_KEY_VALUE
+    {
+        nbOutputs += 1;
+    }
+    if (mComputeAttentionPrior)  // corresponds to ATTENTION_PRIOR_SCORES
     {
         nbOutputs += 1;
     }

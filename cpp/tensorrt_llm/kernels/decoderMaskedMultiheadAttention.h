@@ -206,7 +206,7 @@ struct Multihead_attention_params_base
     // scores which accumulate window of cross attention probs
     // and focus which specifies which index in encoder output sequence
     float* attention_prior_scores = nullptr;
-    int* attention_prior_focus = nullptr;
+    int const* attention_prior_focus = nullptr;
 };
 
 template <typename T, bool USE_CROSS_ATTENTION = false>
