@@ -412,6 +412,11 @@ def convert_checkpoint(args, model):
         'vocab_size': decoder_config.vocab_size,
         'vocab_sizes': decoder_config.vocab_sizes,
         'use_attention_prior': True,
+        'compute_attention_prior_from_layers': [4,6,10],
+        'apply_attention_prior_to_layers': [4,5,6,7,8,9,10],
+        'attention_prior_lookahead': 5,
+        'attention_prior_window_left': 1,
+        'attention_prior_window_right': 5,
         'position_embedding_type': decoder_config.position_embedding_type,
         'hidden_act': decoder_config.hidden_act,
         'quantization': {

@@ -41,6 +41,7 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads,
     tensorrt_llm::kernels::AttentionMaskType mask_type, tensorrt_llm::kernels::BlockSparseParams block_sparse_params,
     bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
     bool qkv_bias_enabled, bool cross_attention, bool compute_attention_prior, bool apply_attention_prior,
+    int attention_prior_lookahead, int attention_prior_window_left, int attention_prior_window_right,
     int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
     bool use_paged_context_fmha, bool use_fp8_context_fmha, bool has_full_attention_mask, bool use_cache,
     bool is_spec_decoding_enabled, bool spec_decoding_is_generation_length_variable,
@@ -88,6 +89,9 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(int layer_idx, int num_heads,
     mCrossAttention = cross_attention;
     mComputeAttentionPrior = compute_attention_prior;
     mApplyAttentionPrior = apply_attention_prior;
+    mAttentionPriorLookahead = attention_prior_lookahead;
+    mAttentionPriorWindowLeft = attention_prior_window_left;
+    mAttentionPriorWindowRight = attention_prior_window_right;
     mMaxDistance = max_distance;
     mPosShiftEnabled = pos_shift_enabled;
     mDenseContextFMHA = dense_context_fmha;
@@ -152,6 +156,9 @@ GPTAttentionPluginCommon::GPTAttentionPluginCommon(void const* data, size_t leng
     read(d, mCrossAttention);
     read(d, mComputeAttentionPrior);
     read(d, mApplyAttentionPrior);
+    read(d, mAttentionPriorLookahead);
+    read(d, mAttentionPriorWindowLeft);
+    read(d, mAttentionPriorWindowRight);
     read(d, mMaxDistance);
     read(d, mPosShiftEnabled);
     read(d, mDenseContextFMHA);
@@ -218,6 +225,7 @@ size_t GPTAttentionPluginCommon::getCommonSerializationSize() const noexcept
         + sizeof(mRemovePadding) + sizeof(mMaskType) + sizeof(mBlockSparseParams) + sizeof(mPagedKVCache)
         + sizeof(mTokensPerBlock) + sizeof(mType) + sizeof(mMaxContextLength) + sizeof(mQKVBiasEnabled)
         + sizeof(mCrossAttention) + sizeof(mComputeAttentionPrior) + sizeof(mApplyAttentionPrior)
+        + sizeof(mAttentionPriorLookahead) + sizeof(mAttentionPriorWindowLeft) + sizeof(mAttentionPriorWindowRight)
         + sizeof(mMaxDistance) + sizeof(mPosShiftEnabled) + sizeof(mDenseContextFMHA)
         + sizeof(mPagedContextFMHA) + sizeof(mFP8ContextFMHA) + sizeof(mHasFullAttentionMask) + sizeof(mUseKVCache)
         + sizeof(mUnfuseQkvGemm) + sizeof(mUseLognScaling) + sizeof(mIsSpecDecodingEnabled) + sizeof(mUseSpecDecoding)
@@ -270,6 +278,9 @@ void GPTAttentionPluginCommon::serializeCommon(void* buffer) const noexcept
     write(d, mCrossAttention);
     write(d, mComputeAttentionPrior);
     write(d, mApplyAttentionPrior);
+    write(d, mAttentionPriorLookahead);
+    write(d, mAttentionPriorWindowLeft);
+    write(d, mAttentionPriorWindowRight);
     write(d, mMaxDistance);
     write(d, mPosShiftEnabled);
     write(d, mDenseContextFMHA);
@@ -354,6 +365,9 @@ GPTAttentionPluginCreatorCommon::GPTAttentionPluginCreatorCommon()
     mPluginAttributes.emplace_back(PluginField("do_cross_attention", nullptr, PluginFieldType::kINT8));
     mPluginAttributes.emplace_back(PluginField("compute_attention_prior", nullptr, PluginFieldType::kINT8));
     mPluginAttributes.emplace_back(PluginField("apply_attention_prior", nullptr, PluginFieldType::kINT8));
+    mPluginAttributes.emplace_back(PluginField("attention_prior_lookahead", nullptr, PluginFieldType::kINT32));
+    mPluginAttributes.emplace_back(PluginField("attention_prior_window_left", nullptr, PluginFieldType::kINT32));
+    mPluginAttributes.emplace_back(PluginField("attention_prior_window_right", nullptr, PluginFieldType::kINT32));
     mPluginAttributes.emplace_back(PluginField("max_distance", nullptr, PluginFieldType::kINT32));
     mPluginAttributes.emplace_back(PluginField("pos_shift_enabled", nullptr, PluginFieldType::kINT8));
     mPluginAttributes.emplace_back(PluginField("dense_context_fmha", nullptr, PluginFieldType::kINT8));

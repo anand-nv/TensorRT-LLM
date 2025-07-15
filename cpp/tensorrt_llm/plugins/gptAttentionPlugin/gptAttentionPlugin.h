@@ -115,6 +115,7 @@ public:
         tensorrt_llm::kernels::BlockSparseParams block_sparse_params, bool paged_kv_cache, int tokens_per_block,
         nvinfer1::DataType type, int32_t max_context_length, bool qkv_bias_enabled, bool cross_attention = false,
         bool compute_attention_prior = false, bool apply_attention_prior = false,
+        int attention_prior_lookahead = 5, int attention_prior_window_left = 1, int attention_prior_window_right = 5,
         int max_distance = 0, bool pos_shift_enabled = false, bool dense_context_fmha = false,
         bool use_paged_context_fmha = true, bool use_fp8_context_fmha = true, bool has_full_attention_mask = false,
         bool use_cache = true, bool is_spec_decoding_enabled = false,

@@ -388,6 +388,9 @@ class Attention(Module):
                  cross_attention=False,
                  compute_attention_prior=False,
                  apply_attention_prior=False,
+                 attention_prior_lookahead=5,
+                 attention_prior_window_left=1,
+                 attention_prior_window_right=5,
                  relative_attention=False,
                  max_distance=0,
                  num_buckets=0,
@@ -412,6 +415,9 @@ class Attention(Module):
         self.cross_attention = cross_attention
         self.compute_attention_prior = compute_attention_prior
         self.apply_attention_prior = apply_attention_prior
+        self.attention_prior_lookahead = attention_prior_lookahead
+        self.attention_prior_window_left = attention_prior_window_left
+        self.attention_prior_window_right = attention_prior_window_right
         self.attention_mask_type = attention_mask_type
         self.attention_head_size = hidden_size // num_attention_heads if attention_head_size is None else attention_head_size
         assert num_attention_heads % tp_size == 0, \
@@ -1163,6 +1169,9 @@ class Attention(Module):
                 do_cross_attention=self.cross_attention,
                 compute_attention_prior=self.compute_attention_prior,
                 apply_attention_prior=self.apply_attention_prior,
+                attention_prior_lookahead=self.attention_prior_lookahead,
+                attention_prior_window_left=self.attention_prior_window_left,
+                attention_prior_window_right=self.attention_prior_window_right,
                 cross_kv=cross_kv,
                 cross_kv_length=attention_params.encoder_max_input_length,
                 encoder_input_lengths=attention_params.encoder_input_lengths,

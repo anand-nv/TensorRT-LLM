@@ -187,6 +187,56 @@ public:
         mUseAttentionPrior = useAttentionPrior;
     } 
 
+    [[nodiscard]] std::vector<SizeType32> getComputeAttentionPriorFromLayers() const noexcept
+    {
+        return mComputeAttentionPriorFromLayers;
+    }
+    
+    [[nodiscard]] std::vector<SizeType32> getApplyAttentionPriorToLayers() const noexcept
+    {
+        return mApplyAttentionPriorToLayers;
+    }
+    
+    [[nodiscard]] SizeType32 constexpr getAttentionPriorLookahead() const noexcept
+    {
+        return mAttentionPriorLookahead;
+    }
+    
+    [[nodiscard]] SizeType32 constexpr getAttentionPriorWindowLeft() const noexcept
+    {
+        return mAttentionPriorWindowLeft;
+    }
+    
+    [[nodiscard]] SizeType32 constexpr getAttentionPriorWindowRight() const noexcept
+    {
+        return mAttentionPriorWindowRight;
+    }
+
+    void setComputeAttentionPriorFromLayers(std::vector<SizeType32> const& computeAttentionPriorFromLayers) noexcept
+    {
+        mComputeAttentionPriorFromLayers = computeAttentionPriorFromLayers;
+    }
+
+    void setApplyAttentionPriorToLayers(std::vector<SizeType32> const& applyAttentionPriorToLayers) noexcept
+    {
+        mApplyAttentionPriorToLayers = applyAttentionPriorToLayers;
+    }
+
+    void constexpr setAttentionPriorLookahead(SizeType32 attentionPriorLookahead) noexcept
+    {
+        mAttentionPriorLookahead = attentionPriorLookahead;
+    }
+
+    void constexpr setAttentionPriorWindowLeft(SizeType32 attentionPriorWindowLeft) noexcept
+    {
+        mAttentionPriorWindowLeft = attentionPriorWindowLeft;
+    }
+
+    void constexpr setAttentionPriorWindowRight(SizeType32 attentionPriorWindowRight) noexcept
+    {
+        mAttentionPriorWindowRight = attentionPriorWindowRight;
+    }
+
     [[nodiscard]] SizeType32 constexpr getVocabSizePadded(SizeType32 worldSize, SizeType32 vocabSize = 0) const noexcept
     {
         if (vocabSize == 0)
@@ -970,7 +1020,13 @@ private:
 
     // Size of each vocab if there are multiple vocabs
     std::optional<std::vector<SizeType32>> mVocabSizes;
+    // parameters of attention prior
     bool mUseAttentionPrior;
+    std::vector<SizeType32> mComputeAttentionPriorFromLayers;
+    std::vector<SizeType32> mApplyAttentionPriorToLayers;
+    SizeType32 mAttentionPriorLookahead;
+    SizeType32 mAttentionPriorWindowLeft;
+    SizeType32 mAttentionPriorWindowRight;
 };
 
 } // namespace tensorrt_llm::runtime

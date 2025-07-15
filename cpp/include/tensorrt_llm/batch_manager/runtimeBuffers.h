@@ -151,9 +151,12 @@ private:
 
     //! Prompt-Tuning
     std::unique_ptr<PromptTuningBuffers> promptTuningBuffers;
+
+    //! Attention prior
     TensorPtr attentionPriorScores;  // [b*5,]
     TensorPtr attentionPriorFocus;  // [b,]
     bool useAttentionPrior;
+    int attentionPriorLookahead;
 
     //! Mrope
     TensorPtr mropeRotaryCosSin;

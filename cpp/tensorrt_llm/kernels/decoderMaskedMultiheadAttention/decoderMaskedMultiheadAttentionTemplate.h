@@ -1550,16 +1550,14 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     convert_from_float(&kv_scale_orig_quant, (ENABLE_8BITS_KV_CACHE ? params.kv_scale_orig_quant[0] : 1.0f));
 
     // parameters related to attention prior
-    bool const apply_prior = params.attention_prior_focus != nullptr;
     int focus;
-    if (apply_prior) {
+    if (params.attention_prior_focus != nullptr) {
         focus = params.attention_prior_focus[batch_beam_idx];
     }
     bool const store_scores = params.attention_prior_scores != nullptr;
     float *scores_ptr = nullptr;
     if (store_scores) {
-        // TODO: 5 is a hardcoded lookahead, need to make it configurable
-        scores_ptr = &params.attention_prior_scores[batch_beam_idx * 5];
+        scores_ptr = &params.attention_prior_scores[batch_beam_idx * params.attention_prior_lookahead];
     }
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
@@ -1902,7 +1900,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         {
             // We need to store the qk result to the end of the qk_smem for cyclic kv cache (+ 1 for smem memory
             // allocation) because the previous cache will still write to the new_cache_pos of qk_smem.
-            if (DO_CROSS_ATTENTION && apply_prior && kv_loop_length - focus > 6) {
+            if (DO_CROSS_ATTENTION && params.apply_attention_prior && kv_loop_length - focus > 6) {
                 // this is hardcoded window that we keep unmasked
                 qk -= 1e9;
             }
@@ -2110,9 +2108,9 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 }
             }
 
-            if (is_active && DO_CROSS_ATTENTION && is_leader && apply_prior) {
+            if (is_active && DO_CROSS_ATTENTION && is_leader && params.apply_attention_prior) {
                 // apply attention prior: values that are not within a window around `focus` are penalized
-                if (local_time_now < (focus - 1) || local_time_now >= (focus + 5)) {
+                if (local_time_now < (focus - params.attention_prior_window_left) || local_time_now >= (focus + params.attention_prior_window_right)) {
                     qk_ -= 1e9;
                 }
             }
@@ -2302,7 +2300,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         {
             float prob = qk_smem[ti] * inv_sum;
             if (DO_CROSS_ATTENTION) {
-                if (store_scores && ti >= focus && ti < focus + 5) {
+                if (store_scores && ti >= focus && ti < focus + params.attention_prior_lookahead) {
                     scores_ptr[ti - focus] = prob;
                 }
             }

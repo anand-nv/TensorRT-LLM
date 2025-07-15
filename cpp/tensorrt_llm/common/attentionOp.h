@@ -306,6 +306,21 @@ public:
         return mApplyAttentionPrior;
     }
 
+    [[nodiscard]] int AttentionPriorLookahead() const
+    {
+        return mAttentionPriorLookahead;
+    }
+
+    [[nodiscard]] int AttentionPriorWindowLeft() const
+    {
+        return mAttentionPriorWindowLeft;
+    }
+
+    [[nodiscard]] int AttentionPriorWindowRight() const
+    {
+        return mAttentionPriorWindowRight;
+    }
+
     [[nodiscard]] bool useKVCache() const
     {
         return mUseKVCache;
@@ -383,6 +398,9 @@ public:
     bool mCrossAttention = false;
     bool mComputeAttentionPrior = false;
     bool mApplyAttentionPrior = false;
+    int mAttentionPriorLookahead = 5;
+    int mAttentionPriorWindowLeft = 1;
+    int mAttentionPriorWindowRight = 5;
     int mMaxDistance = 0;
     bool mPosShiftEnabled = false;
     bool mPagedContextFMHA = false;

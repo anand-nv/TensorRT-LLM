@@ -331,6 +331,11 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
             py::overload_cast<bool>(&tr::ModelConfig::usePackedInput))
         .def_property("use_attention_prior", py::overload_cast<>(&tr::ModelConfig::useAttentionPrior, py::const_),
             py::overload_cast<bool>(&tr::ModelConfig::useAttentionPrior))
+        .def_property("compute_attention_prior_from_layers", &tr::ModelConfig::getComputeAttentionPriorFromLayers, &tr::ModelConfig::setComputeAttentionPriorFromLayers)
+        .def_property("apply_attention_prior_to_layers", &tr::ModelConfig::getApplyAttentionPriorToLayers, &tr::ModelConfig::setApplyAttentionPriorToLayers)
+        .def_property("attention_prior_lookahead", &tr::ModelConfig::getAttentionPriorLookahead, &tr::ModelConfig::setAttentionPriorLookahead)
+        .def_property("attention_prior_window_left", &tr::ModelConfig::getAttentionPriorWindowLeft, &tr::ModelConfig::setAttentionPriorWindowLeft)
+        .def_property("attention_prior_window_right", &tr::ModelConfig::getAttentionPriorWindowRight, &tr::ModelConfig::setAttentionPriorWindowRight)
         .def_property("kv_cache_type", py::overload_cast<>(&tr::ModelConfig::getKVCacheType, py::const_),
             py::overload_cast<tr::ModelConfig::KVCacheType>(&tr::ModelConfig::setKVCacheType))
         .def_property("tokens_per_block", &tr::ModelConfig::getTokensPerBlock, &tr::ModelConfig::setTokensPerBlock)

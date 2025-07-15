@@ -60,6 +60,7 @@ GPTAttentionPlugin::GPTAttentionPlugin(int layer_idx, int num_heads, int vision_
     tensorrt_llm::kernels::AttentionMaskType mask_type, tensorrt_llm::kernels::BlockSparseParams block_sparse_params,
     bool paged_kv_cache, int tokens_per_block, nvinfer1::DataType type, int32_t max_context_length,
     bool qkv_bias_enabled, bool cross_attention, bool compute_attention_prior, bool apply_attention_prior,
+    int attention_prior_lookahead, int attention_prior_window_left, int attention_prior_window_right,
     int max_distance, bool pos_shift_enabled, bool dense_context_fmha,
     bool use_paged_context_fmha, bool use_fp8_context_fmha, bool has_full_attention_mask, bool use_cache,
     bool is_spec_decoding_enabled, bool spec_decoding_is_generation_length_variable,
@@ -73,6 +74,7 @@ GPTAttentionPlugin::GPTAttentionPlugin(int layer_idx, int num_heads, int vision_
         rotary_embedding_original_max_positions, tp_size, tp_rank, unfuse_qkv_gemm, use_logn_scaling, context_fmha_type,
         kv_cache_quant_mode, remove_input_padding, mask_type, block_sparse_params, paged_kv_cache, tokens_per_block,
         type, max_context_length, qkv_bias_enabled, cross_attention, compute_attention_prior, apply_attention_prior,
+        attention_prior_lookahead, attention_prior_window_left, attention_prior_window_right,
         max_distance, pos_shift_enabled, dense_context_fmha,
         use_paged_context_fmha, use_fp8_context_fmha, has_full_attention_mask, use_cache,
         is_spec_decoding_enabled, spec_decoding_is_generation_length_variable, spec_decoding_max_generation_length,
@@ -1168,7 +1170,7 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             {
                 enqueue_params.attention_prior_scores = nullptr;
             }
-            if (mApplyAttentionPrior)
+            if (mApplyAttentionPrior || mComputeAttentionPrior)
             {
                 enqueue_params.attention_prior_focus = static_cast<int const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]);
             }
@@ -1282,11 +1284,7 @@ int GPTAttentionPlugin::enqueue(nvinfer1::PluginTensorDesc const* inputDesc,
 // IPluginV2Ext Methods
 nvinfer1::DataType GPTAttentionPlugin::getOutputDataType(
     int index, nvinfer1::DataType const* inputTypes, int nbInputs) const noexcept
-{   
-    TLLM_LOG_WARNING("GPTAttentionPlugin::getOutputDataType: output type for index %d, %d outputs, paged kv cache %d, use kv cache %d, compute attention prior %d",
-        index, getNbOutputs(), (int)mPagedKVCache, (int)useKVCache(), (int)mComputeAttentionPrior);
-    
-
+{
     if (mFuseFp4Quant) {
         if (index == 0) {
             return nvinfer1::DataType::kFP4;
@@ -1420,6 +1418,9 @@ IPluginV2* GPTAttentionPluginCreator::createPlugin(char const* name, PluginField
             static_cast<bool>(p.getScalar<int8_t>("do_cross_attention").value()),
             static_cast<bool>(p.getScalar<int8_t>("compute_attention_prior").value()),
             static_cast<bool>(p.getScalar<int8_t>("apply_attention_prior").value()),
+            p.getScalar<int32_t>("attention_prior_lookahead").value(),
+            p.getScalar<int32_t>("attention_prior_window_left").value(),
+            p.getScalar<int32_t>("attention_prior_window_right").value(),
             static_cast<int32_t>(p.getScalar<int32_t>("max_distance").value()),
             static_cast<bool>(p.getScalar<int8_t>("pos_shift_enabled").value()),
             static_cast<bool>(p.getScalar<int8_t>("dense_context_fmha").value()),

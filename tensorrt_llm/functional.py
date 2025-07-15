@@ -5183,6 +5183,9 @@ def gpt_attention(
     do_cross_attention: bool = False,
     compute_attention_prior: bool = False,
     apply_attention_prior: bool = False,
+    attention_prior_lookahead: int = 5,
+    attention_prior_window_left: int = 1,
+    attention_prior_window_right: int = 5,
     cross_kv: Optional[Tensor] = None,  # for cross attention
     cross_kv_length: Optional[Tensor] = None,  # for cross attention
     encoder_input_lengths: Optional[Tensor] = None,  # for cross attention
@@ -5716,7 +5719,18 @@ def gpt_attention(
         "apply_attention_prior",
         np.array(np.int8(apply_attention_prior), dtype=np.int8),
         trt.PluginFieldType.INT8)
-
+    attention_prior_lookahead_field = trt.PluginField(
+        "attention_prior_lookahead",
+        np.array(attention_prior_lookahead, dtype=np.int32),
+        trt.PluginFieldType.INT32)
+    attention_prior_window_left_field = trt.PluginField(
+        "attention_prior_window_left",
+        np.array(attention_prior_window_left, dtype=np.int32),
+        trt.PluginFieldType.INT32)
+    attention_prior_window_right_field = trt.PluginField(
+        "attention_prior_window_right",
+        np.array(attention_prior_window_right, dtype=np.int32),
+        trt.PluginFieldType.INT32)
     max_distance = trt.PluginField("max_distance",
                                    np.array(max_distance, dtype=np.int32),
                                    trt.PluginFieldType.INT32)
@@ -5766,7 +5780,9 @@ def gpt_attention(
         block_sparse_num_local_blocks, block_sparse_vertical_stride,
         paged_kv_cache, tokens_per_block, pf_type, max_context_length,
         qkv_bias_enabled, do_cross_attention_field, 
-        compute_attention_prior_field, apply_attention_prior_field, max_distance,
+        compute_attention_prior_field, apply_attention_prior_field,
+        attention_prior_lookahead_field, attention_prior_window_left_field,
+        attention_prior_window_right_field, max_distance,
         pos_shift_enabled, dense_context_fmha, use_paged_context_fmha_field,
         use_fp8_context_fmha_field, has_full_attention_mask_field, use_cache_pf,
         is_spec_decoding_enabled, spec_decoding_is_generation_length_variable,

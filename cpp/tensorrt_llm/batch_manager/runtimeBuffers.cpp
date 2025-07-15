@@ -51,7 +51,7 @@ RuntimeBuffers::RuntimeBuffers(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     executor::DecodingConfig const& decodingConfig, bool gatherGenerationLogits, std::optional<SizeType32> maxNumTokens,
-    std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs) : useAttentionPrior(false)
+    std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
@@ -202,8 +202,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         tensor->reshape(shape);
     }
     if (useAttentionPrior) {
-        // TODO: make lookahead configurable
-        attentionPriorScores->reshape(ITensor::makeShape({5 * getNumSequences()}));
+        attentionPriorScores->reshape(ITensor::makeShape({attentionPriorLookahead * getNumSequences()}));
         attentionPriorFocus->reshape(ITensor::makeShape({getNumSequences()}));
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -217,6 +216,7 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     useAttentionPrior = modelConfig.useAttentionPrior();
+    attentionPriorLookahead = modelConfig.getAttentionPriorLookahead();
 
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
@@ -983,20 +983,21 @@ void RuntimeBuffers::processAttentionPriorScores(
     // copy scores to host
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
-    auto scoresHost = manager.cpu(ITensor::makeShape({getNumSequences() * 5}), nvinfer1::DataType::kFLOAT);
+    auto scoresHost = manager.cpu(
+        ITensor::makeShape({getNumSequences() * attentionPriorLookahead}),
+        nvinfer1::DataType::kFLOAT
+    );
     manager.copy(*attentionPriorScores, *scoresHost);
     stream.synchronize();
 
-    // TODO: remove hardcode of lookahead size, move to modelConfig
-    size_t lookaheadSize = 5;
     // for each generation request, analyze scores and set the attention prior idx
-    size_t scoresOffset = numContextRequests * lookaheadSize;
+    size_t scoresOffset = numContextRequests * attentionPriorLookahead;
     auto* scoresHostPtr = bufferCast<float>(*scoresHost);
     for (auto const& llmReq : genRequests) {
         size_t prevPriorIdx = llmReq->getAttentionPriorIdx();
         float maxScore = scoresHostPtr[scoresOffset];
-        size_t idxShift = 0;
-        for (size_t i = 1; i < lookaheadSize; i++) {
+        int idxShift = 0;
+        for (int i = 1; i < attentionPriorLookahead; i++) {
             if (scoresHostPtr[scoresOffset + i] > maxScore) {
                 maxScore = scoresHostPtr[scoresOffset + i];
                 idxShift = i;
@@ -1006,7 +1007,7 @@ void RuntimeBuffers::processAttentionPriorScores(
         llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift);
 
         // TODO: remove hardcode of lookahead size
-        scoresOffset += lookaheadSize * llmReq->getNumSequences();
+        scoresOffset += attentionPriorLookahead * llmReq->getNumSequences();
     }
 }
 

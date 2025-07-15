@@ -420,11 +420,16 @@ class T5TTSDecoderLayer(Module):
                  num_buckets=0,
                  fp16_clamping=False,
                  skip_cross_kv=False,
-                 use_implicit_relative_attention=False):
+                 use_implicit_relative_attention=False,
+                 compute_attention_prior=False,
+                 apply_attention_prior=False,
+                 attention_prior_lookahead=5,
+                 attention_prior_window_left=1,
+                 attention_prior_window_right=5):
         super().__init__()
 
         self.has_encoder_input_layernorm = has_encoder_input_layernorm
-        self.compute_attention_prior = local_layer_idx in COMPUTE_SCORES_FROM_LAYERS
+        self.compute_attention_prior = compute_attention_prior
 
         # e.g. BART regular, T5 RMS
         self.layernorm_type = layernorm_type
@@ -482,7 +487,10 @@ class T5TTSDecoderLayer(Module):
             dtype=dtype,
             cross_attention=True,
             compute_attention_prior=self.compute_attention_prior,
-            apply_attention_prior=local_layer_idx in APPLY_PRIOR_TO_LAYERS,
+            apply_attention_prior=apply_attention_prior,
+            attention_prior_lookahead=attention_prior_lookahead,
+            attention_prior_window_left=attention_prior_window_left,
+            attention_prior_window_right=attention_prior_window_right,
             relative_attention=False,  # Cross attention has no relative attention bias
             max_distance=max_distance,
             num_buckets=num_buckets,
@@ -1049,7 +1057,17 @@ class T5TTSDecoderModel(PretrainedModel):
                 fp16_clamping=self.fp16_clamping,
                 skip_cross_kv=self.skip_cross_kv,
                 use_implicit_relative_attention=self.
-                use_implicit_relative_attention) for layer_idx in layers_range
+                use_implicit_relative_attention,
+                compute_attention_prior=(
+                    layer_idx in self.config.compute_attention_prior_from_layers and self.config.use_attention_prior
+                ),
+                apply_attention_prior=(
+                    layer_idx in self.config.apply_attention_prior_to_layers and self.config.use_attention_prior
+                ),
+                attention_prior_lookahead=self.config.attention_prior_lookahead,
+                attention_prior_window_left=self.config.attention_prior_window_left,
+                attention_prior_window_right=self.config.attention_prior_window_right,
+            ) for layer_idx in layers_range
         ])
 
         if self.mapping.is_last_pp_rank():
