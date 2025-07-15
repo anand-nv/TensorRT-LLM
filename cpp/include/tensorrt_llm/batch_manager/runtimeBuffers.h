@@ -292,7 +292,7 @@ public:
         runtime::WorldConfig const& worldConfig);
 
     void processAttentionPriorScores(RequestVector const& genRequests,
-        runtime::TllmRuntime const& runtime);
+        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig);
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> const& maxAttentionWindowVec,

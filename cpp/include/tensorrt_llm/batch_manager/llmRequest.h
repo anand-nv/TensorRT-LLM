@@ -1800,11 +1800,12 @@ public:
         return mRequestedBlockHashes;
     }
 
-    void setAttentionPriorIdx(SizeType32 attentionPriorIdx)
+    void setAttentionPriorIdx(SizeType32 attentionPriorIdx, runtime::ModelConfig const& modelConfig)
     {
-        if (attentionPriorIdx > (getEncoderOutputLen() - 5)) {
+        auto const lastIdx = getEncoderOutputLen() - modelConfig.getAttentionPriorWindowRight() - 1;
+        if (attentionPriorIdx > lastIdx) {
             // no need to move futher the attention window will cover all tokens till end 
-            attentionPriorIdx = getEncoderOutputLen() - 5;
+            attentionPriorIdx = lastIdx;
         }
         mAttentionPriorIdx = attentionPriorIdx;
         if (mAttentionPriorCounters.size() == 0) {
@@ -1813,12 +1814,12 @@ public:
             mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
         }
         mAttentionPriorCounters[attentionPriorIdx]++;
-        if (attentionPriorIdx >= getEncoderOutputLen() - 5) {
+        if (attentionPriorIdx >= lastIdx) {
             mAttentionPriorCounterCloseToEnd++;
         }
         else if (mAttentionPriorCounters[attentionPriorIdx] >= 8) {
             // increment to avoid getting stuck in the same encoder output
-            setAttentionPriorIdx(attentionPriorIdx + 1);
+            setAttentionPriorIdx(attentionPriorIdx + 1, modelConfig);
         }
     }
 
@@ -1827,15 +1828,10 @@ public:
         return mAttentionPriorCounterCloseToEnd >= 20;
     }
 
-    bool hasAttentionPriorIdx() const
-    {
-        return mAttentionPriorIdx.has_value();
-    }
-
-    [[nodiscard]] SizeType32 getAttentionPriorIdx()
+    [[nodiscard]] SizeType32 getAttentionPriorIdx(runtime::ModelConfig const& modelConfig)
     {
         if (!mAttentionPriorIdx.has_value()) {
-            setAttentionPriorIdx(1);
+            setAttentionPriorIdx(1, modelConfig);
         }
         // `setAttentionPriorIdx` takes care to avoid getting stuck in the same encoder output,
         // it is expected that `mAttentionPriorCounters[mAttentionPriorIdx]` is always < 8

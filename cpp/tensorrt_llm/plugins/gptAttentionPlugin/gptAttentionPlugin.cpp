@@ -335,7 +335,7 @@ nvinfer1::DimsExprs GPTAttentionPlugin::getOutputDimensions(
             auto shape = nvinfer1::DimsExprs{1, {exprBuilder.operation(
                 DimensionOperation::kPROD,
                 *inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)].d[0],
-                *exprBuilder.constant(5))}
+                *exprBuilder.constant(mAttentionPriorLookahead))}
             };
             return shape;
         }
@@ -1163,7 +1163,7 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
                 // the attention prior is always last
                 float* attention_prior_scores_out = static_cast<float*>(outputs[getNbOutputs() - 1]);
                 // advance the prior scores pointer, skipping the space reserved for context requests
-                attention_prior_scores_out += contextNbSeq * 5;
+                attention_prior_scores_out += contextNbSeq * mAttentionPriorLookahead;
                 enqueue_params.attention_prior_scores = attention_prior_scores_out;
             }
             else

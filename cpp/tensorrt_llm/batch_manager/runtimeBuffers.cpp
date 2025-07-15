@@ -821,7 +821,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             for (auto const& llmReq : genRequests) {
                 for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++) {
                     focus_lst.push_back(
-                        llmReq->getAttentionPriorIdx()
+                        llmReq->getAttentionPriorIdx(modelConfig)
                     );
                 }
             }
@@ -969,7 +969,7 @@ void RuntimeBuffers::prepareEagleBuffers(RequestVector const& contextRequests, R
 }
 
 void RuntimeBuffers::processAttentionPriorScores(
-    RequestVector const& genRequests, TllmRuntime const& runtime)
+    RequestVector const& genRequests, TllmRuntime const& runtime, ModelConfig const& modelConfig)
 {
     /**
      * is called after inference is done. processes the "scores" buffer and sets up
@@ -994,7 +994,7 @@ void RuntimeBuffers::processAttentionPriorScores(
     size_t scoresOffset = numContextRequests * attentionPriorLookahead;
     auto* scoresHostPtr = bufferCast<float>(*scoresHost);
     for (auto const& llmReq : genRequests) {
-        size_t prevPriorIdx = llmReq->getAttentionPriorIdx();
+        size_t prevPriorIdx = llmReq->getAttentionPriorIdx(modelConfig);
         float maxScore = scoresHostPtr[scoresOffset];
         int idxShift = 0;
         for (int i = 1; i < attentionPriorLookahead; i++) {
@@ -1004,7 +1004,7 @@ void RuntimeBuffers::processAttentionPriorScores(
             }
         }
 
-        llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift);
+        llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);
 
         // TODO: remove hardcode of lookahead size
         scoresOffset += attentionPriorLookahead * llmReq->getNumSequences();

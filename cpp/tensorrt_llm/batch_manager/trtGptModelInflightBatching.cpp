@@ -968,7 +968,8 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             if (mModelConfig.useAttentionPrior()) {
                 mBuffers[getFusedBufferId()]->processAttentionPriorScores(
                     currRequests.generationRequests,
-                    *mRuntime
+                    *mRuntime,
+                    mModelConfig
                 );
             }
 
