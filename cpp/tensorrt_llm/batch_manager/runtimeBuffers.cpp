@@ -818,10 +818,12 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             manager.setMem(*attentionPriorScores, 0);
             // copy focus indices from llm requests to a buffer
             std::vector<int> focus_lst(numContextRequests, 0);
-            for (SizeType32 i = 0; i < numGenSequences; i++) {
-                focus_lst.push_back(
-                    genRequests[i]->getAttentionPriorIdx()
-                );
+            for (auto const& llmReq : genRequests) {
+                for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++) {
+                    focus_lst.push_back(
+                        llmReq->getAttentionPriorIdx()
+                    );
+                }
             }
             manager.copy(focus_lst.data(), *attentionPriorFocus, runtime::MemoryType::kCPU);
         }
