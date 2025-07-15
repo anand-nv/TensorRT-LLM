@@ -203,8 +203,8 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     }
     if (useAttentionPrior) {
         // TODO: make lookahead configurable
-        attentionPriorScores->reshape(ITensor::makeShape({5 * numGenSequences}));
-        attentionPriorFocus->reshape(ITensor::makeShape({numGenSequences}));
+        attentionPriorScores->reshape(ITensor::makeShape({5 * getNumSequences()}));
+        attentionPriorFocus->reshape(ITensor::makeShape({getNumSequences()}));
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
@@ -817,7 +817,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             // set to zero attention prior scores, so scores from different layers can be accumulated
             manager.setMem(*attentionPriorScores, 0);
             // copy focus indices from llm requests to a buffer
-            std::vector<int> focus_lst;
+            std::vector<int> focus_lst(numContextRequests, 0);
             for (SizeType32 i = 0; i < numGenSequences; i++) {
                 focus_lst.push_back(
                     genRequests[i]->getAttentionPriorIdx()
@@ -981,14 +981,14 @@ void RuntimeBuffers::processAttentionPriorScores(
     // copy scores to host
     auto const& manager = runtime.getBufferManager();
     auto const& stream = runtime.getStream();
-    auto scoresHost = manager.cpu(ITensor::makeShape({numGenSequences * 5}), nvinfer1::DataType::kFLOAT);
+    auto scoresHost = manager.cpu(ITensor::makeShape({getNumSequences() * 5}), nvinfer1::DataType::kFLOAT);
     manager.copy(*attentionPriorScores, *scoresHost);
     stream.synchronize();
 
-    // for each generation request, analyze scores and set the attention prior idx
-    size_t scoresOffset = 0;
     // TODO: remove hardcode of lookahead size, move to modelConfig
     size_t lookaheadSize = 5;
+    // for each generation request, analyze scores and set the attention prior idx
+    size_t scoresOffset = numContextRequests * lookaheadSize;
     auto* scoresHostPtr = bufferCast<float>(*scoresHost);
     for (auto const& llmReq : genRequests) {
         size_t prevPriorIdx = llmReq->getAttentionPriorIdx();
@@ -1092,7 +1092,6 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     inputMap.insert_or_assign(kHostContextLengthsTensorName, contextLengthsHost);
     inputMap.insert_or_assign(kSequenceLengthsTensorName, sequenceLengthsDevice);
     if (useAttentionPrior) {
-        inputMap.insert_or_assign(kAttentionPriorScoresTensorName, attentionPriorScores);
         inputMap.insert_or_assign(kAttentionPriorFocusTensorName, attentionPriorFocus);
     }
     if (modelConfig.useCrossAttention())
@@ -1139,7 +1138,7 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
         eagleBuffers->insertInputTensors(inputMap, outputMap, worldConfig);
     }
     if (useAttentionPrior) {
-        outputMap.insert_or_assign("attention_prior_scores", attentionPriorScores);
+        outputMap.insert_or_assign(kAttentionPriorScoresTensorName, attentionPriorScores);
     }
     for (auto const& outputTensor : mAdditionalOutputTensors)
     {

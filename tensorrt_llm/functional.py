@@ -5186,7 +5186,6 @@ def gpt_attention(
     cross_kv: Optional[Tensor] = None,  # for cross attention
     cross_kv_length: Optional[Tensor] = None,  # for cross attention
     encoder_input_lengths: Optional[Tensor] = None,  # for cross attention
-    attention_prior_scores: Optional[Tensor] = None,  # when computing prior is enabled
     attention_prior_focus: Optional[Tensor] = None,  # when applying prior is enabled
     relative_attention_bias: Optional[Tensor] = None,  # for relative attention
     logn_scaling: Optional[Tensor] = None,  # for logn scaling
@@ -5428,9 +5427,6 @@ def gpt_attention(
 
         encoder_input_lengths: Tensor
             The tensor that stores the length of each encoder input sequence. Its shape is [batch_size],
-
-        attention_prior_scores: Optional[Tensor] = None
-            (B * 5,) accumulator to which a window of cross attention probabilities is added
 
         attention_prior_focus: Optional[Tensor] = None
             (B,) for each sequence specifies where start of the region on which to focus in cross attention.
@@ -5845,8 +5841,6 @@ def gpt_attention(
     if do_cross_attention:
         plug_inputs += [cross_kv, cross_kv_length, encoder_input_lengths]
 
-        if compute_attention_prior:
-            plug_inputs += [attention_prior_scores]
         if apply_attention_prior:
             plug_inputs += [attention_prior_focus]
 

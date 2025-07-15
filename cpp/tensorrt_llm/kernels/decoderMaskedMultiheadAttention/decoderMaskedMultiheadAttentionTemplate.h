@@ -2312,7 +2312,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             if (DO_CROSS_ATTENTION) {
                 printf("prob[%d]=%f ", ti, prob);
                 if (store_scores && ti >= focus && ti < focus + 5) {
-                    scores_ptr[ti - focus] += prob;
+                    scores_ptr[ti - focus] = prob;
                 }
             }
             convert_from_float(&logits_smem[ti], prob);

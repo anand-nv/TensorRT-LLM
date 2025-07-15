@@ -1802,6 +1802,10 @@ public:
 
     void setAttentionPriorIdx(SizeType32 attentionPriorIdx)
     {
+        if (attentionPriorIdx > (getEncoderOutputLen() - 5)) {
+            // no need to move futher the attention window will cover all tokens till end 
+            attentionPriorIdx = getEncoderOutputLen() - 5;
+        }
         mAttentionPriorIdx = attentionPriorIdx;
         if (mAttentionPriorCounters.size() == 0) {
             // TODO: lazy initialization due to inconsistencies between
@@ -1812,7 +1816,7 @@ public:
         if (attentionPriorIdx >= getEncoderOutputLen() - 5) {
             mAttentionPriorCounterCloseToEnd++;
         }
-        if (mAttentionPriorCounters[attentionPriorIdx] >= 8) {
+        else if (mAttentionPriorCounters[attentionPriorIdx] >= 8) {
             // increment to avoid getting stuck in the same encoder output
             setAttentionPriorIdx(attentionPriorIdx + 1);
         }

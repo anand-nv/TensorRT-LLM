@@ -125,7 +125,6 @@ std::string GPTAttentionPlugin::toString(IdxEntry const& entry) const
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(CROSS_KV);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(CROSS_KV_LENGTH);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(ENCODER_INPUT_LENGTH);
-        TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(ATTENTION_PRIOR_SCORES);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(ATTENTION_PRIOR_FOCUS);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(HOST_CONTEXT_LENGTH);
         TLLM_GPT_ATTN_IDX_ENTRY_TO_STRING(QKV_BIAS_TENSOR);
@@ -184,7 +183,6 @@ bool GPTAttentionPlugin::isEntryUsed(IdxEntry const& entry) const
     case IdxEntry::CROSS_KV_LENGTH: return isCrossAttention();
     case IdxEntry::LOGN_SCALING: return isLognScaling();
     case IdxEntry::ENCODER_INPUT_LENGTH: return isCrossAttention();
-    case IdxEntry::ATTENTION_PRIOR_SCORES: return ComputeAttentionPrior();
     case IdxEntry::ATTENTION_PRIOR_FOCUS: return ApplyAttentionPrior();
     case IdxEntry::HOST_CONTEXT_LENGTH: return mRemovePadding;
     case IdxEntry::QKV_BIAS_TENSOR: return mQKVBiasEnabled;
@@ -331,8 +329,13 @@ nvinfer1::DimsExprs GPTAttentionPlugin::getOutputDimensions(
     if (mComputeAttentionPrior)
     {
         if (outputIndex == out_idx)
-        {
-            return inputs[getIdx(IdxEntry::ATTENTION_PRIOR_SCORES)];
+        {   
+            auto shape = nvinfer1::DimsExprs{1, {exprBuilder.operation(
+                DimensionOperation::kPROD,
+                *inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)].d[0],
+                *exprBuilder.constant(5))}
+            };
+            return shape;
         }
         out_idx++;
     }
@@ -459,8 +462,7 @@ bool GPTAttentionPlugin::supportsFormatCombination(
         posCaseLine = __LINE__;
         result = inOut[pos].type == nvinfer1::DataType::kINT32;
     }
-    else if (ComputeAttentionPrior()
-        && (pos == getIdx(IdxEntry::ATTENTION_PRIOR_SCORES) || pos == nbInputs + nbOutputs - 1))
+    else if (ComputeAttentionPrior() && pos == (nbInputs + nbOutputs - 1))
     {
         posCaseLine = __LINE__;
         result = inOut[pos].type == nvinfer1::DataType::kFLOAT;
@@ -678,16 +680,17 @@ int GPTAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc,
         TLLM_CHECK(mRemovePadding && mPagedKVCache);
     }
 
+    auto nbGenerationSeq = nbSeq - nbContextRequests;
     if (nbContextRequests > 0)
     {
         auto seqIdxBeg = 0;
         auto tokenIdxBeg = 0;
         auto localNbTokens = contextTokenIdxEnd;
-        enqueueSome<T, AttentionOutT, KVCacheBuffer>(seqIdxBeg, nbContextRequests, tokenIdxBeg, localNbTokens,
+        enqueueSome<T, AttentionOutT, KVCacheBuffer>(seqIdxBeg, nbContextRequests, 0, tokenIdxBeg, localNbTokens,
             inputDesc, outputDesc, inputs, outputs, workspace, stream);
     }
 
-    if (auto nbGenerationSeq = nbSeq - nbContextRequests; nbGenerationSeq > 0)
+    if (nbGenerationSeq > 0)
     {
         auto seqIdxBeg = nbContextRequests;
         auto tokenIdxBeg = mCpSize > 1 ? contextTokenIdxEndForCp : contextTokenIdxEnd;
@@ -697,7 +700,7 @@ int GPTAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc,
         auto localNbTokens = mRemovePadding
             ? inputDesc[getIdx(IdxEntry::QKV_TENSOR)].dims.d[0] - tokenIdxBeg
             : inputDesc[getIdx(IdxEntry::QKV_TENSOR)].dims.d[0] * inputDesc[getIdx(IdxEntry::QKV_TENSOR)].dims.d[1];
-        enqueueSome<T, AttentionOutT, KVCacheBuffer>(seqIdxBeg, nbGenerationSeq, tokenIdxBeg, localNbTokens, inputDesc,
+        enqueueSome<T, AttentionOutT, KVCacheBuffer>(seqIdxBeg, nbGenerationSeq, nbContextRequests, tokenIdxBeg, localNbTokens, inputDesc,
             outputDesc, inputs, outputs, workspace, stream);
     }
 
@@ -708,7 +711,7 @@ int GPTAttentionPlugin::enqueueImpl(nvinfer1::PluginTensorDesc const* inputDesc,
 }
 
 template <typename T, typename AttentionOutT, typename KVCacheBuffer>
-int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32_t tokenIdxBeg, int32_t localNbTokens,
+int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32_t contextNbSeq, int32_t tokenIdxBeg, int32_t localNbTokens,
     nvinfer1::PluginTensorDesc const* inputDesc, nvinfer1::PluginTensorDesc const* outputDesc,
     void const* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream)
 {
@@ -1157,15 +1160,8 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             {
                 // the attention prior is always last
                 float* attention_prior_scores_out = static_cast<float*>(outputs[getNbOutputs() - 1]);
-                float const* attention_prior_scores_in
-                    = static_cast<float const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_SCORES)]);
-                // checking that TensorRT uses the same buffer for the input and output.
-                // This enforces an in-place update.
-                if (attention_prior_scores_in != attention_prior_scores_out) {
-                    //TLLM_LOG_WARNING("GptAttentionPlugin: attention_prior_scores_in != attention_prior_scores_out, scores are not modified inplace, doing extra copy");
-                    size_t size = sizeof(float) * localNbSeq * 5;
-                    cudaMemcpyAsync(attention_prior_scores_out, attention_prior_scores_in, size, cudaMemcpyDeviceToDevice, stream);
-                }
+                // advance the prior scores pointer, skipping the space reserved for context requests
+                attention_prior_scores_out += contextNbSeq * 5;
                 enqueue_params.attention_prior_scores = attention_prior_scores_out;
             }
             else

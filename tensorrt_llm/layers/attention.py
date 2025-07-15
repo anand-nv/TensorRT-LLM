@@ -768,7 +768,6 @@ class Attention(Module):
         kv_cache_params=None,
         attention_params=None,
         encoder_output: Optional[Tensor] = None,
-        attention_prior_scores: Optional[Tensor] = None,
         attention_prior_focus: Optional[Tensor] = None,
         position_embedding=None,
         norm_before_bmm1=False,
@@ -1167,7 +1166,6 @@ class Attention(Module):
                 cross_kv=cross_kv,
                 cross_kv_length=attention_params.encoder_max_input_length,
                 encoder_input_lengths=attention_params.encoder_input_lengths,
-                attention_prior_scores=attention_prior_scores,
                 attention_prior_focus=attention_prior_focus,
                 logn_scaling=logn_scaling,
                 relative_attention_bias=self.rel_attn_table.value

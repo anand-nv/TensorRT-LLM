@@ -174,7 +174,7 @@ public:
 
 private:
     template <typename T, typename AttentionOutT, typename KVCacheBuffer>
-    int enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32_t tokenIdxBeg, int32_t localNbTokens,
+    int enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32_t contextNbSeq, int32_t tokenIdxBeg, int32_t localNbTokens,
         nvinfer1::PluginTensorDesc const* inputDesc, nvinfer1::PluginTensorDesc const* outputDesc,
         void const* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream);
 
@@ -211,7 +211,6 @@ private:
         CROSS_KV,
         CROSS_KV_LENGTH,
         ENCODER_INPUT_LENGTH,
-        ATTENTION_PRIOR_SCORES,
         ATTENTION_PRIOR_FOCUS,
         HOST_CONTEXT_LENGTH,
         QKV_BIAS_TENSOR,
