@@ -1003,20 +1003,7 @@ void RuntimeBuffers::processAttentionPriorScores(
             }
         }
 
-        // TODO: remove this debug print
-        std::ostringstream oss;
-        oss << "[";
-        for (size_t i = 0; i < lookaheadSize; ++i) {
-            oss << scoresHostPtr[scoresOffset + i];
-            if (i != lookaheadSize - 1) {
-                oss << ", ";
-            }
-        }
-        oss << "]";
-        TLLM_LOG_WARNING(">>>> after focus %zu, values are %s. shifting focus by %zu", prevPriorIdx, oss.str().c_str(), idxShift);
-
         llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift);
-
 
         // TODO: remove hardcode of lookahead size
         scoresOffset += lookaheadSize * llmReq->getNumSequences();

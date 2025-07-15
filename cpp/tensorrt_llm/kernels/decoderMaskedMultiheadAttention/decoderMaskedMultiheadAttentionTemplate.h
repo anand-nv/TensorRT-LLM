@@ -2114,9 +2114,6 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 // apply attention prior: values that are not within a window around `focus` are penalized
                 if (local_time_now < (focus - 1) || local_time_now >= (focus + 5)) {
                     qk_ -= 1e9;
-                    printf("attention_mask[%d]=0 ", local_time_now);
-                } else {
-                    printf("attention_mask[%d]=1 ", local_time_now);
                 }
             }
 
@@ -2162,11 +2159,6 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 qk_smem[local_ti] = qk_;
             }
         }
-    }
-
-    __syncthreads();
-    if (is_leader && tidx == 0 && DO_CROSS_ATTENTION) {
-        printf(" attn_mask_end\n");
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////
@@ -2310,7 +2302,6 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         {
             float prob = qk_smem[ti] * inv_sum;
             if (DO_CROSS_ATTENTION) {
-                printf("prob[%d]=%f ", ti, prob);
                 if (store_scores && ti >= focus && ti < focus + 5) {
                     scores_ptr[ti - focus] = prob;
                 }
@@ -2329,11 +2320,6 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 convert_from_float(&logits_current_smem[0], qk_current_smem[0]);
             }
         }
-    }
-
-    __syncthreads();
-    if (is_leader && tidx == 0 && DO_CROSS_ATTENTION) {
-        printf(" prob_end\n");
     }
 
     // Put Values part below so we leverage __syncthreads
