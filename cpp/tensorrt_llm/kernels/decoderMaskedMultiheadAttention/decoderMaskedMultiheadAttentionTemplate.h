@@ -1898,12 +1898,6 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         }
         else
         {
-            // We need to store the qk result to the end of the qk_smem for cyclic kv cache (+ 1 for smem memory
-            // allocation) because the previous cache will still write to the new_cache_pos of qk_smem.
-            if (DO_CROSS_ATTENTION && params.apply_attention_prior && kv_loop_length - focus > (params.attention_prior_window_right + 1)) {
-                // this is hardcoded window that we keep unmasked
-                qk -= 1e9;
-            }
             qk_smem[kv_loop_length] = qk;
         }
     }
@@ -2108,13 +2102,6 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 }
             }
 
-            if (is_active && DO_CROSS_ATTENTION && is_leader && params.apply_attention_prior) {
-                // apply attention prior: values that are not within a window around `focus` are penalized
-                if (local_time_now < (focus - params.attention_prior_window_left) || local_time_now > (focus + params.attention_prior_window_right)) {
-                    qk_ -= 1e9;
-                }
-            }
-
             // Apply attention logit softcapping scale.
             if constexpr (ATTN_LOGIT_SOFTCAPPING)
             {
@@ -2292,6 +2279,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     float inv_sum = __fdividef(logit_scale, sum + 1.e-6f);
 
     int const normlization_loop_end = MULTI_BLOCK_FLAG ? timesteps_per_block : kv_loop_length;
+    float sum_rescale = 0.0f;
     for (int ti = tidx; ti <= normlization_loop_end; ti += THREADS_PER_BLOCK)
     {
         int const time_now = MULTI_BLOCK_FLAG ? ti + c_tile_times_timesteps_per_block : ti;
@@ -2299,12 +2287,17 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         if (!MULTI_BLOCK_FLAG)
         {
             float prob = qk_smem[ti] * inv_sum;
-            if (DO_CROSS_ATTENTION) {
-                if (store_scores && ti >= focus && ti < focus + params.attention_prior_lookahead) {
-                    scores_ptr[ti - focus] = prob;
+            if (DO_CROSS_ATTENTION && params.attention_prior_focus != nullptr) {
+                // do the masking to the prob
+                if (ti < (focus - params.attention_prior_window_left) || ti > (focus + params.attention_prior_window_right)) {
+                    prob *= 0.1f;
                 }
+                // store back
+                qk_smem[ti] = prob;
+                sum_rescale += prob;
+            } else {
+                convert_from_float(&logits_smem[ti], prob);
             }
-            convert_from_float(&logits_smem[ti], prob);
         }
         else
         {
@@ -2318,6 +2311,26 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 convert_from_float(&logits_current_smem[0], qk_current_smem[0]);
             }
         }
+    }
+
+    // for the case when we apply prior, we need to perform additional normalization,
+    // dividing by the sum of the modified probs.
+    __syncthreads();
+    if (!MULTI_BLOCK_FLAG && DO_CROSS_ATTENTION && params.attention_prior_focus != nullptr)
+    {
+        sum_rescale = block_sum<WARPS_PER_BLOCK>(&red_smem[WARPS_PER_BLOCK], sum_rescale);
+
+        // finally loop to compute probability, store probability to buffer if needed
+        float inv_sum_rescale = __fdividef(1.0f, sum_rescale + 1.e-6f);
+        for (int ti = tidx; ti <= kv_loop_length; ti += THREADS_PER_BLOCK)
+        {
+            float prob = qk_smem[ti] * inv_sum_rescale;
+            if (store_scores && ti >= focus && ti < focus + params.attention_prior_lookahead) {
+                scores_ptr[ti - focus] = prob;
+            }
+            convert_from_float(&logits_smem[ti], prob);
+        }
+        __syncthreads();
     }
 
     // Put Values part below so we leverage __syncthreads
