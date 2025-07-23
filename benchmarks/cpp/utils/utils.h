@@ -229,6 +229,7 @@ struct Sample
     std::vector<int32_t> inputIds;
     std::vector<int32_t> contextIds;
     texec::Tensor inputFeat;
+    texec::Tensor contextFeat;
     int32_t inputLen;
     int32_t outputLen;
     int32_t taskId;
