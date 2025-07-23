@@ -904,6 +904,7 @@ texec::Request makeExecutorRequest(texec::VecTokens inputTokenIds, SizeType32 ou
     std::optional<texec::LookaheadDecodingConfig> const& lookaheadConfig = std::nullopt,
     std::optional<texec::VecTokens> encoderInputTokenIds = std::nullopt,
     std::optional<texec::Tensor> encoderFeatures = std::nullopt,
+    std::optional<texec::Tensor> contextFeatures = std::nullopt,
     std::optional<SizeType32> encoderOutLen = std::nullopt,
     std::optional<float> temperature = std::nullopt, std::optional<float> cfgScale = std::nullopt)
 {
@@ -931,7 +932,8 @@ texec::Request makeExecutorRequest(texec::VecTokens inputTokenIds, SizeType32 ou
         tensorrt_llm::executor::RequestType::REQUEST_TYPE_CONTEXT_AND_GENERATION,  // type
         std::nullopt,    // ContextPhaseParams
         encoderFeatures.has_value() && encoderFeatures.value().getSize() > 0 ? encoderFeatures : std::nullopt,
-        encoderOutLen);
+        encoderOutLen,
+        contextFeatures.has_value() && contextFeatures.value().getSize() > 0 ? contextFeatures : std::nullopt);
     if (num_vocabs > 1) {
         request.setNumVocabs(num_vocabs);
     }
@@ -966,6 +968,10 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
         if (sample.inputFeat.getSize() > 0)
         {
             sample.inputFeat = castInputFeatHalf(sample.inputFeat, modelDtype);
+        }
+        if (sample.contextFeat.getSize() > 0)
+        {
+            sample.contextFeat = castInputFeatHalf(sample.contextFeat, modelDtype);
         }
     }
 
@@ -1074,7 +1080,7 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
                     }
                     requests.emplace_back(makeExecutorRequest(samples[0].contextIds, samples[0].outputLen, beamWidth, eosId, padId, num_vocabs,
                         benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, std::nullopt,
-                        benchmarkParams.requestLookaheadConfig, samples[0].inputIds, samples[0].inputFeat, samples[0].inputLen,
+                        benchmarkParams.requestLookaheadConfig, samples[0].inputIds, samples[0].inputFeat, samples[0].contextFeat, samples[0].inputLen,
                         benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
                 else
@@ -1082,6 +1088,7 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
                     requests.emplace_back(makeExecutorRequest(samples[0].inputIds, samples[0].outputLen, beamWidth, eosId, padId, num_vocabs,
                         benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, std::nullopt,
                         benchmarkParams.requestLookaheadConfig, std::nullopt,
+                        std::nullopt,
                         std::nullopt,
                         std::nullopt,
                         benchmarkParams.temperature, benchmarkParams.cfgScale));
@@ -1113,14 +1120,14 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
                     }
                     requests.emplace_back(makeExecutorRequest(samples[i].contextIds, samples[i].outputLen, beamWidth, eosId, padId, num_vocabs,
                         benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, loraConfig,
-                        benchmarkParams.requestLookaheadConfig, samples[i].inputIds, samples[i].inputFeat, samples[i].inputLen,
+                        benchmarkParams.requestLookaheadConfig, samples[i].inputIds, samples[i].inputFeat, samples[i].contextFeat, samples[i].inputLen,
                         benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
                 else
                 {
                     requests.emplace_back(makeExecutorRequest(samples[i].inputIds, samples[i].outputLen, beamWidth, eosId, padId, num_vocabs,
                         benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, loraConfig,
-                        benchmarkParams.requestLookaheadConfig, std::nullopt, std::nullopt, std::nullopt,
+                        benchmarkParams.requestLookaheadConfig, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
                         benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
             }

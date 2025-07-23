@@ -74,6 +74,11 @@ def generate_samples(
         # Flatten to 1D array
         context_ids = context_matrix.flatten().tolist()
         sample["context_ids"] = context_ids
+
+        # add context features to the sample
+        if text_emb_dim is not None:
+            context_feat = np.random.randn(context_len, text_emb_dim).flatten().tolist()
+            sample["context_feat"] = context_feat
  
         samples.append(sample)
     

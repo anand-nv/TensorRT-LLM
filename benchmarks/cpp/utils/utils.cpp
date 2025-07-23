@@ -104,6 +104,7 @@ Samples parseWorkloadJson(
             context_ids = sample["context_ids"].template get<std::vector<int32_t>>();
         }
         texec::Tensor inputFeat;
+        int32_t hiddenDim = 0;
         if (sample.count("input_feat"))
         {
             auto inputFeatVec = sample["input_feat"].template get<std::vector<float>>();
@@ -113,12 +114,29 @@ Samples parseWorkloadJson(
                 TLLM_CHECK_WITH_INFO(inputFeatVec.size() % static_cast<size_t>(inputLen) == 0,
                     "input_feat size %zu is not divisible by input_len %d", inputFeatVec.size(), inputLen);
 
-                int32_t hiddenDim = static_cast<int32_t>(inputFeatVec.size() / inputLen);
+                hiddenDim = static_cast<int32_t>(inputFeatVec.size() / inputLen);
                 inputFeat = texec::Tensor::of(inputFeatVec.data(), {inputLen, hiddenDim});
             }
         }
+        texec::Tensor contextFeat;
+        if (sample.count("context_feat"))
+        {
+            auto contextFeatVec = sample["context_feat"].template get<std::vector<float>>();
 
-        samples.emplace_back(Sample{std::move(input_ids), std::move(context_ids), inputFeat, inputLen,
+            if (!contextFeatVec.empty())
+            {
+                if (hiddenDim == 0) {
+                    TLLM_THROW("hiddenDim is not set");
+                }
+                TLLM_CHECK_WITH_INFO(contextFeatVec.size() % static_cast<size_t>(hiddenDim) == 0,
+                    "context_feat size %zu is not divisible by hidden dim %d", contextFeatVec.size(), hiddenDim);
+
+                int32_t contextLen = static_cast<int32_t>(contextFeatVec.size() / hiddenDim);
+                contextFeat = texec::Tensor::of(contextFeatVec.data(), {contextLen, hiddenDim});
+            }
+        }
+
+        samples.emplace_back(Sample{std::move(input_ids), std::move(context_ids), inputFeat, contextFeat, inputLen,
             sample["output_len"], taskId});
     }
 
