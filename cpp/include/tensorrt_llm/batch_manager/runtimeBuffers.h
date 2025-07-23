@@ -67,6 +67,8 @@ public:
     static constexpr auto kHostContextLengthsTensorName = "host_context_lengths";
     static constexpr auto kSequenceLengthsTensorName = "sequence_length";
     static constexpr auto kPromptEmbeddingTableTensorName = "prompt_embedding_table";
+    static constexpr auto kDecoderContextFeaturesTensorName = "decoder_context_features";
+    static constexpr auto kDecoderContextFeaturesMaskTensorName = "decoder_context_features_mask";
     static constexpr auto kTasksTensorName = "tasks";
     static constexpr auto kPromptVocabSizeTensorName = "prompt_vocab_size";
     static constexpr auto kMRopeRotaryCosSinTensorName = "mrope_rotary_cos_sin";
@@ -157,6 +159,10 @@ private:
     TensorPtr attentionPriorFocus;  // [b,]
     bool useAttentionPrior;
     int attentionPriorLookahead;
+
+    //! Overwriting decoder context features
+    TensorPtr decoderContextFeatures;  // [b*t, d]
+    TensorPtr decoderContextFeaturesMask;  // [b*t]
 
     //! Mrope
     TensorPtr mropeRotaryCosSin;

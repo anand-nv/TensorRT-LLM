@@ -508,12 +508,12 @@ void initRequestBindings(pybind11::module_& m)
             self.getKvCacheRetentionConfig(), self.getLogitsPostProcessorName(), self.getLogitsPostProcessor(),
             self.getEncoderInputTokenIds(), self.getClientId(), self.getReturnAllGeneratedTokens(), self.getPriority(),
             self.getRequestType(), self.getContextPhaseParams(), self.getEncoderInputFeatures(),
-            self.getEncoderOutputLength(), self.getCrossAttentionMask(), self.getEagleConfig(),
+            self.getEncoderOutputLength(), self.getDecoderContextFeatures(), self.getCrossAttentionMask(), self.getEagleConfig(),
             self.getSkipCrossAttnBlocks(), self.getGuidedDecodingParams(), self.getNumVocabs());
     };
     auto requestSetstate = [](py::tuple const& state)
     {
-        if (state.size() != 32)
+        if (state.size() != 33)
         {
             throw std::runtime_error("Invalid Request state!");
         }
@@ -531,9 +531,10 @@ void initRequestBindings(pybind11::module_& m)
             state[20].cast<std::optional<IdType>>(), state[21].cast<bool>(), state[22].cast<tle::PriorityType>(),
             state[23].cast<tle::RequestType>(), state[24].cast<std::optional<tle::ContextPhaseParams>>(),
             state[25].cast<std::optional<tle::Tensor>>(), state[26].cast<std::optional<SizeType32>>(),
-            state[27].cast<std::optional<tle::Tensor>>(), 1, state[28].cast<std::optional<tle::EagleConfig>>(),
-            state[29].cast<std::optional<tle::Tensor>>(), state[30].cast<std::optional<tle::GuidedDecodingParams>>(),
-            state[31].cast<SizeType32>());
+            state[27].cast<std::optional<tle::Tensor>>(),
+            state[28].cast<std::optional<tle::Tensor>>(), 1, state[29].cast<std::optional<tle::EagleConfig>>(),
+            state[30].cast<std::optional<tle::Tensor>>(), state[31].cast<std::optional<tle::GuidedDecodingParams>>(),
+            state[32].cast<SizeType32>());
     };
 
     py::class_<tle::Request> request(m, "Request");
@@ -562,6 +563,7 @@ void initRequestBindings(pybind11::module_& m)
                      std::optional<tle::ContextPhaseParams> const& contextPhaseParams,
                      std::optional<tle::Tensor> const& encoderInputFeatures,
                      std::optional<tle::SizeType32> encoderOutputLength,
+                     std::optional<tle::Tensor> const& decoderContextFeatures,
                      std::optional<tle::Tensor> const& crossAttentionMask,
                      std::optional<tle::EagleConfig> const& eagleConfig,
                      std::optional<tle::Tensor> const& skipCrossAttnBlocks,
@@ -582,7 +584,7 @@ void initRequestBindings(pybind11::module_& m)
                          externalDraftTokensConfig, pTuningConfig, mRopeConfig, loraConfig, lookaheadConfig,
                          kvCacheRetentionConfig, logitsPostProcessorName, logitsPostProcessor, encoderInputTokenIds,
                          clientId, returnAllGeneratedTokens, priority, type, contextPhaseParams, encoderInputFeatures,
-                         encoderOutputLength, crossAttentionMask, 1, eagleConfig, skipCrossAttnBlocks,
+                         encoderOutputLength, decoderContextFeatures, crossAttentionMask, 1, eagleConfig, skipCrossAttnBlocks,
                          guidedDecodingParams, languageAdapterUid, std::nullopt, numVocabs);
                  }),
             py::arg("input_token_ids"), py::kw_only(), py::arg("max_tokens") = py::none(),
@@ -600,7 +602,9 @@ void initRequestBindings(pybind11::module_& m)
             py::arg_v("type", tle::RequestType::REQUEST_TYPE_CONTEXT_AND_GENERATION,
                 "RequestType.REQUEST_TYPE_CONTEXT_AND_GENERATION"),
             py::arg("context_phase_params") = py::none(), py::arg("encoder_input_features") = py::none(),
-            py::arg("encoder_output_length") = py::none(), py::arg("cross_attention_mask") = py::none(),
+            py::arg("encoder_output_length") = py::none(),
+            py::arg("decoder_context_features") = py::none(),
+            py::arg("cross_attention_mask") = py::none(),
             py::arg("eagle_config") = py::none(), py::arg("skip_cross_attn_blocks") = py::none(),
             py::arg("guided_decoding_params") = py::none(), py::arg("language_adapter_uid") = py::none(),
             py::arg("num_vocabs") = 1)
@@ -637,6 +641,8 @@ void initRequestBindings(pybind11::module_& m)
         .def_property("request_type", &tle::Request::getRequestType, &tle::Request::setRequestType)
         .def_property(
             "encoder_input_features", &tle::Request::getEncoderInputFeatures, &tle::Request::setEncoderInputFeatures)
+        .def_property(
+            "decoder_context_features", &tle::Request::getDecoderContextFeatures, &tle::Request::setDecoderContextFeatures)
         .def_property(
             "cross_attention_mask", &tle::Request::getCrossAttentionMask, &tle::Request::setCrossAttentionMask)
         .def_property("eagle_config", &tle::Request::getEagleConfig, &tle::Request::setEagleConfig)

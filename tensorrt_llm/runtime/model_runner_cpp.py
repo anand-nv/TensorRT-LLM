@@ -526,6 +526,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
             encoder_input_features: List[
                 torch.Tensor] = None,  # TODO: add to doc string
             encoder_output_lengths: List[int] = None,
+            decoder_context_features: List[torch.Tensor] = None,
             cross_attention_masks: List[
                 torch.Tensor] = None,  # TODO: add to doc string
             mrope_params: Optional[MropeParams] = None,
@@ -567,6 +568,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 A list of encoder input feature tensors for multimodal encoder-decoder models (optional). Each tensor is of shape (sequence_length, feature_dim).
             encoder_output_lengths: (List[int]):
                 A list of encoder output lengths (optional) if encoder output has different length from encoder input (due to convolution down-sampling, etc.)
+            decoder_context_features (List[torch.Tensor]):
+                A list of decoder context feature tensors for multimodal decoder-only models (optional). Each tensor is of shape (sequence_length, feature_dim).
             sampling_config (SamplingConfig):
                 The sampling configuration to be used as base parametrization for the generation call.
                 The passed **kwargs matching the sampling_config's attributes will override them.
@@ -744,6 +747,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 if encoder_output_lengths is not None else None,
                 encoder_input_features=encoder_input_features[i].contiguous()
                 if encoder_input_features is not None else None,
+                decoder_context_features=decoder_context_features[i].contiguous()
+                if decoder_context_features is not None else None,
                 position_ids=position_ids[i].tolist()
                 if position_ids is not None else None,
                 cross_attention_mask=cross_attention_masks[i].contiguous() if
