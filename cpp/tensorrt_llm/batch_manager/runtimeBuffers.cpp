@@ -205,6 +205,11 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         attentionPriorScores->reshape(ITensor::makeShape({attentionPriorLookahead * getNumSequences()}));
         attentionPriorFocus->reshape(ITensor::makeShape({getNumSequences()}));
     }
+
+    decoderContextFeatures->reshape(ITensor::makeShape({numTokens, modelConfig.getHiddenSize()}));
+    decoderContextFeaturesMask->reshape(ITensor::makeShape({numTokens}));
+    runtime.getBufferManager().setMem(*decoderContextFeaturesMask, 0);
+
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -264,6 +269,11 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
         attentionPriorScores = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
         attentionPriorFocus = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     }
+
+    auto const featsType = engine.getTensorDataType(kDecoderContextFeaturesTensorName);
+    decoderContextFeatures = manager.emptyTensor(MemoryType::kGPU, featsType);
+    decoderContextFeaturesMask = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kBOOL);
+
     if (worldConfig.isPipelineParallel())
     {
         hiddenStates = manager.emptyTensor(MemoryType::kGPU, modelConfig.getDataType());
@@ -656,6 +666,27 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             transformerBuffers->resetCacheIndirection(contextRequests, maxBeamWidth, maxAttentionWindow,
                 decoderBuffers.cacheIndirectionInput, decoderBuffers.cacheIndirectionOutput, manager);
+        }
+
+        // set decoder context features and mask
+        SizeType32 tokenIdx = 0;
+        for (auto const& llmReq : contextRequests)
+        {
+            auto const contextPosition = llmReq->getContextCurrentPosition();
+            auto const contextChunkSize = llmReq->getContextChunkSize();
+            if (llmReq->getDecoderContextFeatures()) {
+                auto const& reqFeatures = llmReq->getDecoderContextFeatures();
+                TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= reqFeatures->getShape().d[0],
+                    "Decoder context features [%d, %d], but request is at position %d and chunk size %d",
+                    (int)reqFeatures->getShape().d[0], (int)reqFeatures->getShape().d[1], contextPosition, contextChunkSize);
+                // specifying offset and size across 0th dimension
+                manager.copy(
+                    *ITensor::slice(reqFeatures, contextPosition, contextChunkSize),
+                    *ITensor::slice(decoderContextFeatures, tokenIdx, contextChunkSize)
+                );
+                manager.setMem(*ITensor::slice(decoderContextFeaturesMask, tokenIdx, contextChunkSize), 1);
+            }
+            tokenIdx += llmReq->getNumSequences() * contextChunkSize;
         }
     }
 
@@ -1081,6 +1112,8 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     inputMap.insert_or_assign(kContextLengthsTensorName, contextLengthsDevice);
     inputMap.insert_or_assign(kHostContextLengthsTensorName, contextLengthsHost);
     inputMap.insert_or_assign(kSequenceLengthsTensorName, sequenceLengthsDevice);
+    inputMap.insert_or_assign(kDecoderContextFeaturesTensorName, decoderContextFeatures);
+    inputMap.insert_or_assign(kDecoderContextFeaturesMaskTensorName, decoderContextFeaturesMask);
     if (useAttentionPrior) {
         inputMap.insert_or_assign(kAttentionPriorFocusTensorName, attentionPriorFocus);
     }

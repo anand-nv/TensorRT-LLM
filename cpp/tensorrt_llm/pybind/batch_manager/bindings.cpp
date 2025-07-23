@@ -330,6 +330,7 @@ void initBindings(pybind11::module_& m)
                      std::optional<tb::LlmRequest::RequestIdType> client_id, executor::PriorityType priority,
                      std::optional<at::Tensor> encoder_input_features,
                      std::optional<tb::LlmRequest::SizeType32> encoder_output_length,
+                     std::optional<at::Tensor> decoder_context_features,
                      std::optional<at::Tensor> cross_attention_mask, tb::LlmRequestType llm_request_type,
                      std::optional<tb::LlmRequest::VecTokenExtraIds> input_token_extra_ids,
                      tb::LlmRequest::SizeType32 num_return_sequences, std::optional<executor::EagleConfig> eagle_config,
@@ -362,6 +363,7 @@ void initBindings(pybind11::module_& m)
                      auto lora_config_tensor_ptr = makeOptionalTensor(lora_config);
                      auto draft_logits_tensor_ptr = makeOptionalTensor(draft_logits);
                      auto encoder_input_features_tensor_ptr = makeOptionalTensor(encoder_input_features);
+                     auto decoder_context_features_tensor_ptr = makeOptionalTensor(decoder_context_features);
                      auto cross_attention_mask_tensor_ptr = makeOptionalTensor(cross_attention_mask);
                      auto skip_cross_attn_blocks_tensor_ptr = makeOptionalTensor(skip_cross_attn_blocks);
 
@@ -374,7 +376,8 @@ void initBindings(pybind11::module_& m)
                          return_context_logits, return_generation_logits, draft_tokens, draft_logits_tensor_ptr,
                          exclude_input_from_output, logits_post_processor, apply_logits_post_processor_batched,
                          encoder_input_tokens, return_encoder_output, client_id, priority,
-                         encoder_input_features_tensor_ptr, encoder_output_length, cross_attention_mask_tensor_ptr,
+                         encoder_input_features_tensor_ptr, encoder_output_length,
+                         decoder_context_features_tensor_ptr, cross_attention_mask_tensor_ptr,
                          llm_request_type, input_token_extra_ids, num_return_sequences, eagle_config,
                          skip_cross_attn_blocks_tensor_ptr, return_perf_metrics, guided_decoding_params,
                          language_adapter_uid, allotted_time_ms, context_phase_params};
@@ -394,7 +397,8 @@ void initBindings(pybind11::module_& m)
             py::arg("apply_logits_post_processor_batched") = false, py::arg("encoder_input_tokens") = std::nullopt,
             py::arg("return_encoder_output") = false, py::arg("client_id") = std::nullopt,
             py::arg("priority") = executor::Request::kDefaultPriority, py::arg("encoder_input_features") = std::nullopt,
-            py::arg("encoder_output_len") = std::nullopt, py::arg("cross_attention_mask") = std::nullopt,
+            py::arg("encoder_output_len") = std::nullopt, py::arg("decoder_context_features") = std::nullopt,
+            py::arg("cross_attention_mask") = std::nullopt,
             py::arg_v("llm_request_type", tb::LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
                 "LlmRequestType.LLMREQUEST_TYPE_CONTEXT_AND_GENERATION"),
             py::arg("input_token_extra_ids") = std::nullopt, py::arg("num_return_sequences") = 1,

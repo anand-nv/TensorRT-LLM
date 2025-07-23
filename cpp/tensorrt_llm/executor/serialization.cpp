@@ -634,6 +634,7 @@ Request Serialization::deserializeRequest(std::istream& is)
     auto contextPhaseParams = su::deserialize<std::optional<ContextPhaseParams>>(is);
     auto encoderInputFeatures = su::deserialize<std::optional<Tensor>>(is);
     auto encoderOutputLength = su::deserialize<std::optional<SizeType32>>(is);
+    auto decoderContextFeatures = su::deserialize<std::optional<Tensor>>(is);
     auto crossAttentionMask = su::deserialize<std::optional<Tensor>>(is);
     auto numReturnSequences = su::deserialize<SizeType32>(is);
     auto eagleConfig = su::deserialize<std::optional<EagleConfig>>(is);
@@ -651,7 +652,7 @@ Request Serialization::deserializeRequest(std::istream& is)
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
         lookaheadConfig, std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName), std::nullopt,
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, requestType,
-        std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
+        std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, std::move(decoderContextFeatures),
         std::move(crossAttentionMask), numReturnSequences, std::move(eagleConfig), std::move(skipCrossAttnBlocks),
         std::move(guidedDecodingParams), languageAdapterUid, allottedTimeMs);
 }

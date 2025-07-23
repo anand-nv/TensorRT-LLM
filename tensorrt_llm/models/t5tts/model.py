@@ -24,8 +24,8 @@ from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch
 from tensorrt_llm.functional import (ACT2FN, LayerNormPositionType,
                                      LayerNormType, MLPType,
                                      PositionEmbeddingType, Tensor, assertion,
-                                     concat, gather_last_token_logits, maximum, softmax,
-                                     minimum, recv, select, send, shape, view, mean, add, slice, mul, expand_dims_like,
+                                     concat, gather_last_token_logits, maximum, softmax, where,
+                                     minimum, recv, select, send, shape, view, mean, add, slice, mul, expand_dims_like, expand_dims,
                                      squeeze, unsqueeze, transpose, matmul, stack, cast)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
@@ -238,7 +238,9 @@ class EncoderDecoderEmbedding(Module):
                 token_type_ids=None,
                 prompt_embedding_table=None,
                 prompt_tasks=None,
-                prompt_vocab_size=None):
+                prompt_vocab_size=None,
+                decoder_context_features=None,
+                decoder_context_features_mask=None):
         # position_ids and token_type_ids are provided inputs
         # and should not be formulated deterministically
 
@@ -253,6 +255,8 @@ class EncoderDecoderEmbedding(Module):
             )  # shape [totalSeqLen, nVocab, embDim]
             # average across vocabs
             x = mean(x, 1)  # shape [totalSeqLen, embDim]
+        if decoder_context_features is not None:
+            x = where(expand_dims(decoder_context_features_mask, 1), decoder_context_features, x)
 
         if self.position_embedding:
             pos_emb = self.position_embedding(position_ids)
@@ -1124,6 +1128,8 @@ class T5TTSDecoderModel(PretrainedModel):
     def forward(self,
                 decoder_input_ids: Tensor,
                 encoder_output: Tensor,
+                decoder_context_features: Tensor,
+                decoder_context_features_mask: Tensor,
                 attention_prior_focus: Optional[Tensor] = None,
                 position_ids=None,
                 token_type_ids=None,
@@ -1142,7 +1148,10 @@ class T5TTSDecoderModel(PretrainedModel):
 
         # In PP, layer 0 has ids as inputs, all other layers have hidden_states as inputs
         if self.mapping.is_first_pp_rank():
-            hidden_states = self.embedding(decoder_input_ids, position_ids, None)
+            hidden_states = self.embedding(decoder_input_ids, position_ids, None,
+                decoder_context_features=decoder_context_features,
+                decoder_context_features_mask=decoder_context_features_mask
+            )
         else:
             hidden_states = recv(hidden_states, self.mapping.prev_pp_rank())
 
@@ -1328,6 +1337,8 @@ class T5TTSDecoderModel(PretrainedModel):
         tokens_per_block = default_net().plugin_config.tokens_per_block
 
         input_ids, position_ids, token_type_ids, hidden_states = None, None, None, None
+        decoder_context_features = None
+        decoder_context_features_mask = None
         if remove_input_padding:
             if self.mapping.is_first_pp_rank():
                 input_ids = Tensor(name='input_ids',
@@ -1337,6 +1348,23 @@ class T5TTSDecoderModel(PretrainedModel):
                                        ('multivocab_decoder_num_tokens',
                                         [multivocab_decoder_num_tokens_range])
                                    ]))
+                decoder_context_features = Tensor(
+                    name='decoder_context_features',
+                    dtype=self._dtype,
+                    shape=[-1, self.hidden_size],
+                    dim_range=OrderedDict([
+                        ('decoder_num_tokens', [decoder_num_tokens_range]),
+                        ('hidden_size', [self.hidden_size]),
+                    ])
+                )
+                decoder_context_features_mask = Tensor(
+                    name='decoder_context_features_mask',
+                    dtype=trt.bool,
+                    shape=[-1],
+                    dim_range=OrderedDict([
+                        ('decoder_num_tokens', [decoder_num_tokens_range]),
+                    ])
+                )                      
                 if self.has_position_embedding:
                     position_ids = Tensor(name='position_ids',
                                           dtype=trt.int32,
@@ -1813,6 +1841,8 @@ class T5TTSDecoderModel(PretrainedModel):
         result = {
             'decoder_input_ids': input_ids,
             'encoder_output': encoder_output,
+            'decoder_context_features': decoder_context_features,
+            'decoder_context_features_mask': decoder_context_features_mask,
             'attention_prior_focus': attention_prior_focus,
             'position_ids': position_ids,
             'token_type_ids': token_type_ids,

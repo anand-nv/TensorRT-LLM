@@ -120,6 +120,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         LlmRequestType llmRequestType = LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<std::shared_ptr<VecTokenExtraIds>> inputTokenExtraIds = std::nullopt,
@@ -170,6 +171,7 @@ public:
         , mFinishReasons(samplingConfig.beamWidth)
         , mEncoderInputFeatures(std::move(encoderInputFeatures))
         , mEncoderOutputLength(encoderOutputLength)
+        , mDecoderContextFeatures(std::move(decoderContextFeatures))
         , mCrossAttentionMask(std::move(crossAttentionMask))
         , mLlmRequestType(llmRequestType)
         , mContextPhaseParams(contextPhaseParams)
@@ -421,6 +423,16 @@ public:
         else
         {
             mEncoderInputFeatures = std::nullopt;
+        }
+
+        auto const& decoderContextFeatures = req.getDecoderContextFeatures();
+        if (decoderContextFeatures.has_value())
+        {
+            mDecoderContextFeatures = executor::detail::toITensor(decoderContextFeatures.value());
+        }
+        else
+        {
+            mDecoderContextFeatures = std::nullopt;
         }
 
         auto const& crossAttentionMask = req.getCrossAttentionMask();
@@ -1157,6 +1169,11 @@ public:
     [[nodiscard]] TensorPtr getEncoderInputFeatures() const
     {
         return mEncoderInputFeatures.value_or(nullptr);
+    }
+
+    [[nodiscard]] TensorPtr getDecoderContextFeatures() const
+    {
+        return mDecoderContextFeatures.value_or(nullptr);
     }
 
     void setEncoderOutputHost(TensorPtr encoderOutputHost)
@@ -1955,6 +1972,9 @@ protected:
     // which encoder output shape cannot be inferred from encoder input shape due to downsampling.
     std::optional<SizeType32> mEncoderOutputLength{std::nullopt};
 
+// decoder context features to replace the token encodings
+    std::optional<TensorPtr> mDecoderContextFeatures{std::nullopt};
+
     // Input cross attention mask.
     std::optional<TensorPtr> mCrossAttentionMask{std::nullopt};
 
@@ -2179,6 +2199,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         LlmRequestType llmRequestType = LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<std::shared_ptr<VecTokenExtraIds>> inputTokenExtraIds = std::nullopt,
@@ -2195,8 +2216,8 @@ public:
             std::move(kvCacheRetentionConfig), returnLogProbs, returnContextLogits, returnGenerationLogits,
             std::move(draftTokens), std::move(draftLogits), excludeInputFromOutput, std::move(logitsPostProcessor),
             applyLogitsPostProcessorBatched, std::move(encoderInputTokens), returnEncoderOutput, clientId, priority,
-            std::move(encoderInputFeatures), std::move(encoderOutputLength), std::move(crossAttentionMask),
-            llmRequestType, std::move(inputTokenExtraIds), numReturnSequences, std::move(eagleConfig),
+            std::move(encoderInputFeatures), std::move(encoderOutputLength), std::move(decoderContextFeatures),
+            std::move(crossAttentionMask), llmRequestType, std::move(inputTokenExtraIds), numReturnSequences, std::move(eagleConfig),
             std::move(skipCrossAttnBlocks), returnPerfMetrics, std::move(guidedDecodingParams), languageAdapterUid,
             allottedTimeMs, contextPhaseParams)
     {
@@ -2224,6 +2245,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         LlmRequestType llmRequestType = LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<VecTokenExtraIds> inputTokenExtraIds = std::nullopt, SizeType32 numReturnSequences = 1,
@@ -2248,7 +2270,7 @@ public:
             encoderInputTokens ? std::make_optional(std::make_shared<VecTokens>(std::move(*encoderInputTokens)))
                                : std::optional<std::shared_ptr<VecTokens>>(std::nullopt),
             returnEncoderOutput, clientId, priority, std::move(encoderInputFeatures), encoderOutputLength,
-            std::move(crossAttentionMask), llmRequestType,
+            std::move(decoderContextFeatures), std::move(crossAttentionMask), llmRequestType,
             inputTokenExtraIds ? std::make_optional(std::make_shared<VecTokenExtraIds>(std::move(*inputTokenExtraIds)))
                                : std::optional<std::shared_ptr<VecTokenExtraIds>>(std::nullopt),
             numReturnSequences, std::move(eagleConfig), skipCrossAttnBlocks, returnPerfMetrics,

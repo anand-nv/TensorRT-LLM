@@ -72,6 +72,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         tb::LlmRequestType llmRequestType = tb::LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<VecTokenExtraIds> inputTokenExtraIds = std::nullopt, SizeType32 numReturnSequences = 1,
@@ -118,6 +119,7 @@ public:
             priority,                                                                                            //
             encoderInputFeatures,                                                                                //
             encoderOutputLength,                                                                                 //
+            decoderContextFeatures,                                                                              //
             crossAttentionMask,                                                                                  //
             llmRequestType,                                                                                      //
             inputTokenExtraIds                                                                                   //
