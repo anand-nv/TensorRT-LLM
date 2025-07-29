@@ -158,6 +158,7 @@ private:
     TensorPtr attentionPriorScores;  // [b*5,]
     TensorPtr attentionPriorFocus;  // [b,]
     bool useAttentionPrior;
+    bool useContextEmbeddings;
     int attentionPriorLookahead;
 
     //! Overwriting decoder context features

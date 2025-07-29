@@ -144,6 +144,7 @@ public:
         , mNumLanguages(0)
         , mVocabSizes{vocabSizes}
         , mUseAttentionPrior(false)
+        , mUseContextEmbeddings(false)
     {
         TLLM_CHECK_WITH_INFO(mNbLayers >= mNbAttentionLayers + mNbRnnLayers,
             "Number of layers (%d) expected to be >= number of attention (%d) + number of rnn layers (%d)", mNbLayers,
@@ -182,10 +183,20 @@ public:
         return mUseAttentionPrior;
     }
 
+    [[nodiscard]] bool constexpr useContextEmbeddings() const noexcept
+    {
+        return mUseContextEmbeddings;
+    }
+
     void constexpr useAttentionPrior(bool useAttentionPrior) noexcept
     {   
         mUseAttentionPrior = useAttentionPrior;
-    } 
+    }
+
+    void constexpr useContextEmbeddings(bool useContextEmbeddings) noexcept
+    {
+        mUseContextEmbeddings = useContextEmbeddings;
+    }
 
     [[nodiscard]] std::vector<SizeType32> getComputeAttentionPriorFromLayers() const noexcept
     {
@@ -1022,6 +1033,7 @@ private:
     std::optional<std::vector<SizeType32>> mVocabSizes;
     // parameters of attention prior
     bool mUseAttentionPrior;
+    bool mUseContextEmbeddings;
     std::vector<SizeType32> mComputeAttentionPriorFromLayers;
     std::vector<SizeType32> mApplyAttentionPriorToLayers;
     SizeType32 mAttentionPriorLookahead;
