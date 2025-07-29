@@ -331,6 +331,8 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
             py::overload_cast<bool>(&tr::ModelConfig::usePackedInput))
         .def_property("use_attention_prior", py::overload_cast<>(&tr::ModelConfig::useAttentionPrior, py::const_),
             py::overload_cast<bool>(&tr::ModelConfig::useAttentionPrior))
+        .def_property("use_context_embeddings", py::overload_cast<>(&tr::ModelConfig::useContextEmbeddings, py::const_),
+            py::overload_cast<bool>(&tr::ModelConfig::useContextEmbeddings))
         .def_property("compute_attention_prior_from_layers", &tr::ModelConfig::getComputeAttentionPriorFromLayers, &tr::ModelConfig::setComputeAttentionPriorFromLayers)
         .def_property("apply_attention_prior_to_layers", &tr::ModelConfig::getApplyAttentionPriorToLayers, &tr::ModelConfig::setApplyAttentionPriorToLayers)
         .def_property("attention_prior_lookahead", &tr::ModelConfig::getAttentionPriorLookahead, &tr::ModelConfig::setAttentionPriorLookahead)

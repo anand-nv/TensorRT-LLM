@@ -222,6 +222,7 @@ def parse_model_config(args, ):
             vocab_size = config.getint('decoder', 'vocab_size')
             num_vocabs = config.getint('decoder', 'num_vocabs')
             component_config.vocab_sizes = [vocab_size // num_vocabs] * num_vocabs
+            component_config.use_context_embeddings = True
 
         else:
             assert False, 'Unsupported component!'
@@ -411,6 +412,7 @@ def convert_checkpoint(args, model):
         'norm_epsilon': decoder_config.layernorm_eps,
         'vocab_size': decoder_config.vocab_size,
         'vocab_sizes': decoder_config.vocab_sizes,
+        'use_context_embeddings': decoder_config.use_context_embeddings,
         'use_attention_prior': True,
         'compute_attention_prior_from_layers': [4,5,7,8,10],
         'apply_attention_prior_to_layers': [4,5,6,7,8,10],

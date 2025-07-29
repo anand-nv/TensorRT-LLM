@@ -178,10 +178,12 @@ class EncoderDecoderEmbedding(Module):
                  dtype=None,
                  use_parallel_embedding=False,
                  embedding_sharding_dim=0,
+                 use_context_embeddings=False,
                  mapping=Mapping()):
         super().__init__()
 
         self.num_vocabs = num_vocabs
+        self.use_context_embeddings = use_context_embeddings
         self.layernorm_type = layernorm_type
         ln_type = layernorm_map[layernorm_type]
 
@@ -255,7 +257,7 @@ class EncoderDecoderEmbedding(Module):
             )  # shape [totalSeqLen, nVocab, embDim]
             # average across vocabs
             x = mean(x, 1)  # shape [totalSeqLen, embDim]
-        if decoder_context_features is not None:
+        if self.use_context_embeddings and decoder_context_features is not None:
             x = where(expand_dims(decoder_context_features_mask, 1), decoder_context_features, x)
 
         if self.position_embedding:
@@ -957,6 +959,7 @@ class T5TTSDecoderModel(PretrainedModel):
 
         self.mapping = self.config.mapping
         self.num_vocabs = len(self.config.vocab_sizes)
+        self.use_context_embeddings = self.config.use_context_embeddings
 
         self.has_position_embedding = self.config.has_position_embedding
         type_vocab_size = self.config.type_vocab_size
@@ -1031,6 +1034,7 @@ class T5TTSDecoderModel(PretrainedModel):
                 dtype=self.config.dtype,
                 use_parallel_embedding=self.config.use_parallel_embedding,
                 embedding_sharding_dim=self.config.embedding_sharding_dim,
+                use_context_embeddings=self.config.use_context_embeddings,
                 mapping=self.mapping)
 
         layers_range = self.mapping.pp_layers(self.total_num_layers)
@@ -1099,6 +1103,7 @@ class T5TTSDecoderModel(PretrainedModel):
                 dtype=self._dtype)
 
     def check_config(self, config: PretrainedConfig):
+        config.set_if_not_exist('use_context_embeddings', True)
         config.set_if_not_exist('has_position_embedding', False)
         config.set_if_not_exist('type_vocab_size', None)
         config.set_if_not_exist('rescale_before_lm_head', False)
@@ -1128,8 +1133,8 @@ class T5TTSDecoderModel(PretrainedModel):
     def forward(self,
                 decoder_input_ids: Tensor,
                 encoder_output: Tensor,
-                decoder_context_features: Tensor,
-                decoder_context_features_mask: Tensor,
+                decoder_context_features: Optional[Tensor] = None,
+                decoder_context_features_mask: Optional[Tensor] = None,
                 attention_prior_focus: Optional[Tensor] = None,
                 position_ids=None,
                 token_type_ids=None,
@@ -1348,23 +1353,24 @@ class T5TTSDecoderModel(PretrainedModel):
                                        ('multivocab_decoder_num_tokens',
                                         [multivocab_decoder_num_tokens_range])
                                    ]))
-                decoder_context_features = Tensor(
-                    name='decoder_context_features',
-                    dtype=self._dtype,
-                    shape=[-1, self.hidden_size],
-                    dim_range=OrderedDict([
-                        ('decoder_num_tokens', [decoder_num_tokens_range]),
-                        ('hidden_size', [self.hidden_size]),
-                    ])
-                )
-                decoder_context_features_mask = Tensor(
-                    name='decoder_context_features_mask',
-                    dtype=trt.bool,
-                    shape=[-1],
-                    dim_range=OrderedDict([
-                        ('decoder_num_tokens', [decoder_num_tokens_range]),
-                    ])
-                )                      
+                if self.use_context_embeddings:
+                    decoder_context_features = Tensor(
+                        name='decoder_context_features',
+                        dtype=self._dtype,
+                        shape=[-1, self.hidden_size],
+                        dim_range=OrderedDict([
+                            ('decoder_num_tokens', [decoder_num_tokens_range]),
+                            ('hidden_size', [self.hidden_size]),
+                        ])
+                    )
+                    decoder_context_features_mask = Tensor(
+                        name='decoder_context_features_mask',
+                        dtype=trt.bool,
+                        shape=[-1],
+                        dim_range=OrderedDict([
+                            ('decoder_num_tokens', [decoder_num_tokens_range]),
+                        ])
+                    )                      
                 if self.has_position_embedding:
                     position_ids = Tensor(name='position_ids',
                                           dtype=trt.int32,

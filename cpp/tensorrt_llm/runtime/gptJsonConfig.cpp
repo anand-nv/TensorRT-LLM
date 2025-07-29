@@ -232,12 +232,14 @@ ModelConfig createModelConfig(Json const& json, bool engineVersionNone, SizeType
     }
 
     auto const useAttentionPrior = parseJsonFieldOr(config, "use_attention_prior", false);
+    auto const useContextEmbeddings = parseJsonFieldOr(config, "use_context_embeddings", false);
     auto const computeAttentionPriorFromLayers = parseJsonFieldOr<std::vector<SizeType32>>(config, "compute_attention_prior_from_layers", std::vector<SizeType32>());
     auto const applyAttentionPriorToLayers = parseJsonFieldOr<std::vector<SizeType32>>(config, "apply_attention_prior_to_layers", std::vector<SizeType32>());
     auto const attentionPriorLookahead = parseJsonFieldOr<SizeType32>(config, "attention_prior_lookahead", 0);
     auto const attentionPriorWindowLeft = parseJsonFieldOr<SizeType32>(config, "attention_prior_window_left", 0);
     auto const attentionPriorWindowRight = parseJsonFieldOr<SizeType32>(config, "attention_prior_window_right", 0);
     modelConfig.useAttentionPrior(useAttentionPrior);
+    modelConfig.useContextEmbeddings(useContextEmbeddings);
     modelConfig.setComputeAttentionPriorFromLayers(computeAttentionPriorFromLayers);
     modelConfig.setApplyAttentionPriorToLayers(applyAttentionPriorToLayers);
     modelConfig.setAttentionPriorLookahead(attentionPriorLookahead);
