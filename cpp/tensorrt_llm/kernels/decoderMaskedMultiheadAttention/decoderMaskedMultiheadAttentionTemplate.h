@@ -1554,7 +1554,9 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     if (params.attention_prior_focus != nullptr) {
         focus = params.attention_prior_focus[batch_beam_idx];
     }
-    bool const store_scores = params.attention_prior_scores != nullptr;
+    
+    bool const apply_prior = params.apply_attention_prior && kv_loop_length > params.attention_prior_lookahead;
+    bool const store_scores = params.attention_prior_scores != nullptr && kv_loop_length > params.attention_prior_lookahead;
     float *scores_ptr = nullptr;
     if (store_scores) {
         scores_ptr = &params.attention_prior_scores[batch_beam_idx * params.attention_prior_lookahead];
@@ -1900,7 +1902,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         {
             // We need to store the qk result to the end of the qk_smem for cyclic kv cache (+ 1 for smem memory
             // allocation) because the previous cache will still write to the new_cache_pos of qk_smem.
-            if (DO_CROSS_ATTENTION && params.apply_attention_prior && kv_loop_length - focus > (params.attention_prior_window_right + 1)) {
+            if (DO_CROSS_ATTENTION && apply_prior && kv_loop_length - focus > (params.attention_prior_window_right + 1)) {
                 // this is hardcoded window that we keep unmasked
                 qk -= 1e9;
             }
@@ -2108,7 +2110,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 }
             }
 
-            if (is_active && DO_CROSS_ATTENTION && is_leader && params.apply_attention_prior) {
+            if (is_active && DO_CROSS_ATTENTION && is_leader && apply_prior) {
                 // apply attention prior: values that are not within a window around `focus` are penalized
                 if (local_time_now < (focus - params.attention_prior_window_left) || local_time_now > (focus + params.attention_prior_window_right)) {
                     qk_ -= 1e9;

@@ -1802,7 +1802,7 @@ public:
 
     void setAttentionPriorIdx(SizeType32 attentionPriorIdx, runtime::ModelConfig const& modelConfig)
     {
-        auto const lastIdx = getEncoderOutputLen() - modelConfig.getAttentionPriorWindowRight() - 1;
+        auto const lastIdx = std::max(1, getEncoderOutputLen() - modelConfig.getAttentionPriorWindowRight() - 1);
         if (attentionPriorIdx > lastIdx) {
             // no need to move futher the attention window will cover all tokens till end 
             attentionPriorIdx = lastIdx;
