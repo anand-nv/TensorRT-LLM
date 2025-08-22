@@ -3,6 +3,7 @@ import configparser
 import json
 import logging
 import os
+import yaml
 import types
 from datetime import datetime
 from pathlib import Path
@@ -28,85 +29,44 @@ TORCH_DTYPES = {
 }
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--quant_ckpt_path', type=str, default=None)
-    parser.add_argument('--model_name', type=str)
-    parser.add_argument(
-        '--model_path',
-        type=str,
-        default=None,
-    )
-    parser.add_argument('--dtype',
-                        type=str,
-                        default='float16',
-                        choices=['float32', 'bfloat16', 'float16'])
-    parser.add_argument('--logits_dtype',
-                        type=str,
-                        default='float16',
-                        choices=['float16', 'float32'])
-    parser.add_argument('--output_dir',
-                        type=str,
-                        default='tllm_checkpoint',
-                        help='The path to save the TensorRT-LLM checkpoint')
-    parser.add_argument(
-        '--use_weight_only',
-        default=False,
-        action="store_true",
-        help='Quantize weights for the various GEMMs to INT4/INT8.'
-        'See --weight_only_precision to set the precision')
-    parser.add_argument(
-        '--weight_only_precision',
-        const='int8',
-        type=str,
-        nargs='?',
-        default='int8',
-        choices=['int8', 'int4'],
-        help=
-        'Define the precision for the weights when using weight-only quantization.'
-        'You must also use --use_weight_only for that argument to have an impact.'
-    )
-    parser.add_argument('engine_dir')
-    args = parser.parse_args()
-    return args
-
-
 def copy_args_to_component_config(component_config, args):
     for arg in vars(args):
         setattr(component_config, arg, getattr(args, arg))
     return component_config
 
 
-def parse_model_config(args, ):
+def parse_model_config(args, external_config={}):
     config = configparser.ConfigParser()
+    external_encoder_config = external_config.get("encoder", {})
+    external_decoder_config = external_config.get("decoder", {})
 
     config["encoder"] = {}
     config["decoder"] = {}
 
-    config["encoder"]["num_heads"] = "12"
-    config["encoder"]['d_model'] = "768"  #hidden_size
-    config["encoder"]['d_ffn'] = "3072"  #ffn_hidden_size
+    config["encoder"]["num_heads"] = str(external_encoder_config.get("sa_n_heads", 12))
+    config["encoder"]['d_model'] = str(external_encoder_config.get("d_model", 768))  #hidden_size
+    config["encoder"]['d_ffn'] = str(external_encoder_config.get("d_ffn", 3072))  #ffn_hidden_size
     config["encoder"]['vocab_size'] = "98"  # used to be 106339 in the branch
-    config["encoder"]['n_positions'] = "2048"
+    config["encoder"]['n_positions'] = str(external_encoder_config.get("max_length_causal_mask", 2048))
     config["encoder"]['has_position_embedding'] = "true"
     #config["encoder"]['has_token_type_embedding'] =
     config["encoder"]['layernorm_position'] = "pre_layernorm"
 
     config["encoder"]['layernorm_type'] = "LayerNorm"
-    config["encoder"]['num_layers'] = "6"
+    config["encoder"]['num_layers'] = str(external_encoder_config.get("n_layers", 6))
     # config["encoder"]['d_model'] /config["encoder"]["num_heads"]
-    config["encoder"]['d_kv'] = f"{int(768/12)}" 
+    config["encoder"]['d_kv'] = str(int(config["encoder"]["d_model"]) // int(config["encoder"]["num_heads"]))
 
-    config["decoder"]["num_heads"] = "12"
-    config["decoder"]['d_model'] = "768"  #hidden_size
-    config["decoder"]['d_ffn'] = "3072"  #ffn_hidden_size
+    config["decoder"]["num_heads"] = str(external_decoder_config.get("sa_n_heads", 12))
+    config["decoder"]['d_model'] = str(external_decoder_config.get("d_model", 768))  #hidden_size
+    config["decoder"]['d_ffn'] = str(external_decoder_config.get("d_ffn", 3072))  #ffn_hidden_size
     config["decoder"]['vocab_size'] = "16192"  # 8 * 2024
     config["decoder"]['n_positions'] = "2048"
     config["decoder"]['has_position_embedding'] = "true"
     config["decoder"]['layernorm_position'] = "pre_layernorm"
 
     config["decoder"]['layernorm_type'] = "LayerNorm"
-    config["decoder"]['num_layers'] = "12"
+    config["decoder"]['num_layers'] = str(external_decoder_config.get("n_layers", 12))
     config["decoder"]["num_vocabs"] = "8"
 
     # manually set q_scaling to offset attention scaling's effect.
@@ -283,7 +243,7 @@ def convert_t5tts_decoder(
         f'{prefix}.position_embeddings.weight'].contiguous()
 
     embs = [model_dict[f'audio_embeddings.{i}.weight'] for i in range(len(config.vocab_sizes))]
-    embs.append(torch.zeros(1, 768, dtype=embs[0].dtype, device=embs[0].device))
+    embs.append(torch.zeros(1, embs[0].shape[1], dtype=embs[0].dtype, device=embs[0].device))
     # embeddings have shape (2024 x 768) * 8, pad them adding extra entry in vocab which expands to zeros
     # we dont change the config, instead we change usage of the embedding dim in the model definition
     weights[f'embedding.vocab_embedding.weight'] = torch.cat(embs, dim=0).contiguous()
@@ -334,7 +294,7 @@ def get_obj_dict(obj):
     return obj.__dict__
 
 
-def convert_checkpoint(args, model):
+def convert_checkpoint(args, model, external_config={}):
 
     saved_dir = Path(args.output_dir)
     saved_dir.mkdir(parents=True, exist_ok=True)
@@ -349,7 +309,7 @@ def convert_checkpoint(args, model):
     kv_cache_quant_algo = None
     quant_algo = None
 
-    encoder_config, decoder_config = parse_model_config(args, )
+    encoder_config, decoder_config = parse_model_config(args, external_config)
 
     additional_settings = ["gated_act"]
 
@@ -519,6 +479,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--model_path', type=str, required=True)
+    parser.add_argument('--config', type=str, default=None, help="Path to yaml config of ckpt to extract hyperparameters from")
 
     parser.add_argument('--tp_size',
                         type=int,
@@ -614,7 +575,13 @@ if __name__ == "__main__":
     for k in model_state_dict:
         model_state_dict[k] = model_state_dict[k].to(
             dtype=TORCH_DTYPES[args.dtype])
-    convert_checkpoint(args, model_state_dict)
+
+    external_config = {}
+    if args.config:
+        with open(args.config, 'r') as f:
+            external_config = yaml.safe_load(f)
+
+    convert_checkpoint(args, model_state_dict, external_config)
 
     stop_time = datetime.now()
     run_time = (stop_time - start_time)
