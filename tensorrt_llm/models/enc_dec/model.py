@@ -531,9 +531,7 @@ class DecoderLayer(Module):
             lora_layer_params=lora_layer_params)
 
         if use_cache:
-            attention_output, _, _, presents_self = attention_output
-        else:
-            attention_output, _, _ = attention_output
+            attention_output, presents_self = attention_output
 
         self.register_network_output('self_attention_output', attention_output)
 
@@ -566,9 +564,7 @@ class DecoderLayer(Module):
             cross_kv_reuse=cross_kv_reuse)
 
         if use_cache:
-            attention_output, _, _, presents_cross = attention_output
-        else:
-            attention_output, _, _ = attention_output
+            attention_output, presents_cross = attention_output
 
         self.register_network_output('cross_attention_output', attention_output)
 
