@@ -49,7 +49,7 @@ void CacheFormatter::formatOutput(LlmRequest const& llmRequest,
     constexpr SizeType32 beam{0};
     auto& blockManager = mCacheManager->getBlockManager();
     size_t requestBlockNum = llmRequest.getRequestedBlockHashes().size();
-    auto blockRange = BlockRange(*mCacheManager, llmRequest.mRequestId, beam);
+    auto blockRange = BlockRange(*mCacheManager, llmRequest, beam);
     if (requestBlockNum < blockRange.size() && requestBlockNum > 0)
     {
         // handle block reuse, the prefix blocks are reused

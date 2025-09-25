@@ -301,11 +301,13 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
         .def(py::self != py::self);
 
     py::class_<tr::ModelConfig>(m, "ModelConfig")
-        .def(py::init<SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, nvinfer1::DataType>(),
+        .def(py::init<SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, nvinfer1::DataType,
+                 std::optional<std::vector<SizeType32>>>(),
             py::arg("vocab_size"), py::arg("num_layers"), py::arg("num_attention_layers"), py::arg("num_rnn_layers"),
-            py::arg("num_heads"), py::arg("hidden_size"), py::arg("data_type"))
+            py::arg("num_heads"), py::arg("hidden_size"), py::arg("data_type"), py::arg("vocab_sizes") = py::none())
         .def_property_readonly("vocab_size", &tr::ModelConfig::getVocabSize)
-        .def("vocab_size_padded", &tr::ModelConfig::getVocabSizePadded, py::arg("world_size"))
+        .def(
+            "vocab_size_padded", &tr::ModelConfig::getVocabSizePadded, py::arg("world_size"), py::arg("vocab_size") = 0)
         .def("num_layers", &tr::ModelConfig::getNbLayers, py::arg("pipeline_parallelism") = 1)
         .def("num_attention_layers", &tr::ModelConfig::getNbAttentionLayers, py::arg("pipeline_parallelism") = 1,
             py::arg("pipeline_parallelism_rank") = 0)
@@ -317,6 +319,8 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
         .def_property_readonly("hidden_size", &tr::ModelConfig::getHiddenSize)
         .def_property_readonly("size_per_head", &tr::ModelConfig::getSizePerHead)
         .def_property_readonly("data_type", &tr::ModelConfig::getDataType)
+        .def_property_readonly("num_vocabs", &tr::ModelConfig::getNumVocabs)
+        .def_property_readonly("vocab_sizes", &tr::ModelConfig::getVocabSizes)
         .def_property("head_size", &tr::ModelConfig::getSizePerHead, &tr::ModelConfig::setSizePerHead)
         .def_property(
             "num_kv_heads_per_layer", &tr::ModelConfig::getNumKvHeadsPerLayer, &tr::ModelConfig::setNumKvHeadsPerLayer)
@@ -325,6 +329,15 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
             py::overload_cast<bool>(&tr::ModelConfig::useGptAttentionPlugin))
         .def_property("use_packed_input", py::overload_cast<>(&tr::ModelConfig::usePackedInput, py::const_),
             py::overload_cast<bool>(&tr::ModelConfig::usePackedInput))
+        .def_property("use_attention_prior", py::overload_cast<>(&tr::ModelConfig::useAttentionPrior, py::const_),
+            py::overload_cast<bool>(&tr::ModelConfig::useAttentionPrior))
+        .def_property("use_context_embeddings", py::overload_cast<>(&tr::ModelConfig::useContextEmbeddings, py::const_),
+            py::overload_cast<bool>(&tr::ModelConfig::useContextEmbeddings))
+        .def_property("compute_attention_prior_from_layers", &tr::ModelConfig::getComputeAttentionPriorFromLayers, &tr::ModelConfig::setComputeAttentionPriorFromLayers)
+        .def_property("apply_attention_prior_to_layers", &tr::ModelConfig::getApplyAttentionPriorToLayers, &tr::ModelConfig::setApplyAttentionPriorToLayers)
+        .def_property("attention_prior_lookahead", &tr::ModelConfig::getAttentionPriorLookahead, &tr::ModelConfig::setAttentionPriorLookahead)
+        .def_property("attention_prior_window_left", &tr::ModelConfig::getAttentionPriorWindowLeft, &tr::ModelConfig::setAttentionPriorWindowLeft)
+        .def_property("attention_prior_window_right", &tr::ModelConfig::getAttentionPriorWindowRight, &tr::ModelConfig::setAttentionPriorWindowRight)
         .def_property("kv_cache_type", py::overload_cast<>(&tr::ModelConfig::getKVCacheType, py::const_),
             py::overload_cast<tr::ModelConfig::KVCacheType>(&tr::ModelConfig::setKVCacheType))
         .def_property("tokens_per_block", &tr::ModelConfig::getTokensPerBlock, &tr::ModelConfig::setTokensPerBlock)
@@ -395,7 +408,7 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
     };
     auto SamplingConfigSetState = [](py::tuple t) -> tr::SamplingConfig
     {
-        assert(t.size() == 19);
+        assert(t.size() == 20);
 
         tr::SamplingConfig config;
         config.beamWidth = t[0].cast<SizeType32>();
@@ -417,6 +430,7 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
         config.numReturnSequences = t[16].cast<SizeType32>();
         config.minP = t[17].cast<OptVec<float>>();
         config.beamWidthArray = t[18].cast<OptVec<std::vector<SizeType32>>>();
+        config.cfgScale = t[19].cast<OptVec<float>>();
 
         return config;
     };
@@ -444,6 +458,7 @@ PYBIND11_MODULE(TRTLLM_PYBIND_MODULE, m)
         .def_readwrite("num_return_sequences", &tr::SamplingConfig::numReturnSequences)
         .def_readwrite("min_p", &tr::SamplingConfig::minP)
         .def_readwrite("beam_width_array", &tr::SamplingConfig::beamWidthArray)
+        .def_readwrite("cfg_scale", &tr::SamplingConfig::cfgScale)
         .def(py::pickle(SamplingConfigGetState, SamplingConfigSetState))
         .def("__eq__", &tr::SamplingConfig::operator==);
 

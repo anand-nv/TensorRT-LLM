@@ -159,7 +159,7 @@ inline void multi_block_grid_setup(dim3& grid, Multihead_attention_params<T, DO_
                 BLOCK_SPARSE_ATTN, IMPLICIT_REL_ATTN_BIAS, ATTN_LOGIT_SOFTCAPPING>,                                    \
             cudaFuncAttributeMaxDynamicSharedMemorySize, dynamic_smem_sz);                                             \
         TLLM_CHECK_WITH_INFO(                                                                                          \
-            res == cudaSuccess, "Sequence Length is too long for the MMHA kernel (not enough shared memory).");        \
+            res == cudaSuccess, "Sequence Length is too long for the MMHA kernel (not enough shared memory). Need %d bytes shared memory.", (int)dynamic_smem_sz);        \
     }                                                                                                                  \
     TLLM_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&available_blocks,                                   \
         mmha::masked_multihead_attention_kernel<T, T_cache, TKcache, KVCacheBuffer, KCacheBuffer, Dh,                  \
@@ -172,14 +172,14 @@ inline void multi_block_grid_setup(dim3& grid, Multihead_attention_params<T, DO_
         mmha::smem_size_in_bytes<T, Dh, ENABLE_MULTI_BLOCK>(params, DYNAMIC_THDS_PER_BLOCK)};                          \
     /* Set 46KB threshold here because we have to take static/driver shared memory into consideration. */              \
     if (dynamic_smem_sz >= 46 * 1024)                                                                                  \
-    {                                                                                                                  \
+    {                                                                                              \
         cudaError_t res = cudaFuncSetAttribute(                                                                        \
             mmha::masked_multihead_attention_kernel<T, T_cache, TKcache, KVCacheBuffer, KCacheBuffer, Dh,              \
                 DYNAMIC_THDS_PER_BLOCK, KernelParamsType::DO_CROSS_ATTENTION, HAS_BEAMS, ENABLE_MULTI_BLOCK,           \
                 POS_SHIFT, BLOCK_SPARSE_ATTN, IMPLICIT_REL_ATTN_BIAS, ATTN_LOGIT_SOFTCAPPING>,                         \
             cudaFuncAttributeMaxDynamicSharedMemorySize, dynamic_smem_sz);                                             \
         TLLM_CHECK_WITH_INFO(                                                                                          \
-            res == cudaSuccess, "Sequence Length is too long for the MMHA kernel (not enough shared memory).");        \
+            res == cudaSuccess, "Sequence Length is too long for the MMHA kernel (not enough shared memory). Need %d bytes shared memory.", (int)dynamic_smem_sz);        \
     }                                                                                                                  \
     const auto mmhaFunc = mmha::masked_multihead_attention_kernel<T, T_cache, TKcache, KVCacheBuffer, KCacheBuffer,    \
         Dh, DYNAMIC_THDS_PER_BLOCK, KernelParamsType::DO_CROSS_ATTENTION, HAS_BEAMS, ENABLE_MULTI_BLOCK, POS_SHIFT,    \

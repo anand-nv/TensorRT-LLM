@@ -36,7 +36,7 @@ foreach(HEAD ${basic_heads})
   list(APPEND SRC_CU ${HEAD_SRCS})
 endforeach()
 
-# skip mmha 48, 80, 96, 104, 112, 144, 160, 192 and 224 for fast build
+# skip mmha 48, 80, 96, 104, 112, 144, 160, 192, 224 and 768 for fast build
 if(FAST_BUILD)
   set(extra_heads 256)
 else()
@@ -50,7 +50,8 @@ else()
       160
       192
       224
-      256)
+      256
+      768)
 endif()
 
 foreach(HEAD ${extra_heads})

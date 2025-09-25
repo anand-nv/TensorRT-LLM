@@ -76,7 +76,8 @@ public:
         std::optional<SizeType32> const& noRepeatNgramSize = std::nullopt,
         std::optional<SizeType32> const& numReturnSequences = std::nullopt,
         std::optional<FloatType> const& minP = std::nullopt,
-        std::optional<std::vector<SizeType32>> const& beamWidthArray = std::nullopt);
+        std::optional<std::vector<SizeType32>> const& beamWidthArray = std::nullopt,
+        std::optional<FloatType> const& cfgScale = std::nullopt);
 
     bool operator==(SamplingConfig const& other) const;
 
@@ -102,6 +103,7 @@ public:
     [[nodiscard]] std::optional<SizeType32> getNumReturnSequences() const;
     [[nodiscard]] std::optional<FloatType> getMinP() const;
     [[nodiscard]] std::optional<std::vector<SizeType32>> getBeamWidthArray() const;
+    [[nodiscard]] std::optional<FloatType> getCfgScale() const;
 
     void setBeamWidth(SizeType32 beamWidth);
     void setTopK(std::optional<SizeType32> const& topK);
@@ -124,6 +126,7 @@ public:
     void setNumReturnSequences(std::optional<SizeType32> const& numReturnSequences);
     void setMinP(std::optional<FloatType> const& minP);
     void setBeamWidthArray(std::optional<std::vector<SizeType32>> const& beamWidthArray);
+    void setCfgScale(std::optional<FloatType> const& cfgScale);
 
 private:
     static SizeType32 checkBeamWidth(SizeType32 beamWidth);
@@ -145,6 +148,9 @@ private:
     static std::optional<FloatType> const& checkMinP(std::optional<FloatType> const& minP);
     static std::optional<std::vector<SizeType32>> const& checkBeamWidthArray(
         std::optional<std::vector<SizeType32>> const& beamWidthArray, std::optional<SizeType32> const beamWidth);
+    static std::optional<FloatType> const& checkCfgScale(std::optional<FloatType> const& cfgScale);
+
+
     void updateNumReturnBeams();
 
     friend class Serialization;
@@ -196,6 +202,8 @@ private:
     std::optional<FloatType> mMinP;
     /// @brief Controls the beam width for each step for Variable-Beam-Width-Search.
     std::optional<std::vector<SizeType32>> mBeamWidthArray;
+    /// @brief Controls the cfg scale for sampling.
+    std::optional<FloatType> mCfgScale;
 };
 
 /// @brief Additional output that should be gathered.
@@ -627,6 +635,7 @@ public:
     /// @param encoderInputFeatures Encoder input features for multimodal models.
     /// @param encoderOutputLength Encoder output length if encoder input and output have different lengths (due to
     /// convolution down-sampling, etc.)
+    /// @param decoderContextFeatures Decoder context features for multimodal models.
     /// @param crossAttentionMask Cross attention mask.
     /// @param numReturnSequences The number of returning sequences.
     /// @param eagleConfig The EAGLE speculative decoding configuration
@@ -636,7 +645,8 @@ public:
     /// @param allottedTimeMs The allotted time in milliseconds after which the request is finished with a timedOut
     /// finish reason. The request always will exceed this time slightly, but at most with 1 forward pass. A request can
     /// be timed-out before ever being scheduled.
-    // 34 parameters
+    /// @param numVocabs The number of vocabs.
+
     Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming = false,
         SamplingConfig const& samplingConfig = SamplingConfig(), OutputConfig const& outputConfig = OutputConfig(),
         std::optional<SizeType32> const& endId = std::nullopt, std::optional<SizeType32> const& padId = std::nullopt,
@@ -657,11 +667,12 @@ public:
         std::optional<ContextPhaseParams> contextPhaseParams = std::nullopt,
         std::optional<Tensor> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<Tensor> decoderContextFeatures = std::nullopt,
         std::optional<Tensor> crossAttentionMask = std::nullopt, SizeType32 numReturnSequences = 1,
         std::optional<EagleConfig> eagleConfig = std::nullopt, std::optional<Tensor> skipCrossAttnBlocks = std::nullopt,
         std::optional<GuidedDecodingParams> guidedDecodingParams = std::nullopt,
         std::optional<SizeType32> languageAdapterUid = std::nullopt,
-        std::optional<MillisecondsType> allottedTimeMs = std::nullopt);
+        std::optional<MillisecondsType> allottedTimeMs = std::nullopt, SizeType32 numVocabs = 1);
 
     /// @brief This logits postprocessor name will dispatch to the batched logits postprocessor
     static auto constexpr kBatchedPostProcessorName = "batched";
@@ -701,6 +712,7 @@ public:
     [[nodiscard]] std::optional<ContextPhaseParams> const& getContextPhaseParams() const;
     [[nodiscard]] std::optional<Tensor> getEncoderInputFeatures() const;
     [[nodiscard]] std::optional<SizeType32> getEncoderOutputLength() const;
+    [[nodiscard]] std::optional<Tensor> getDecoderContextFeatures() const;
     [[nodiscard]] std::optional<Tensor> getCrossAttentionMask() const;
     [[nodiscard]] RequestType getRequestType() const;
     [[nodiscard]] SizeType32 getNumReturnSequences() const;
@@ -710,7 +722,7 @@ public:
     [[nodiscard]] std::optional<SizeType32> getLanguageAdapterUid() const;
     [[nodiscard]] std::optional<MillisecondsType> getAllottedTimeMs() const;
     [[nodiscard]] std::optional<std::vector<std::string>> getAdditionalOutputNames() const;
-
+    [[nodiscard]] SizeType32 getNumVocabs() const;
     void setStreaming(bool streaming);
     void setSamplingConfig(SamplingConfig const& config);
     void setOutputConfig(OutputConfig const& outputConfig);
@@ -736,6 +748,7 @@ public:
     void setContextPhaseParams(ContextPhaseParams contextPhaseParams);
     void setEncoderInputFeatures(Tensor encoderInputFeatures);
     void setEncoderOutputLength(SizeType32 encoderOutputLength);
+    void setDecoderContextFeatures(Tensor decoderContextFeatures);
     void setCrossAttentionMask(Tensor crossAttentionMask);
     void setNumReturnSequences(SizeType32 numReturnSequences);
     void setEagleConfig(std::optional<EagleConfig> const& eagleConfig);
@@ -743,6 +756,7 @@ public:
     void setGuidedDecodingParams(GuidedDecodingParams const& guidedDecodingParams);
     void setLanguageAdapterUid(SizeType32 languageAdapterUid);
     void setAllottedTimeMs(MillisecondsType allottedTimeMs);
+    void setNumVocabs(SizeType32 numVocabs);
 
 private:
     friend class Serialization;

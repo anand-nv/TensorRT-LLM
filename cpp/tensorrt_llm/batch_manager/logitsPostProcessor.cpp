@@ -59,7 +59,7 @@ bool LogitsPostProcessor::operator()(RequestVector const& contextRequests, Reque
                     logitsPostProcessorIsApplied = true;
                     if (replicateLogitsPostProcessor || worldConfig.isFirstTensorParallelRank())
                     {
-                        auto& logits = decoderBuffers.logits.at(llmReq->mSeqSlot.value());
+                        auto& logits = decoderBuffers.logits.at(llmReq->mSeqSlots.at(0));
                         (*llmReq->mLogitsPostProcessor)(
                             llmReq->mRequestId, logits, llmReq->getTokens(), runtime.getStreamPtr(), llmReq->mClientId);
                     }
@@ -68,7 +68,7 @@ bool LogitsPostProcessor::operator()(RequestVector const& contextRequests, Reque
                 {
                     reqIdsVec.push_back(llmReq->mRequestId);
 
-                    auto& logits = decoderBuffers.logits.at(llmReq->mSeqSlot.value());
+                    auto& logits = decoderBuffers.logits.at(llmReq->mSeqSlots.at(0));
                     logitsVec.push_back(logits);
 
                     beamTokensVec.emplace_back(llmReq->getTokens());

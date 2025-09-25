@@ -133,6 +133,11 @@ public:
     {
         return std::vector<runtime::SizeType32>{1};
     }
+
+    [[nodiscard]] __host__ __device__ static constexpr float getCfgScale()
+    {
+        return 1.0f;
+    }
 };
 } // namespace layers
 } // namespace tensorrt_llm

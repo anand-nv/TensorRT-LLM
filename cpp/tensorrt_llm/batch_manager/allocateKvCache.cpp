@@ -30,14 +30,9 @@ void tensorrt_llm::batch_manager::AllocateKvCache::operator()(BaseKVCacheManager
     {
         if (llmReq->isFirstContextChunk())
         {
-            auto const requestId = llmReq->mRequestId;
             auto const promptLen = llmReq->mPromptLen;
             auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
             auto draftLength = llmReq->getNumDraftTokens();
-
-            // Allocate/Reuse KV cache
-            kvCacheManager.addSequence(requestId, promptLen, reqBeamWidth, llmReq);
-
             // EagleNet will increment kv cache up to maxPathLen to account for accepted tokens.
             // Then up to maxDecodingDraftTokens will be used to generate next draft tokens.
             if (modelConfig.getSpeculativeDecodingMode().isEagle())
@@ -45,26 +40,31 @@ void tensorrt_llm::batch_manager::AllocateKvCache::operator()(BaseKVCacheManager
                 draftLength = modelConfig.getSpeculativeDecodingModule().getMaxPathLen()
                     + modelConfig.getSpeculativeDecodingModule().getMaxDecodingTokens();
             }
+            for (int i = 0; i < llmReq->getNumSequences(); i++) {
+                auto const requestId = llmReq->getSeqSlotId(i);
 
-            // Allocate more KV cache for speculative decoding
-            if (draftLength > 0)
-            {
-                for (SizeType32 di = 0; di < draftLength; ++di)
+                // Allocate/Reuse KV cache
+                kvCacheManager.addSequence(requestId, promptLen, reqBeamWidth, llmReq);
+
+                // Allocate more KV cache for speculative decoding
+                if (draftLength > 0)
                 {
-                    kvCacheManager.addToken(requestId);
+                    for (SizeType32 di = 0; di < draftLength; ++di)
+                    {
+                        kvCacheManager.addToken(requestId);
+                    }
                 }
-            }
 
-            if (crossKvCacheManager)
-            {
-                crossKvCacheManager->addSequence(requestId, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
+                if (crossKvCacheManager)
+                {
+                    crossKvCacheManager->addSequence(requestId, llmReq->getEncoderOutputLen(), reqBeamWidth, llmReq);
+                }
             }
         }
     }
 
     for (auto const& llmReq : generationRequests)
     {
-        auto const requestId = llmReq->mRequestId;
         auto decodingTokens = llmReq->getNumDraftTokens() + 1;
 
         // EagleNet will increment kv cache up to maxPathLen to account for accepted tokens.
@@ -74,10 +74,12 @@ void tensorrt_llm::batch_manager::AllocateKvCache::operator()(BaseKVCacheManager
             decodingTokens = modelConfig.getSpeculativeDecodingModule().getMaxPathLen()
                 + modelConfig.getSpeculativeDecodingModule().getMaxDecodingTokens();
         }
-
-        for (SizeType32 di = 0; di < decodingTokens; ++di)
-        {
-            kvCacheManager.addToken(requestId);
+        for (int i = 0; i < llmReq->getNumSequences(); i++) {
+            auto const requestId = llmReq->getSeqSlotId(i);    
+            for (SizeType32 di = 0; di < decodingTokens; ++di)
+            {
+                kvCacheManager.addToken(requestId);
+            }
         }
     }
 

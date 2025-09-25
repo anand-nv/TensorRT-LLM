@@ -114,6 +114,8 @@ public:
         tensorrt_llm::kernels::AttentionMaskType mask_type,
         tensorrt_llm::kernels::BlockSparseParams block_sparse_params, bool paged_kv_cache, int tokens_per_block,
         nvinfer1::DataType type, int32_t max_context_length, bool qkv_bias_enabled, bool cross_attention = false,
+        bool compute_attention_prior = false, bool apply_attention_prior = false,
+        int attention_prior_lookahead = 5, int attention_prior_window_left = 1, int attention_prior_window_right = 5,
         int max_distance = 0, bool pos_shift_enabled = false, bool dense_context_fmha = false,
         bool use_paged_context_fmha = true, bool use_fp8_context_fmha = true, bool has_full_attention_mask = false,
         bool use_cache = true, bool is_spec_decoding_enabled = false,
@@ -173,7 +175,7 @@ public:
 
 private:
     template <typename T, typename AttentionOutT, typename KVCacheBuffer>
-    int enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32_t tokenIdxBeg, int32_t localNbTokens,
+    int enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32_t contextNbSeq, int32_t tokenIdxBeg, int32_t localNbTokens,
         nvinfer1::PluginTensorDesc const* inputDesc, nvinfer1::PluginTensorDesc const* outputDesc,
         void const* const* inputs, void* const* outputs, void* workspace, cudaStream_t stream);
 
@@ -210,6 +212,7 @@ private:
         CROSS_KV,
         CROSS_KV_LENGTH,
         ENCODER_INPUT_LENGTH,
+        ATTENTION_PRIOR_FOCUS,
         HOST_CONTEXT_LENGTH,
         QKV_BIAS_TENSOR,
         SPEC_DECODING_GENERATION_LENGTHS,

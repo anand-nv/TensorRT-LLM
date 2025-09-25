@@ -37,18 +37,18 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<LogitsPostProcessor> logitslogitsPostProcessor, std::optional<VecTokens> encoderInputTokenIds,
     std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority, RequestType type,
     std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
-    std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
+    std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> decoderContextFeatures, std::optional<Tensor> crossAttentionMask,
     SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig, std::optional<Tensor> skipCrossAttnBlocks,
     std::optional<GuidedDecodingParams> guidedDecodingParams, std::optional<SizeType32> languageAdapterUid,
-    std::optional<MillisecondsType> allottedTimeMs)
+    std::optional<MillisecondsType> allottedTimeMs, SizeType32 numVocabs)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(mRopeConfig), std::move(loraConfig),
         lookaheadConfig, std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName),
         std::move(logitslogitsPostProcessor), std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens,
         priority, type, std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
-        crossAttentionMask, numReturnSequences, eagleConfig, skipCrossAttnBlocks, std::move(guidedDecodingParams),
-        languageAdapterUid, allottedTimeMs))
+        std::move(decoderContextFeatures), crossAttentionMask, numReturnSequences, eagleConfig, skipCrossAttnBlocks,
+        std::move(guidedDecodingParams), languageAdapterUid, allottedTimeMs, numVocabs))
 {
 }
 
@@ -213,6 +213,11 @@ std::optional<Tensor> Request::getEncoderInputFeatures() const
     return mImpl->getEncoderInputFeatures();
 }
 
+std::optional<Tensor> Request::getDecoderContextFeatures() const
+{
+    return mImpl->getDecoderContextFeatures();
+}
+
 std::optional<SizeType32> Request::getEncoderOutputLength() const
 {
     return mImpl->getEncoderOutputLength();
@@ -249,6 +254,11 @@ std::optional<GuidedDecodingParams> Request::getGuidedDecodingParams() const
 std::optional<SizeType32> Request::getLanguageAdapterUid() const
 {
     return mImpl->getLanguageAdapterUid();
+}
+
+SizeType32 Request::getNumVocabs() const
+{
+    return mImpl->getNumVocabs();
 }
 
 void Request::setStreaming(bool streaming)
@@ -371,6 +381,11 @@ void Request::setEncoderInputFeatures(Tensor encoderInputFeatures)
     return mImpl->setEncoderInputFeatures(encoderInputFeatures);
 }
 
+void Request::setDecoderContextFeatures(Tensor decoderContextFeatures)
+{
+    return mImpl->setDecoderContextFeatures(decoderContextFeatures);
+}
+
 void Request::setEncoderOutputLength(SizeType32 encoderOutputLength)
 {
     return mImpl->setEncoderOutputLength(encoderOutputLength);
@@ -412,5 +427,10 @@ void Request::setAllottedTimeMs(MillisecondsType allottedTimeMs)
 void Request::setLanguageAdapterUid(SizeType32 languageAdapterUid)
 {
     return mImpl->setLanguageAdapterUid(languageAdapterUid);
+}
+
+void Request::setNumVocabs(SizeType32 numVocabs)
+{
+    return mImpl->setNumVocabs(numVocabs);
 }
 } // namespace tensorrt_llm::executor

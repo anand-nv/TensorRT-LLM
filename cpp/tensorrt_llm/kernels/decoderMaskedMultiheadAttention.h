@@ -201,6 +201,16 @@ struct Multihead_attention_params_base
 
     int const* memory_length_per_sample = nullptr;
     int32_t const* mrope_position_deltas = nullptr;
+
+    // fields related to attention prior:
+    // scores which accumulate window of cross attention probs
+    // and focus which specifies which index in encoder output sequence
+    float* attention_prior_scores = nullptr;
+    int const* attention_prior_focus = nullptr;
+    bool apply_attention_prior = false;
+    int attention_prior_lookahead = 5;
+    int attention_prior_window_left = 1;
+    int attention_prior_window_right = 5;
 };
 
 template <typename T, bool USE_CROSS_ATTENTION = false>

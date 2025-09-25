@@ -450,7 +450,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
             len(x) for x in encoder_input_ids
         ] if encoder_input_ids else [len(x) for x in batch_input_ids]
         max_length = max(input_lengths)
-        if max_length > self.max_input_len:
+        if max_length > self.max_input_len * len(self.model_config.vocab_sizes):
             raise RuntimeError(
                 f"Maximum input length ({max_length}) exceeds the engine or specified limit ({self.max_input_len})"
             )
@@ -461,7 +461,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                     f"Decoder prefix tokens ({decoder_max_length}) + maximum new tokens ({max_new_tokens}) exceeds the engine or specified limit ({self.max_seq_len})"
                 )
         else:
-            if max_length + max_new_tokens > self.max_seq_len:
+            if max_length + max_new_tokens > self.max_seq_len * len(
+                    self.model_config.vocab_sizes):
                 raise RuntimeError(
                     f"Maximum input length ({max_length}) + maximum new tokens ({max_new_tokens}) exceeds the engine or specified limit ({self.max_seq_len})"
                 )
@@ -525,6 +526,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
             encoder_input_features: List[
                 torch.Tensor] = None,  # TODO: add to doc string
             encoder_output_lengths: List[int] = None,
+            decoder_context_features: List[torch.Tensor] = None,
             cross_attention_masks: List[
                 torch.Tensor] = None,  # TODO: add to doc string
             mrope_params: Optional[MropeParams] = None,
@@ -566,6 +568,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 A list of encoder input feature tensors for multimodal encoder-decoder models (optional). Each tensor is of shape (sequence_length, feature_dim).
             encoder_output_lengths: (List[int]):
                 A list of encoder output lengths (optional) if encoder output has different length from encoder input (due to convolution down-sampling, etc.)
+            decoder_context_features (List[torch.Tensor]):
+                A list of decoder context feature tensors for multimodal decoder-only models (optional). Each tensor is of shape (sequence_length, feature_dim).
             sampling_config (SamplingConfig):
                 The sampling configuration to be used as base parametrization for the generation call.
                 The passed **kwargs matching the sampling_config's attributes will override them.
@@ -638,6 +642,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 "num_return_sequences",
                 "min_p",
                 "beam_width_array",
+                "cfg_scale",
             ]
             rename_params = {"num_beams": "beam_width", "random_seed": "seed"}
             sampling_params = {
@@ -742,6 +747,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 if encoder_output_lengths is not None else None,
                 encoder_input_features=encoder_input_features[i].contiguous()
                 if encoder_input_features is not None else None,
+                decoder_context_features=decoder_context_features[i].contiguous()
+                if decoder_context_features is not None else None,
                 position_ids=position_ids[i].tolist()
                 if position_ids is not None else None,
                 cross_attention_mask=cross_attention_masks[i].contiguous() if
@@ -766,6 +773,9 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 external_draft_tokens_config=external_draft_tokens_config,
                 skip_cross_attn_blocks=skip_cross_attn_blocks,
                 language_adapter_uid=language_adapter_uid,
+                num_vocabs=len(self.model_config.vocab_sizes) if
+                (hasattr(self.model_config, 'vocab_sizes')
+                 and self.model_config.vocab_sizes) else 1,
             ) for i,
             (input_ids, stop_words, bad_words, prompt_tuning_config,
              mrope_config, lora_config, logits_post_processor_name,
@@ -1053,7 +1063,8 @@ class ModelRunnerCpp(ModelRunnerMixin):
 
             input_lengths = torch.tensor([x.size(0) for x in batch_input_ids],
                                          dtype=torch.int32,
-                                         device=cuda_device)
+                                         device=cuda_device) // len(
+                                             self.model_config.vocab_sizes)
 
             if output_sequence_lengths:
                 outputs['sequence_lengths'] = torch.tensor(sequence_lengths,

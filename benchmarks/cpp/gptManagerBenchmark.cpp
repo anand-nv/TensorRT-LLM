@@ -40,6 +40,8 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <fstream>
+#include <filesystem>
 
 using namespace tensorrt_llm::batch_manager;
 using namespace tensorrt_llm::runtime;
@@ -52,6 +54,91 @@ namespace
 {
 
 using TensorPtr = ITensor::SharedPtr;
+
+// Add function to read model dtype from config
+std::string getModelDtype(std::optional<std::filesystem::path> const& engineDir, texec::ModelType modelType)
+{
+    if (!engineDir.has_value())
+    {
+        return "float16"; // default fallback
+    }
+
+    std::filesystem::path configPath = engineDir.value() / "config.json";
+    if (!std::filesystem::exists(configPath))
+    {
+        TLLM_LOG_WARNING("Config file not found at %s, using default dtype float16", configPath.string().c_str());
+        return "float32";
+    }
+
+    try
+    {
+        std::ifstream configFile(configPath);
+        nlohmann::json config;
+        configFile >> config;
+
+        std::string dtype = "float32"; // default
+        
+        // Check if this is an engine config or checkpoint config
+        if (config.contains("pretrained_config"))
+        {
+            // Engine format
+            if (config["pretrained_config"].contains("dtype"))
+            {
+                dtype = config["pretrained_config"]["dtype"].get<std::string>();
+            }
+        }
+        TLLM_LOG_INFO("Detected model dtype: %s", dtype.c_str());
+        return dtype;
+    }
+    catch (std::exception const& e)
+    {
+        TLLM_LOG_WARNING("Failed to read dtype from config: %s, using default float16", e.what());
+        return "float32";
+    }
+}
+
+// Add function to cast inputFeat tensor from fp32 to fp16 on CPU
+texec::Tensor castInputFeatHalf(texec::Tensor const& inputFeat, std::string const& modelDtype)
+{
+    auto currentDtype = inputFeat.getDataType();
+    auto memoryType = inputFeat.getMemoryType();
+    
+    // Only cast CPU tensors from fp32 to fp16
+    if (currentDtype != texec::DataType::kFP32 || memoryType != texec::MemoryType::kCPU)
+    {
+        TLLM_LOG_WARNING("InputFeat tensor is not fp32 or not on CPU, skipping cast");
+        return inputFeat;
+    }
+
+    try
+    {
+        auto shape = inputFeat.getShape();
+        auto numElements = inputFeat.getSize();
+        
+        // Create new fp16 tensor on CPU
+        texec::Tensor castedTensor = texec::Tensor::cpu(texec::DataType::kFP16, shape);
+        
+        // Cast data from fp32 to fp16
+        auto const* sourceData = static_cast<float const*>(inputFeat.getData());
+        auto* targetData = static_cast<half*>(castedTensor.getData());
+        
+        for (size_t i = 0; i < numElements; ++i)
+        {
+            targetData[i] = static_cast<half>(sourceData[i]);
+        }
+        TLLM_LOG_DEBUG("Casted inputFeat tensor from fp32 to fp16");
+
+        auto stream = std::make_shared<tensorrt_llm::runtime::CudaStream>();
+        texec::Tensor castedTensorGpu = castedTensor.copyToGpu(stream);
+
+        return castedTensorGpu;
+    }
+    catch (std::exception const& e)
+    {
+        TLLM_LOG_WARNING("Failed to cast inputFeat tensor to fp16: %s, keeping original", e.what());
+        return inputFeat;
+    }
+}
 
 class LoraLib
 {
@@ -810,18 +897,22 @@ private:
 namespace
 {
 
-texec::Request makeExecutorRequest(Sample const& sample, SizeType32 const& beamWidth,
-    std::optional<SizeType32> const& eosId, std::optional<SizeType32> const& padId, bool streaming = false,
+texec::Request makeExecutorRequest(texec::VecTokens inputTokenIds, SizeType32 outputLen, SizeType32 const& beamWidth,
+    std::optional<SizeType32> const& eosId, std::optional<SizeType32> const& padId, SizeType32 num_vocabs = 1, bool streaming = false,
     bool const& returnContextLogits = false, bool const& returnGenerationLogits = false,
     std::optional<texec::LoraConfig> const& loraConfig = std::nullopt,
     std::optional<texec::LookaheadDecodingConfig> const& lookaheadConfig = std::nullopt,
     std::optional<texec::VecTokens> encoderInputTokenIds = std::nullopt,
-    std::optional<float> temperature = std::nullopt)
+    std::optional<texec::Tensor> encoderFeatures = std::nullopt,
+    std::optional<texec::Tensor> contextFeatures = std::nullopt,
+    std::optional<SizeType32> encoderOutLen = std::nullopt,
+    std::optional<float> temperature = std::nullopt, std::optional<float> cfgScale = std::nullopt)
 {
     auto samplingConfig = texec::SamplingConfig{beamWidth};
     samplingConfig.setTemperature(temperature);
+    samplingConfig.setCfgScale(cfgScale);
     auto outputConfig = texec::OutputConfig{false, returnContextLogits, returnGenerationLogits, false};
-    return texec::Request(sample.inputIds, sample.outputLen, streaming, samplingConfig, outputConfig, eosId, padId,
+    auto request = texec::Request(inputTokenIds, outputLen, streaming, samplingConfig, outputConfig, eosId, padId,
         std::nullopt,    // positionIds
         std::nullopt,    // badWords
         std::nullopt,    // stopWords
@@ -834,7 +925,19 @@ texec::Request makeExecutorRequest(Sample const& sample, SizeType32 const& beamW
         std::nullopt,    // kvCacheRetentionConfig
         std::nullopt,    // logitsPostProcessorName
         std::nullopt,    // logitsPostProcessor
-        encoderInputTokenIds.has_value() ? encoderInputTokenIds : std::nullopt);
+        encoderInputTokenIds.has_value() && encoderInputTokenIds.value().size() > 0 ? encoderInputTokenIds : std::nullopt,
+        std::nullopt,    // client id
+        false,           // returnAllGeneratedTokens
+        tensorrt_llm::executor::Request::kDefaultPriority,  // priority
+        tensorrt_llm::executor::RequestType::REQUEST_TYPE_CONTEXT_AND_GENERATION,  // type
+        std::nullopt,    // ContextPhaseParams
+        encoderFeatures.has_value() && encoderFeatures.value().getSize() > 0 ? encoderFeatures : std::nullopt,
+        encoderOutLen,
+        contextFeatures.has_value() && contextFeatures.value().getSize() > 0 ? contextFeatures : std::nullopt);
+    if (num_vocabs > 1) {
+        request.setNumVocabs(num_vocabs);
+    }
+    return request;
 }
 
 void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngineDir,
@@ -844,14 +947,33 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
     texec::CapacitySchedulerPolicy capacitySchedulerPolicy, std::chrono::milliseconds waitSleep,
     bool returnContextLogits, bool returnGenerationLogits, std::optional<int> const staticEmulatedBatchSize,
     bool logIterationData, std::optional<SizeType32> const maxPromptLen, texec::ModelType executorModelType,
-    std::string const& responsesJsonFile)
+    std::string const& responsesJsonFile, SizeType32 num_vocabs)
 {
     auto const& world = tensorrt_llm::mpi::MpiComm::world();
     auto worldRank = world.getRank();
 
+    // Determine model dtype from config
+    std::string modelDtype = "float32"; // default
+    if (decoderEngineDir.has_value()) {
+        modelDtype = getModelDtype(decoderEngineDir, executorModelType);
+    }
+
     // Load dataset
-    auto const samples = parseWorkloadJson(datasetPath, maxNumSamples, maxPromptLen);
+    auto samples = parseWorkloadJson(datasetPath, maxNumSamples, maxPromptLen);
     auto const numSamples = samples.size();
+
+    // Cast inputFeat tensors from fp32 to fp16 if model is fp16
+    for (auto& sample : samples)
+    {
+        if (sample.inputFeat.getSize() > 0)
+        {
+            sample.inputFeat = castInputFeatHalf(sample.inputFeat, modelDtype);
+        }
+        if (sample.contextFeat.getSize() > 0)
+        {
+            sample.contextFeat = castInputFeatHalf(sample.contextFeat, modelDtype);
+        }
+    }
 
     auto recorder = std::make_shared<Recorder>(opCsvFile, benchmarkParams.streaming, beamWidth, responsesJsonFile);
     int32_t decoderStartTokenId = 0;
@@ -920,17 +1042,24 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
                 p.second->squeeze(0);
                 texec::LoraConfig loraConfig(
                     taskId, texec::detail::ofITensor(p.first), texec::detail::ofITensor(p.second));
+                std::vector<int32_t> inputIds{1, 2, 3, 4, 5};
                 if (executorModelType == texec::ModelType::kENCODER_DECODER)
                 {
-                    Sample s{std::vector<int32_t>{decoderStartTokenId}, 1, static_cast<int32_t>(taskId)};
-                    requests.emplace_back(makeExecutorRequest(s, beamWidth, eosId, padId, false, false, false,
-                        loraConfig, std::nullopt, std::vector<int32_t>{1, 2, 3, 4, 5}));
+                    std::vector<int32_t> contextIds{decoderStartTokenId};
+                    requests.emplace_back(makeExecutorRequest(
+                        contextIds, 1,
+                        beamWidth, eosId, padId, num_vocabs, false, false, false,
+                        loraConfig, std::nullopt, inputIds)
+                    );
                 }
                 else
                 {
-                    Sample s{std::vector<int32_t>{1, 2, 3, 4, 5}, 1, static_cast<int32_t>(taskId)};
                     requests.emplace_back(
-                        makeExecutorRequest(s, beamWidth, eosId, padId, false, false, false, loraConfig, std::nullopt));
+                        makeExecutorRequest(
+                            inputIds, 1, beamWidth,
+                            eosId, padId, num_vocabs, false, false, false, loraConfig, std::nullopt
+                        )
+                    );
                 }
             }
             executorServer->enqueue(std::move(requests), true);
@@ -944,18 +1073,25 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
             std::vector<texec::Request> requests;
             for (auto i = 0; i < warmUp; ++i)
             {
-                if (executorModelType == texec::ModelType::kENCODER_DECODER)
+                if (executorModelType == texec::ModelType::kENCODER_DECODER || samples[0].inputIds.empty())
                 {
-                    Sample s{std::vector<int32_t>{decoderStartTokenId}, samples[0].outputLen, samples[0].taskId};
-                    requests.emplace_back(makeExecutorRequest(s, beamWidth, eosId, padId, benchmarkParams.streaming,
-                        returnContextLogits, returnGenerationLogits, std::nullopt,
-                        benchmarkParams.requestLookaheadConfig, samples[0].inputIds));
+                    if (samples[0].contextIds.empty()) {
+                        samples[0].contextIds.push_back(decoderStartTokenId);
+                    }
+                    requests.emplace_back(makeExecutorRequest(samples[0].contextIds, samples[0].outputLen, beamWidth, eosId, padId, num_vocabs,
+                        benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, std::nullopt,
+                        benchmarkParams.requestLookaheadConfig, samples[0].inputIds, samples[0].inputFeat, samples[0].contextFeat, samples[0].inputLen,
+                        benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
                 else
                 {
-                    requests.emplace_back(makeExecutorRequest(samples[0], beamWidth, eosId, padId,
+                    requests.emplace_back(makeExecutorRequest(samples[0].inputIds, samples[0].outputLen, beamWidth, eosId, padId, num_vocabs,
                         benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, std::nullopt,
-                        benchmarkParams.requestLookaheadConfig, std::nullopt, benchmarkParams.temperature));
+                        benchmarkParams.requestLookaheadConfig, std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        std::nullopt,
+                        benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
             }
             executorServer->enqueue(std::move(requests), true);
@@ -977,18 +1113,22 @@ void benchmarkExecutor(std::optional<std::filesystem::path> const& decoderEngine
                 {
                     loraConfig = texec::LoraConfig(samples[i].taskId);
                 }
-                if (executorModelType == texec::ModelType::kENCODER_DECODER)
+                if (executorModelType == texec::ModelType::kENCODER_DECODER || samples[i].inputIds.empty())
                 {
-                    Sample s{std::vector<int32_t>{decoderStartTokenId}, samples[i].outputLen, samples[i].taskId};
-                    requests.emplace_back(makeExecutorRequest(s, beamWidth, eosId, padId, benchmarkParams.streaming,
-                        returnContextLogits, returnGenerationLogits, loraConfig, benchmarkParams.requestLookaheadConfig,
-                        samples[i].inputIds));
+                    if (samples[i].contextIds.empty()) {
+                        samples[i].contextIds.push_back(decoderStartTokenId);
+                    }
+                    requests.emplace_back(makeExecutorRequest(samples[i].contextIds, samples[i].outputLen, beamWidth, eosId, padId, num_vocabs,
+                        benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, loraConfig,
+                        benchmarkParams.requestLookaheadConfig, samples[i].inputIds, samples[i].inputFeat, samples[i].contextFeat, samples[i].inputLen,
+                        benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
                 else
                 {
-                    requests.emplace_back(makeExecutorRequest(samples[i], beamWidth, eosId, padId,
+                    requests.emplace_back(makeExecutorRequest(samples[i].inputIds, samples[i].outputLen, beamWidth, eosId, padId, num_vocabs,
                         benchmarkParams.streaming, returnContextLogits, returnGenerationLogits, loraConfig,
-                        benchmarkParams.requestLookaheadConfig, std::nullopt, benchmarkParams.temperature));
+                        benchmarkParams.requestLookaheadConfig, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+                        benchmarkParams.temperature, benchmarkParams.cfgScale));
                 }
             }
 
@@ -1145,6 +1285,7 @@ int main(int argc, char* argv[])
         "Minimum token probability threshold for typical acceptance. Enables typical acceptance in Eagle",
         cxxopts::value<float>());
     options.add_options()("temperature", "Sampling temperature for each request", cxxopts::value<float>());
+    options.add_options()("cfg_scale", "Scale of classifier-free guidance (CFG) for each request", cxxopts::value<float>());
     options.add_options()(
         "eagle_use_dynamic_tree", "Whether to use Eagle-2", cxxopts::value<bool>()->default_value("false"));
     options.add_options()("eagle_dynamic_tree_max_top_k",
@@ -1160,6 +1301,9 @@ int main(int argc, char* argv[])
         "Specify how many cuda graphs are cached in the runtime. Larger cache gives better perf, but consumes more GPU "
         "memory.",
         cxxopts::value<SizeType32>()->default_value("0"));
+    options.add_options()("num_vocabs",
+        "Input to decoder is flat, this specifies how many parallel vocabs are used by decoder.",
+        cxxopts::value<SizeType32>()->default_value("1"));
 
     options.add_options()("enable_context_fmha_fp32_acc", "Enable FMHA runner FP32 accumulation",
         cxxopts::value<bool>()->default_value("false"));
@@ -1262,18 +1406,10 @@ int main(int argc, char* argv[])
     {
         benchmarkParams.freeGpuMemoryFraction = result["kv_cache_free_gpu_mem_fraction"].as<float>();
     }
-    // Argument: K-V Cache Cross Attention Fraction. Only applicable to enc-dec models.
-    if (result.count("encoder_engine_dir") && result.count("decoder_engine_dir"))
+    // Argument: K-V Cache Cross Attention Fraction. Only applicable to models with xattn
+    if (result.count("cross_kv_cache_fraction"))
     {
-        if (result.count("cross_kv_cache_fraction"))
-        {
-            benchmarkParams.crossKvCacheFraction = result["cross_kv_cache_fraction"].as<float>();
-        }
-        else
-        {
-            benchmarkParams.crossKvCacheFraction
-                = 0.5f; // default value if not set. but non enc-dec should not even have this param set
-        }
+        benchmarkParams.crossKvCacheFraction = result["cross_kv_cache_fraction"].as<float>();
     }
 
     // Argument: Enable dynamic tuning of batch size
@@ -1389,6 +1525,10 @@ int main(int argc, char* argv[])
     {
         benchmarkParams.temperature = result["temperature"].as<float>();
     }
+    if (result.count("cfg_scale"))
+    {
+        benchmarkParams.cfgScale = result["cfg_scale"].as<float>();
+    }
 
     if (result.count("executor_lookahead_config"))
     {
@@ -1412,6 +1552,8 @@ int main(int argc, char* argv[])
 
     // Argument: cuda_graph_cache_size
     benchmarkParams.cudaGraphCacheSize = result["cuda_graph_cache_size"].as<SizeType32>();
+
+    auto num_vocabs = result["num_vocabs"].as<SizeType32>();
 
     std::optional<TokenIdType> padId;
     // Argument: Padding token id
@@ -1531,7 +1673,7 @@ int main(int argc, char* argv[])
             benchmarkExecutor(decoderEngineDir, encoderEngineDir, batchingType, datasetPath, opCsvFile, maxNumSamples,
                 beamWidth, result["warm_up"].as<int>(), eosId, padId, benchmarkParams, capacitySchedulerPolicy,
                 waitSleep, returnContextLogits, returnGenerationLogits, staticEmulatedBatchSize, logIterationData,
-                maxPromptLen, executorModelType, responsesJsonFile);
+                maxPromptLen, executorModelType, responsesJsonFile, num_vocabs);
         }
         catch (std::exception const& e)
         {

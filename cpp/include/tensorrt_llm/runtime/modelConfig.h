@@ -100,7 +100,8 @@ public:
     };
 
     explicit ModelConfig(SizeType32 vocabSize, SizeType32 nbLayers, SizeType32 nbAttentionLayers,
-        SizeType32 nbRnnLayers, SizeType32 nbHeads, SizeType32 hiddenSize, nvinfer1::DataType dtype)
+        SizeType32 nbRnnLayers, SizeType32 nbHeads, SizeType32 hiddenSize, nvinfer1::DataType dtype,
+        std::optional<std::vector<SizeType32>> vocabSizes = std::nullopt)
         : mVocabSize(vocabSize)
         , mNbLayers(nbLayers)
         , mNbAttentionLayers(nbAttentionLayers)
@@ -141,10 +142,19 @@ public:
         , mManageWeightsType(ManageWeightsType::kDisabled)
         , mSkipCrossAttnBlocks(false)
         , mNumLanguages(0)
+        , mVocabSizes{vocabSizes}
+        , mUseAttentionPrior(false)
+        , mUseContextEmbeddings(false)
     {
         TLLM_CHECK_WITH_INFO(mNbLayers >= mNbAttentionLayers + mNbRnnLayers,
             "Number of layers (%d) expected to be >= number of attention (%d) + number of rnn layers (%d)", mNbLayers,
             mNbAttentionLayers, mNbRnnLayers);
+        if (mVocabSizes)
+        {
+            SizeType32 const sizesSum = std::accumulate(mVocabSizes.value().cbegin(), mVocabSizes.value().cend(), 0);
+            TLLM_CHECK_WITH_INFO(
+                sizesSum == vocabSize, "Sum of all vocab sizes (%d) must equal to vocabSize (%d)", sizesSum, vocabSize);
+        }
         setNbKvHeads(mNbHeads);
     }
 
@@ -158,9 +168,93 @@ public:
         return mVocabSize;
     }
 
-    [[nodiscard]] SizeType32 constexpr getVocabSizePadded(SizeType32 worldSize) const noexcept
+    [[nodiscard]] SizeType32 getNumVocabs() const
     {
-        return (mVocabSize + worldSize - 1) / worldSize * worldSize;
+        return mVocabSizes ? mVocabSizes.value().size() : 1;
+    }
+
+    [[nodiscard]] std::vector<SizeType32> getVocabSizes() const
+    {
+        return mVocabSizes ? *mVocabSizes : std::vector<SizeType32>{mVocabSize};
+    }
+
+    [[nodiscard]] bool constexpr useAttentionPrior() const noexcept
+    {
+        return mUseAttentionPrior;
+    }
+
+    [[nodiscard]] bool constexpr useContextEmbeddings() const noexcept
+    {
+        return mUseContextEmbeddings;
+    }
+
+    void constexpr useAttentionPrior(bool useAttentionPrior) noexcept
+    {   
+        mUseAttentionPrior = useAttentionPrior;
+    }
+
+    void constexpr useContextEmbeddings(bool useContextEmbeddings) noexcept
+    {
+        mUseContextEmbeddings = useContextEmbeddings;
+    }
+
+    [[nodiscard]] std::vector<SizeType32> getComputeAttentionPriorFromLayers() const noexcept
+    {
+        return mComputeAttentionPriorFromLayers;
+    }
+    
+    [[nodiscard]] std::vector<SizeType32> getApplyAttentionPriorToLayers() const noexcept
+    {
+        return mApplyAttentionPriorToLayers;
+    }
+    
+    [[nodiscard]] SizeType32 constexpr getAttentionPriorLookahead() const noexcept
+    {
+        return mAttentionPriorLookahead;
+    }
+    
+    [[nodiscard]] SizeType32 constexpr getAttentionPriorWindowLeft() const noexcept
+    {
+        return mAttentionPriorWindowLeft;
+    }
+    
+    [[nodiscard]] SizeType32 constexpr getAttentionPriorWindowRight() const noexcept
+    {
+        return mAttentionPriorWindowRight;
+    }
+
+    void setComputeAttentionPriorFromLayers(std::vector<SizeType32> const& computeAttentionPriorFromLayers) noexcept
+    {
+        mComputeAttentionPriorFromLayers = computeAttentionPriorFromLayers;
+    }
+
+    void setApplyAttentionPriorToLayers(std::vector<SizeType32> const& applyAttentionPriorToLayers) noexcept
+    {
+        mApplyAttentionPriorToLayers = applyAttentionPriorToLayers;
+    }
+
+    void constexpr setAttentionPriorLookahead(SizeType32 attentionPriorLookahead) noexcept
+    {
+        mAttentionPriorLookahead = attentionPriorLookahead;
+    }
+
+    void constexpr setAttentionPriorWindowLeft(SizeType32 attentionPriorWindowLeft) noexcept
+    {
+        mAttentionPriorWindowLeft = attentionPriorWindowLeft;
+    }
+
+    void constexpr setAttentionPriorWindowRight(SizeType32 attentionPriorWindowRight) noexcept
+    {
+        mAttentionPriorWindowRight = attentionPriorWindowRight;
+    }
+
+    [[nodiscard]] SizeType32 constexpr getVocabSizePadded(SizeType32 worldSize, SizeType32 vocabSize = 0) const noexcept
+    {
+        if (vocabSize == 0)
+        {
+            vocabSize = mVocabSize;
+        }
+        return (vocabSize + worldSize - 1) / worldSize * worldSize;
     }
 
     [[nodiscard]] SizeType32 countLocalLayers(
@@ -934,6 +1028,17 @@ private:
 
     // Language adapter info
     std::optional<SizeType32> mNumLanguages;
+
+    // Size of each vocab if there are multiple vocabs
+    std::optional<std::vector<SizeType32>> mVocabSizes;
+    // parameters of attention prior
+    bool mUseAttentionPrior;
+    bool mUseContextEmbeddings;
+    std::vector<SizeType32> mComputeAttentionPriorFromLayers;
+    std::vector<SizeType32> mApplyAttentionPriorToLayers;
+    SizeType32 mAttentionPriorLookahead;
+    SizeType32 mAttentionPriorWindowLeft;
+    SizeType32 mAttentionPriorWindowRight;
 };
 
 } // namespace tensorrt_llm::runtime

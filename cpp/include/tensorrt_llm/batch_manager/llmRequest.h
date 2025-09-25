@@ -34,6 +34,7 @@
 #include <utility>
 #include <valarray>
 #include <vector>
+#include <limits>
 
 namespace tensorrt_llm::batch_manager
 {
@@ -119,6 +120,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         LlmRequestType llmRequestType = LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<std::shared_ptr<VecTokenExtraIds>> inputTokenExtraIds = std::nullopt,
@@ -127,9 +129,9 @@ public:
         std::optional<executor::GuidedDecodingParams> guidedDecodingParams = std::nullopt,
         std::optional<SizeType32> languageAdapterUid = std::nullopt,
         std::optional<MillisecondsType> allottedTimeMs = std::nullopt,
-        std::optional<executor::ContextPhaseParams> const& contextPhaseParams = std::nullopt)
+        std::optional<executor::ContextPhaseParams> const& contextPhaseParams = std::nullopt, SizeType32 numVocabs = 1)
         : mRequestId(requestId)
-        , mPromptLen(inputTokens->size())
+        , mPromptLen(inputTokens->size() / numVocabs)
         , mMaxNewTokens(maxNewTokens)
         , mSamplingConfig(samplingConfig)
         , mEndId(endId)
@@ -169,6 +171,7 @@ public:
         , mFinishReasons(samplingConfig.beamWidth)
         , mEncoderInputFeatures(std::move(encoderInputFeatures))
         , mEncoderOutputLength(encoderOutputLength)
+        , mDecoderContextFeatures(std::move(decoderContextFeatures))
         , mCrossAttentionMask(std::move(crossAttentionMask))
         , mLlmRequestType(llmRequestType)
         , mContextPhaseParams(contextPhaseParams)
@@ -180,6 +183,7 @@ public:
         , mGuidedDecodingParams(std::move(guidedDecodingParams))
         , mLanguageAdapterUid(languageAdapterUid)
         , mAllottedTimeMs(allottedTimeMs)
+        , mNumVocabs{numVocabs}
     {
         if (mEncoderTokens.has_value() || encoderInputFeatures.has_value())
         {
@@ -207,9 +211,9 @@ public:
         bool returnEncoderOutput = false, std::optional<RequestIdType> clientId = std::nullopt,
         executor::PriorityType priority = executor::Request::kDefaultPriority, SizeType32 numReturnSequences = 1,
         std::optional<SizeType32> languageAdapterUid = std::nullopt,
-        std::optional<executor::ContextPhaseParams> const& contextPhaseParams = std::nullopt)
+        std::optional<executor::ContextPhaseParams> const& contextPhaseParams = std::nullopt, SizeType32 numVocabs = 1)
         : mRequestId(requestId)
-        , mPromptLen(inputTokens.size())
+        , mPromptLen(inputTokens.size() / numVocabs)
         , mMaxNewTokens(maxNewTokens)
         , mSamplingConfig(samplingConfig)
         , mEndId(endId)
@@ -247,6 +251,7 @@ public:
         , mContextPhaseParams(contextPhaseParams)
         , mNumReturnSequences(numReturnSequences)
         , mLanguageAdapterUid(languageAdapterUid)
+        , mNumVocabs{numVocabs}
     {
         if (mEncoderTokens.has_value())
         {
@@ -258,7 +263,7 @@ public:
     // 29 items in initialization list
     GenericLlmRequest(RequestIdType requestId, executor::Request const& req)
         : mRequestId(requestId)
-        , mPromptLen(req.getInputTokenIds().size())
+        , mPromptLen(req.getInputTokenIds().size() / req.getNumVocabs())
         , mMaxNewTokens(req.getMaxTokens())
         , mSamplingConfig(req.getSamplingConfig(), req.getExternalDraftTokensConfig())
         , mEndId(req.getEndId())
@@ -286,6 +291,7 @@ public:
         , mGuidedDecodingParams(req.getGuidedDecodingParams())
         , mLanguageAdapterUid(req.getLanguageAdapterUid())
         , mAllottedTimeMs(req.getAllottedTimeMs())
+        , mNumVocabs(req.getNumVocabs())
     {
         if (req.getRequestType() == executor::RequestType::REQUEST_TYPE_GENERATION_ONLY)
         {
@@ -419,6 +425,16 @@ public:
             mEncoderInputFeatures = std::nullopt;
         }
 
+        auto const& decoderContextFeatures = req.getDecoderContextFeatures();
+        if (decoderContextFeatures.has_value())
+        {
+            mDecoderContextFeatures = executor::detail::toITensor(decoderContextFeatures.value());
+        }
+        else
+        {
+            mDecoderContextFeatures = std::nullopt;
+        }
+
         auto const& crossAttentionMask = req.getCrossAttentionMask();
         if (crossAttentionMask.has_value())
         {
@@ -481,6 +497,14 @@ public:
         return *static_cast<executor::DataTransceiverState const*>(mContextPhaseParams.value().getState());
     }
 
+    /// @brief Get number of vocabs for this multi vocab sampling
+    /// @param
+    /// @return  The number of vocabs
+    [[nodiscard]] SizeType32 getNumVocabs() const
+    {
+        return mNumVocabs;
+    }
+
     [[nodiscard]] std::shared_ptr<ContextProgress> const& getContextProgress() const noexcept
     {
         return mContextProgress;
@@ -496,7 +520,7 @@ public:
     /// @return  The number of tokens
     [[nodiscard]] SizeType32 getNumTokens(SizeType32 beam) const
     {
-        return mTokens.at(beam).size() - mNumPreDecodedTokens[beam];
+        return mTokens.at(beam).size() / getNumVocabs() - mNumPreDecodedTokens[beam];
     }
 
     /// @brief Get number of return sequences for this req.
@@ -507,6 +531,38 @@ public:
             "mNumReturnSequences in the LlmRequest class is deprecated. Please use numReturnSequences in "
             "SamplingConfig directly.");
         return mNumReturnSequences;
+    }
+
+    [[nodiscard]] bool isCfg() const
+    {
+        return mSamplingConfig.cfgScale.has_value() && mSamplingConfig.cfgScale->at(0) != 1.0f;
+    }
+
+    [[nodiscard]] SizeType32 getNumSequences() const
+    {
+        if (isCfg()) {
+            TLLM_CHECK_WITH_INFO(mSamplingConfig.beamWidth == 1, "cfgScale is only supported for beamWidth = 1");
+            return 2;
+        }
+        return 1;
+    }
+
+    [[nodiscard]] SizeType32 getSeqSlot(int idx) const
+    {
+        TLLM_CHECK_WITH_INFO(idx >= 0 && idx < getNumSequences(), "seq slot idx is out of range");
+        return mSeqSlots[idx];
+    }
+
+    [[nodiscard]] uint64_t getSeqSlotId(int idx = 0) const
+    {
+        if (idx == 0) {
+            return mRequestId;
+        }
+        if (isCfg() && idx == 1) {
+            return std::numeric_limits<uint64_t>::max() - mRequestId;
+        }
+        TLLM_CHECK_WITH_INFO(false, "Sequence slot id is implemented for CFG only");
+        return 0;
     }
 
     /// @brief Get the number of subrequests, the expected number of responses under non-streaming mode. In sampling
@@ -793,9 +849,9 @@ public:
             for (std::size_t beam = 0; beam < mTokens.size(); ++beam)
             {
                 auto& beamTokens = mTokens.at(beam);
-                beamTokens.resize(newPromptLen);
+                beamTokens.resize(newPromptLen * mNumVocabs);
                 auto& beamUniqueTokens = mUniqueTokens.at(beam);
-                beamUniqueTokens.resize(newPromptLen);
+                beamUniqueTokens.resize(newPromptLen * mNumVocabs);
 
                 if (returnLogProbs())
                 {
@@ -812,7 +868,7 @@ public:
                                                                      : LlmRequestState::kCONTEXT_INIT;
         mContextCurrentPosition = 0;
         mContextChunkSize = mPromptLen;
-        mSeqSlot.reset();
+        mSeqSlots.clear();
     }
 
     /// @brief Get the maximum length of tokens returned to the client. Use to ensure we don't return to
@@ -1113,6 +1169,11 @@ public:
     [[nodiscard]] TensorPtr getEncoderInputFeatures() const
     {
         return mEncoderInputFeatures.value_or(nullptr);
+    }
+
+    [[nodiscard]] TensorPtr getDecoderContextFeatures() const
+    {
+        return mDecoderContextFeatures.value_or(nullptr);
     }
 
     void setEncoderOutputHost(TensorPtr encoderOutputHost)
@@ -1756,13 +1817,51 @@ public:
         return mRequestedBlockHashes;
     }
 
+    void setAttentionPriorIdx(SizeType32 attentionPriorIdx, runtime::ModelConfig const& modelConfig)
+    {
+        auto const lastIdx = getEncoderOutputLen() - modelConfig.getAttentionPriorWindowRight() - 1;
+        if (attentionPriorIdx > lastIdx) {
+            // no need to move futher the attention window will cover all tokens till end 
+            attentionPriorIdx = lastIdx;
+        }
+        mAttentionPriorIdx = attentionPriorIdx;
+        if (mAttentionPriorCounters.size() == 0) {
+            // TODO: lazy initialization due to inconsistencies between
+            // runtime::ITensor::SharedPtr and at::Tensor
+            mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
+        }
+        mAttentionPriorCounters[attentionPriorIdx]++;
+        if (attentionPriorIdx >= lastIdx) {
+            mAttentionPriorCounterCloseToEnd++;
+        }
+        else if (mAttentionPriorCounters[attentionPriorIdx] >= 8) {
+            // increment to avoid getting stuck in the same encoder output
+            setAttentionPriorIdx(attentionPriorIdx + 1, modelConfig);
+        }
+    }
+
+    bool isAttentionPriorFinished() const
+    {
+        return mAttentionPriorCounterCloseToEnd >= 20;
+    }
+
+    [[nodiscard]] SizeType32 getAttentionPriorIdx(runtime::ModelConfig const& modelConfig)
+    {
+        if (!mAttentionPriorIdx.has_value()) {
+            setAttentionPriorIdx(1, modelConfig);
+        }
+        // `setAttentionPriorIdx` takes care to avoid getting stuck in the same encoder output,
+        // it is expected that `mAttentionPriorCounters[mAttentionPriorIdx]` is always < 8
+        return mAttentionPriorIdx.value();
+    }
+
     RequestIdType mRequestId;
     SizeType32 mPromptLen;
     SizeType32 mMaxNewTokens;
     runtime::SamplingConfig mSamplingConfig;
     std::optional<TokenIdType> mEndId{std::nullopt};
     std::optional<TokenIdType> mPadId{std::nullopt};
-    std::optional<SizeType32> mSeqSlot{std::nullopt};
+    std::vector<SizeType32> mSeqSlots{};
     std::optional<LogitsPostProcessor> mLogitsPostProcessor{std::nullopt};
     bool mApplyLogitsPostProcessorBatched{false};
     std::optional<RequestIdType> mClientId{std::nullopt};
@@ -1853,6 +1952,13 @@ protected:
     TensorPtr mEncoderHiddenStates; // [numTokens, hiddenSize] for for Pipeline-Parallelism
     TensorPtr mEncoderOutputHost;   // [mEncoderOutputLength, encoderHiddenSize]
 
+    // for attention prior, placeholder for where to focus in encoder output
+    std::optional<SizeType32> mAttentionPriorIdx;
+    // counts how many times certain attention prior idx was attended
+    std::vector<SizeType32> mAttentionPriorCounters;
+    // counts how many times attention prior idx is close to the end of sequence
+    SizeType32 mAttentionPriorCounterCloseToEnd{0};
+
     SizeType32 mDecodingIter{0};
 
     executor::PriorityType mPriority;
@@ -1865,6 +1971,9 @@ protected:
     // Setting buffer sizes correctly for models like Whisper,
     // which encoder output shape cannot be inferred from encoder input shape due to downsampling.
     std::optional<SizeType32> mEncoderOutputLength{std::nullopt};
+
+// decoder context features to replace the token encodings
+    std::optional<TensorPtr> mDecoderContextFeatures{std::nullopt};
 
     // Input cross attention mask.
     std::optional<TensorPtr> mCrossAttentionMask{std::nullopt};
@@ -1920,6 +2029,7 @@ protected:
 
     // Context request only. The hashes of the blocks that are requested by the corresponding generation request.
     std::vector<size_t> mRequestedBlockHashes;
+    SizeType32 mNumVocabs;
 
 private:
     void initialize(VecTokens const& inputTokens, bool outputLogProbs)
@@ -2089,6 +2199,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         LlmRequestType llmRequestType = LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<std::shared_ptr<VecTokenExtraIds>> inputTokenExtraIds = std::nullopt,
@@ -2105,8 +2216,8 @@ public:
             std::move(kvCacheRetentionConfig), returnLogProbs, returnContextLogits, returnGenerationLogits,
             std::move(draftTokens), std::move(draftLogits), excludeInputFromOutput, std::move(logitsPostProcessor),
             applyLogitsPostProcessorBatched, std::move(encoderInputTokens), returnEncoderOutput, clientId, priority,
-            std::move(encoderInputFeatures), std::move(encoderOutputLength), std::move(crossAttentionMask),
-            llmRequestType, std::move(inputTokenExtraIds), numReturnSequences, std::move(eagleConfig),
+            std::move(encoderInputFeatures), std::move(encoderOutputLength), std::move(decoderContextFeatures),
+            std::move(crossAttentionMask), llmRequestType, std::move(inputTokenExtraIds), numReturnSequences, std::move(eagleConfig),
             std::move(skipCrossAttnBlocks), returnPerfMetrics, std::move(guidedDecodingParams), languageAdapterUid,
             allottedTimeMs, contextPhaseParams)
     {
@@ -2134,6 +2245,7 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority,
         std::optional<TensorPtr> encoderInputFeatures = std::nullopt,
         std::optional<SizeType32> encoderOutputLength = std::nullopt,
+        std::optional<TensorPtr> decoderContextFeatures = std::nullopt,
         std::optional<TensorPtr> crossAttentionMask = std::nullopt,
         LlmRequestType llmRequestType = LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
         std::optional<VecTokenExtraIds> inputTokenExtraIds = std::nullopt, SizeType32 numReturnSequences = 1,
@@ -2158,7 +2270,7 @@ public:
             encoderInputTokens ? std::make_optional(std::make_shared<VecTokens>(std::move(*encoderInputTokens)))
                                : std::optional<std::shared_ptr<VecTokens>>(std::nullopt),
             returnEncoderOutput, clientId, priority, std::move(encoderInputFeatures), encoderOutputLength,
-            std::move(crossAttentionMask), llmRequestType,
+            std::move(decoderContextFeatures), std::move(crossAttentionMask), llmRequestType,
             inputTokenExtraIds ? std::make_optional(std::make_shared<VecTokenExtraIds>(std::move(*inputTokenExtraIds)))
                                : std::optional<std::shared_ptr<VecTokenExtraIds>>(std::nullopt),
             numReturnSequences, std::move(eagleConfig), skipCrossAttnBlocks, returnPerfMetrics,

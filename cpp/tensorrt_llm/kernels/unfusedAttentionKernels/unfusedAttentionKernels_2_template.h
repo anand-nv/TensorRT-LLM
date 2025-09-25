@@ -1571,6 +1571,7 @@ void invokeApplyBiasRopeUpdateKVCacheDispatch(QKVPreprocessingParams<T, KVCacheB
         case 72: invokeUpdateKvCacheForCrossAttention<1008, 72, T, TCache, KVCacheBuffer>(params, stream); break;
         case 128: invokeUpdateKvCacheForCrossAttention<1024, 128, T, TCache, KVCacheBuffer>(params, stream); break;
         case 256: invokeUpdateKvCacheForCrossAttention<1024, 256, T, TCache, KVCacheBuffer>(params, stream); break;
+        case 768: invokeUpdateKvCacheForCrossAttention<960, 768, T, TCache, KVCacheBuffer>(params, stream); break;
         default: TLLM_CHECK_WITH_INFO(false, "Not supported."); break;
         }
         return;

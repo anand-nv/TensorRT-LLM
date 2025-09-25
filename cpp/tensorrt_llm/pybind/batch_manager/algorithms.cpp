@@ -122,13 +122,14 @@ void tensorrt_llm::pybind::batch_manager::algorithms::initBindings(pybind11::mod
             "__call__",
             [](HandleGenerationLogits const& self, tr::SizeType32 logitsIndex, RequestVector const& generationRequests,
                 DecoderBuffers& decoderBuffers, tr::ModelConfig const& modelConfig, tr::BufferManager const& manager,
+                tensorrt_llm::runtime::CudaStream const& stream,
                 at::Tensor const& logits, OptionalRef<RuntimeBuffers> genRuntimeBuffers = std::nullopt)
             {
-                self(logitsIndex, generationRequests, decoderBuffers, modelConfig, manager, tr::TorchView::of(logits),
-                    genRuntimeBuffers);
+                self(logitsIndex, generationRequests, decoderBuffers, modelConfig, manager, stream,
+                    tr::TorchView::of(logits), genRuntimeBuffers);
             },
             py::arg("logits_index"), py::arg("generation_requests"), py::arg("decoder_buffers"),
-            py::arg("model_config"), py::arg("buffer_manager"), py::arg("logits"),
+            py::arg("model_config"), py::arg("buffer_manager"), py::arg("stream"), py::arg("logits"),
             py::arg("gen_runtime_buffers") = std::nullopt)
         .def("name", [](HandleGenerationLogits const&) { return HandleGenerationLogits::name; });
 

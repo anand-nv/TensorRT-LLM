@@ -386,6 +386,11 @@ class Attention(Module):
                  quant_mode: QuantMode = QuantMode(0),
                  q_scaling=1.0,
                  cross_attention=False,
+                 compute_attention_prior=False,
+                 apply_attention_prior=False,
+                 attention_prior_lookahead=5,
+                 attention_prior_window_left=1,
+                 attention_prior_window_right=5,
                  relative_attention=False,
                  max_distance=0,
                  num_buckets=0,
@@ -408,6 +413,11 @@ class Attention(Module):
 
         self.local_layer_idx = local_layer_idx
         self.cross_attention = cross_attention
+        self.compute_attention_prior = compute_attention_prior
+        self.apply_attention_prior = apply_attention_prior
+        self.attention_prior_lookahead = attention_prior_lookahead
+        self.attention_prior_window_left = attention_prior_window_left
+        self.attention_prior_window_right = attention_prior_window_right
         self.attention_mask_type = attention_mask_type
         self.attention_head_size = hidden_size // num_attention_heads if attention_head_size is None else attention_head_size
         assert num_attention_heads % tp_size == 0, \
@@ -764,6 +774,7 @@ class Attention(Module):
         kv_cache_params=None,
         attention_params=None,
         encoder_output: Optional[Tensor] = None,
+        attention_prior_focus: Optional[Tensor] = None,
         position_embedding=None,
         norm_before_bmm1=False,
         lora_layer_params=None,
@@ -1090,7 +1101,7 @@ class Attention(Module):
                 assert long_rope_rotary_inv_freq is not None
                 assert long_rope_rotary_cos_sin is not None
 
-            context, past_key_value = gpt_attention(
+            attn_outputs = gpt_attention(
                 qkv=qkv,
                 past_key_value=past_key_value,
                 attention_mask=attention_mask,
@@ -1156,9 +1167,15 @@ class Attention(Module):
                 host_kv_cache_pool_mapping if not self.cross_attention else
                 kv_cache_params.host_cross_kv_cache_pool_mapping,
                 do_cross_attention=self.cross_attention,
+                compute_attention_prior=self.compute_attention_prior,
+                apply_attention_prior=self.apply_attention_prior,
+                attention_prior_lookahead=self.attention_prior_lookahead,
+                attention_prior_window_left=self.attention_prior_window_left,
+                attention_prior_window_right=self.attention_prior_window_right,
                 cross_kv=cross_kv,
                 cross_kv_length=attention_params.encoder_max_input_length,
                 encoder_input_lengths=attention_params.encoder_input_lengths,
+                attention_prior_focus=attention_prior_focus,
                 logn_scaling=logn_scaling,
                 relative_attention_bias=self.rel_attn_table.value
                 if self.relative_attention else None,
@@ -1188,6 +1205,12 @@ class Attention(Module):
                 cp_size=self.cp_size,
                 cp_rank=self.cp_rank,
                 cp_group=self.cp_group)
+            # unpack attention outputs
+            if self.compute_attention_prior:
+                attention_prior_scores = attn_outputs.pop()
+            past_key_value = attn_outputs.pop()
+            # unpack if context is a single tensor
+            context = attn_outputs[0] if len(attn_outputs) == 1 else attn_outputs
 
         else:
             # plain TensorRT mode
@@ -1554,10 +1577,12 @@ class Attention(Module):
         ).plugin_config.use_fp8_context_fmha:
             context = dense_conditional.add_output(skip_case, context)
 
+        outputs = [context]
         if use_cache:
-            return (context, past_key_value)
-        else:
-            return context
+            outputs.append(past_key_value)
+        if self.compute_attention_prior:
+            outputs.append(attention_prior_scores)
+        return outputs
 
     def set_rel_attn_table(self, max_seq_len, precomputed_relative_attention):
         self.rel_attn_table = Parameter(shape=(self.num_attention_heads,

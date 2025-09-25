@@ -36,7 +36,7 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, OptSize32 const& topK, OptF
     OptFloat const& beamSearchDiversityRate, OptFloat const& repetitionPenalty, OptFloat const& presencePenalty,
     OptFloat const& frequencyPenalty, OptFloat const& lengthPenalty, OptSize32 const& earlyStopping,
     OptSize32 const& noRepeatNgramSize, OptSize32 const& numReturnSequences, OptFloat const& minP,
-    OptVec<SizeType32> const& beamWidthArray)
+    OptVec<SizeType32> const& beamWidthArray, OptFloat const& cfgScale)
     : mBeamWidth(checkBeamWidth(beamWidth))
     , mTopK(checkTopK(topK))
     , mTopP(checkTopP(topP))
@@ -56,6 +56,7 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, OptSize32 const& topK, OptF
     , mNumReturnSequences(checkNumReturnSequences(numReturnSequences, beamWidth))
     , mMinP(checkMinP(minP))
     , mBeamWidthArray(checkBeamWidthArray(beamWidthArray, beamWidth))
+    , mCfgScale(checkCfgScale(cfgScale))
 {
     updateNumReturnBeams();
 }
@@ -69,7 +70,7 @@ bool SamplingConfig::operator==(SamplingConfig const& other) const
         && mPresencePenalty == other.mPresencePenalty && mFrequencyPenalty == other.mFrequencyPenalty
         && mLengthPenalty == other.mLengthPenalty && mEarlyStopping == other.mEarlyStopping
         && mNoRepeatNgramSize == other.mNoRepeatNgramSize && mNumReturnSequences == other.mNumReturnSequences
-        && mMinP == other.mMinP && mBeamWidthArray == other.mBeamWidthArray;
+        && mMinP == other.mMinP && mBeamWidthArray == other.mBeamWidthArray && mCfgScale == other.mCfgScale;
 }
 
 // Getters
@@ -173,6 +174,11 @@ OptSize32 SamplingConfig::getNoRepeatNgramSize() const
 OptSize32 SamplingConfig::getNumReturnSequences() const
 {
     return mNumReturnSequences;
+}
+
+OptFloat SamplingConfig::getCfgScale() const
+{
+    return mCfgScale;
 }
 
 std::optional<FloatType> SamplingConfig::getMinP() const
@@ -295,6 +301,11 @@ void SamplingConfig::setBeamWidthArray(OptVec<SizeType32> const& beamWidthArray)
     mBeamWidthArray = checkBeamWidthArray(beamWidthArray, std::nullopt);
 }
 
+void SamplingConfig::setCfgScale(std::optional<FloatType> const& cfgScale)
+{
+    mCfgScale = checkCfgScale(cfgScale);
+}
+
 // Checkers
 SizeType32 SamplingConfig::checkBeamWidth(SizeType32 beamWidth)
 {
@@ -309,6 +320,12 @@ OptFloat const& SamplingConfig::checkTopK(OptFloat const& topK)
         TLLM_CHECK(topK.value() >= 0);
     }
     return topK;
+}
+
+OptFloat const& SamplingConfig::checkCfgScale(OptFloat const& cfgScale)
+{
+    // TODO: implement checking the cfg scale
+    return cfgScale;
 }
 
 OptFloat const& SamplingConfig::checkTopP(OptFloat const& topP)

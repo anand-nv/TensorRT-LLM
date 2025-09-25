@@ -23,7 +23,8 @@ from defs.common import (convert_weights, generate_mmlu_cmd,
                          venv_mpi_check_call)
 from defs.conftest import (evaltool_mmlu_post_process,
                            evaltool_wikilingua_post_process, llm_models_root,
-                           skip_pre_ada, skip_pre_blackwell)
+                           skip_post_blackwell, skip_pre_ada,
+                           skip_pre_blackwell)
 from defs.trt_test_alternative import check_call
 from evaltool.constants import (EVALTOOL_INFERENCE_SERVER_STARTUP_SCRIPT,
                                 EVALTOOL_INFERENCE_SERVER_STOP_SCRIPT,
@@ -880,7 +881,6 @@ def test_llm_mixtral_1gpu_fp4_llmapi(
         f"{llmapi_example_root}/../mmlu_llmapi.py",
         f"--data_dir={mmlu_dataset_root}",
         f"--hf_model_dir={model_dir}",
-        "--backend=tensorrt",
         "--check_accuracy",
         f"--accuracy_threshold=68.0",
     ]
@@ -888,8 +888,8 @@ def test_llm_mixtral_1gpu_fp4_llmapi(
     venv_check_call(llm_venv, mmlu_cmd)
 
 
-@pytest.mark.parametrize(
-    "model_name", ['mixtral-8x7b-v0.1-AWQ', 'Mixtral-8x7B-Instruct-v0.1'])
+@skip_post_blackwell
+@pytest.mark.parametrize("model_name", ['mixtral-8x7b-v0.1-AWQ'])
 def test_llm_mixtral_int4_awq_1gpu_summary(llama_example_root,
                                            llm_datasets_root, model_name,
                                            llm_rouge_root, llm_venv, cmodel_dir,
@@ -899,28 +899,15 @@ def test_llm_mixtral_int4_awq_1gpu_summary(llama_example_root,
     model_dir = os.path.join(models_root, model_name)
     ckpt_dir = os.path.join(cmodel_dir, model_name)
 
-    if 'AWQ' in model_name:
-        print("Convert checkpoint...")
-        convert_cmd = [
-            f"{llama_example_root}/convert_checkpoint.py",
-            "--model_dir",
-            model_dir,
-            "--output_dir",
-            ckpt_dir,
-        ]
-        venv_check_call(llm_venv, convert_cmd)
-    else:
-        print("Quantizing model...")
-        ckpt_dir = quantize_data(
-            llm_venv,
-            llama_example_root,
-            model_dir=model_dir,
-            calib_dataset=f"{llm_datasets_root}/cnn_dailymail",
-            dtype="float16",
-            qformat="int4_awq",
-            quantize_dir=qcache_dir_without_install_package,
-            tp_size=1,
-            calib_size=32)
+    print("Convert checkpoint...")
+    convert_cmd = [
+        f"{llama_example_root}/convert_checkpoint.py",
+        "--model_dir",
+        model_dir,
+        "--output_dir",
+        ckpt_dir,
+    ]
+    venv_check_call(llm_venv, convert_cmd)
 
     print("Build engines...")
     build_cmd = [
@@ -940,3 +927,63 @@ def test_llm_mixtral_int4_awq_1gpu_summary(llama_example_root,
                                        rouge_dir=llm_rouge_root)
 
     venv_check_call(llm_venv, summary_cmd)
+
+
+@skip_post_blackwell
+@pytest.mark.skip_less_device(2)
+@pytest.mark.skip_less_device_memory(80000)
+@pytest.mark.parametrize(
+    "model_name", ['mixtral-8x7b-v0.1-AWQ', 'Mixtral-8x7B-Instruct-v0.1'])
+def test_llm_mixtral_int4_awq_2gpu_summary(llama_example_root,
+                                           llm_datasets_root, model_name,
+                                           llm_rouge_root, llm_venv, cmodel_dir,
+                                           engine_dir,
+                                           qcache_dir_without_install_package):
+    models_root = llm_models_root()
+    model_dir = os.path.join(models_root, model_name)
+    ckpt_dir = os.path.join(cmodel_dir, model_name)
+
+    if 'AWQ' in model_name:
+        print("Convert checkpoint...")
+        convert_cmd = [
+            f"{llama_example_root}/convert_checkpoint.py",
+            "--model_dir",
+            model_dir,
+            "--output_dir",
+            ckpt_dir,
+            "--tp_size",
+            2,
+        ]
+        venv_check_call(llm_venv, convert_cmd)
+    else:
+        print("Quantizing model...")
+        ckpt_dir = quantize_data(
+            llm_venv,
+            llama_example_root,
+            model_dir=model_dir,
+            calib_dataset=f"{llm_datasets_root}/cnn_dailymail",
+            dtype="float16",
+            qformat="int4_awq",
+            quantize_dir=qcache_dir_without_install_package,
+            tp_size=2,
+            calib_size=32)
+
+    print("Build engines...")
+    build_cmd = [
+        "trtllm-build",
+        f"--checkpoint_dir={ckpt_dir}",
+        f"--output_dir={engine_dir}",
+    ]
+    check_call(" ".join(build_cmd), shell=True, env=llm_venv._new_env)
+
+    print("Run inference")
+    summary_cmd = generate_summary_cmd(llama_example_root,
+                                       hf_model_dir=model_dir,
+                                       data_type="fp16",
+                                       tensorrt_llm_rouge1_threshold=19.5,
+                                       engine_dir=engine_dir,
+                                       dataset_dir=llm_datasets_root,
+                                       rouge_dir=llm_rouge_root)
+
+    venv_mpi_check_call(llm_venv, ["mpirun", "-n", "2", "--allow-run-as-root"],
+                        summary_cmd)

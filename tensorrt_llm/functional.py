@@ -2539,7 +2539,7 @@ def masked_scatter(input: Tensor, mask: Tensor, source: Tensor) -> Tensor:
     '''
     Add the masked_scatter base on PyTorch definition.
 
-    See https://pytorch.org/docs/stable/generated/torch.Tensor.masked_scatter_.html#torch-tensor-masked-scatter for a
+    See https://pytorch.org/docs/stable/generated/torch.Tensor.masked_scatter.html#torch-tensor-masked-scatter for a
     description of that function.
 
     Parameters:
@@ -5181,9 +5181,15 @@ def gpt_attention(
     host_kv_cache_pool_pointers: Tensor = None,
     host_kv_cache_pool_mapping: Tensor = None,
     do_cross_attention: bool = False,
+    compute_attention_prior: bool = False,
+    apply_attention_prior: bool = False,
+    attention_prior_lookahead: int = 5,
+    attention_prior_window_left: int = 1,
+    attention_prior_window_right: int = 5,
     cross_kv: Optional[Tensor] = None,  # for cross attention
     cross_kv_length: Optional[Tensor] = None,  # for cross attention
     encoder_input_lengths: Optional[Tensor] = None,  # for cross attention
+    attention_prior_focus: Optional[Tensor] = None,  # when applying prior is enabled
     relative_attention_bias: Optional[Tensor] = None,  # for relative attention
     logn_scaling: Optional[Tensor] = None,  # for logn scaling
     max_distance: int = 0,  # for relative attention
@@ -5405,6 +5411,16 @@ def gpt_attention(
         do_cross_attention: bool = False
             Do we use this as cross attention instead of self attention,
 
+        compute_attention_prior: bool = False,
+            Whether to accumulate attention prior scores in the kernel.
+            only valid for generation requests and cross attention.
+            uses attention_prior_scores provided lower
+
+        apply_attention_prior: bool = False,
+            Whether to apply attention prior.
+            only valid for generation requests and cross attention.
+            uses attention_prior_focus provided lower
+
         cross_kv: Tensor = None
             The KV tensor of encoder output hidden states. Its shape is [batch_size, max_seqlen, 2 * kvHeadNum * headSize] in padded mode and [1, num_tokens, 2 * kvHeadNum * headSize] in
             packed mode,
@@ -5414,6 +5430,10 @@ def gpt_attention(
 
         encoder_input_lengths: Tensor
             The tensor that stores the length of each encoder input sequence. Its shape is [batch_size],
+
+        attention_prior_focus: Optional[Tensor] = None
+            (B,) for each sequence specifies where start of the region on which to focus in cross attention.
+            rest of the encoder outputs are masked out.
 
         logn_scaling: Tensor = None
             The logn scaling tensor [max_position_embedding_len], which is applied to q in order to help extrapolation
@@ -5690,6 +5710,27 @@ def gpt_attention(
         "do_cross_attention",
         np.array(np.int8(do_cross_attention), dtype=np.int8),
         trt.PluginFieldType.INT8)
+
+    compute_attention_prior_field = trt.PluginField(
+        "compute_attention_prior",
+        np.array(np.int8(compute_attention_prior), dtype=np.int8),
+        trt.PluginFieldType.INT8)
+    apply_attention_prior_field = trt.PluginField(
+        "apply_attention_prior",
+        np.array(np.int8(apply_attention_prior), dtype=np.int8),
+        trt.PluginFieldType.INT8)
+    attention_prior_lookahead_field = trt.PluginField(
+        "attention_prior_lookahead",
+        np.array(attention_prior_lookahead, dtype=np.int32),
+        trt.PluginFieldType.INT32)
+    attention_prior_window_left_field = trt.PluginField(
+        "attention_prior_window_left",
+        np.array(attention_prior_window_left, dtype=np.int32),
+        trt.PluginFieldType.INT32)
+    attention_prior_window_right_field = trt.PluginField(
+        "attention_prior_window_right",
+        np.array(attention_prior_window_right, dtype=np.int32),
+        trt.PluginFieldType.INT32)
     max_distance = trt.PluginField("max_distance",
                                    np.array(max_distance, dtype=np.int32),
                                    trt.PluginFieldType.INT32)
@@ -5738,7 +5779,10 @@ def gpt_attention(
         block_sparse_block_size, block_sparse_homo_head_pattern,
         block_sparse_num_local_blocks, block_sparse_vertical_stride,
         paged_kv_cache, tokens_per_block, pf_type, max_context_length,
-        qkv_bias_enabled, do_cross_attention_field, max_distance,
+        qkv_bias_enabled, do_cross_attention_field, 
+        compute_attention_prior_field, apply_attention_prior_field,
+        attention_prior_lookahead_field, attention_prior_window_left_field,
+        attention_prior_window_right_field, max_distance,
         pos_shift_enabled, dense_context_fmha, use_paged_context_fmha_field,
         use_fp8_context_fmha_field, has_full_attention_mask_field, use_cache_pf,
         is_spec_decoding_enabled, spec_decoding_is_generation_length_variable,
@@ -5813,6 +5857,9 @@ def gpt_attention(
     if do_cross_attention:
         plug_inputs += [cross_kv, cross_kv_length, encoder_input_lengths]
 
+        if apply_attention_prior:
+            plug_inputs += [attention_prior_focus]
+
     if default_net().plugin_config.remove_input_padding:
         plug_inputs += [host_context_lengths]
 
@@ -5873,10 +5920,18 @@ def gpt_attention(
         expected_outputs += 1
 
     present_key_value = None
+    present_key_idx = -1
     if use_cache and not paged_kv_cache_flag:
         present_key_value = _create_tensor(layer.get_output(expected_outputs),
                                            layer)
         assert present_key_value is not None
+        present_key_idx = expected_outputs
+        expected_outputs += 1
+
+    attention_prior_scores_out = None
+    if compute_attention_prior:
+        attention_prior_scores_out = _create_tensor(layer.get_output(expected_outputs), layer)
+        assert attention_prior_scores_out is not None
         expected_outputs += 1
 
     assert layer.num_outputs == expected_outputs, \
@@ -5884,21 +5939,25 @@ def gpt_attention(
 
     if kv_cache_quant_mode.has_int8_kv_cache(
     ) and not default_net().strongly_typed:
+        if present_key_idx >= 0:
+            # present key value
+            layer.get_output(present_key_idx).set_dynamic_range(-127, 127)
         if not paged_kv_cache_flag:
             # past key value
             layer.get_input(8).set_dynamic_range(-127, 127)
-            # present key value
-            layer.get_output(expected_outputs - 1).set_dynamic_range(-127, 127)
         else:
             layer.get_input(0).set_dynamic_range(-127, 127)
             layer.get_input(1).set_dynamic_range(-127, 127)
-            layer.get_output(expected_outputs - 1).set_dynamic_range(-127, 127)
 
     assert output is not None
+    outputs = [output]
     if fuse_fp4_quant:
         assert output_sf is not None
-        return (output, output_sf), present_key_value
-    return output, present_key_value
+        outputs.append(output_sf)
+    outputs.append(present_key_value)
+    if compute_attention_prior:
+        outputs.append(attention_prior_scores_out)
+    return outputs
 
 
 def assertion(condition: Tensor, message: str = '') -> None:

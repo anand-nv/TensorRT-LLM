@@ -44,10 +44,11 @@ public:
         std::optional<std::string> logitsPostProcessorName, std::optional<LogitsPostProcessor> logitsPostProcessor,
         std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
         PriorityType priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
-        std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
+        std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> decoderContextFeatures,
         std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
         std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
-        std::optional<SizeType32> languageAdapterUid, std::optional<MillisecondsType> allottedTimeMs)
+        std::optional<SizeType32> languageAdapterUid, std::optional<MillisecondsType> allottedTimeMs,
+        SizeType32 numVocabs = 1)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -75,6 +76,7 @@ public:
         , mContextPhaseParams(std::move(contextPhaseParams))
         , mEncoderInputFeatures(std::move(encoderInputFeatures))
         , mEncoderOutputLength(encoderOutputLength)
+        , mDecoderContextFeatures(std::move(decoderContextFeatures))
         , mCrossAttentionMask(std::move(crossAttentionMask))
         , mNumReturnSequences(numReturnSequences)
         , mEagleConfig(std::move(eagleConfig))
@@ -82,6 +84,7 @@ public:
         , mGuidedDecodingParams(std::move(guidedDecodingParams))
         , mLanguageAdapterUid(languageAdapterUid)
         , mAllottedTimeMs(allottedTimeMs)
+        , mNumVocabs(numVocabs)
     {
         validate();
     }
@@ -245,6 +248,11 @@ public:
         return mEncoderInputFeatures;
     }
 
+    [[nodiscard]] std::optional<Tensor> getDecoderContextFeatures() const
+    {
+        return mDecoderContextFeatures;
+    }
+
     [[nodiscard]] std::optional<Tensor> getCrossAttentionMask() const
     {
         return mCrossAttentionMask;
@@ -281,6 +289,11 @@ public:
     [[nodiscard]] std::optional<SizeType32> getLanguageAdapterUid() const
     {
         return mLanguageAdapterUid;
+    }
+
+    [[nodiscard]] SizeType32 getNumVocabs() const
+    {
+        return mNumVocabs;
     }
 
     void setStreaming(bool streaming)
@@ -403,6 +416,11 @@ public:
         mEncoderInputFeatures = encoderInputFeatures;
     }
 
+    void setDecoderContextFeatures(Tensor decoderContextFeatures)
+    {
+        mDecoderContextFeatures = decoderContextFeatures;
+    }
+
     void setCrossAttentionMask(Tensor crossAttentionMask)
     {
         mCrossAttentionMask = crossAttentionMask;
@@ -445,6 +463,11 @@ public:
     void setLanguageAdapterUid(SizeType32 languageAdapterUid)
     {
         mLanguageAdapterUid = languageAdapterUid;
+    }
+
+    void setNumVocabs(SizeType32 numVocabs)
+    {
+        mNumVocabs = numVocabs;
     }
 
 private:
@@ -511,6 +534,7 @@ private:
         lambda(mContextPhaseParams);
         lambda(mEncoderInputFeatures);
         lambda(mEncoderOutputLength);
+        lambda(mDecoderContextFeatures);
         lambda(mCrossAttentionMask);
         lambda(mNumReturnSequences);
         lambda(mEagleConfig);
@@ -518,6 +542,7 @@ private:
         lambda(mGuidedDecodingParams);
         lambda(mLanguageAdapterUid);
         lambda(mAllottedTimeMs ? std::make_optional(mAllottedTimeMs->count()) : std::nullopt);
+        lambda(mNumVocabs);
     }
 
     VecTokens mInputTokenIds;
@@ -547,6 +572,7 @@ private:
     std::optional<ContextPhaseParams> mContextPhaseParams;
     std::optional<Tensor> mEncoderInputFeatures;
     std::optional<SizeType32> mEncoderOutputLength;
+    std::optional<Tensor> mDecoderContextFeatures;
     std::optional<Tensor> mCrossAttentionMask;
     SizeType32 mNumReturnSequences;
     std::optional<EagleConfig> mEagleConfig;
@@ -554,6 +580,7 @@ private:
     std::optional<GuidedDecodingParams> mGuidedDecodingParams;
     std::optional<SizeType32> mLanguageAdapterUid;
     std::optional<MillisecondsType> mAllottedTimeMs;
+    SizeType32 mNumVocabs;
 };
 
 } // namespace tensorrt_llm::executor

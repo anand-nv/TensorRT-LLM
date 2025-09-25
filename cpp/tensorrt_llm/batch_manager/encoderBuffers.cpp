@@ -121,6 +121,10 @@ void EncoderBuffers::updateBufferSizes(RequestVector const& requests, ModelConfi
     {
         encoderInputLen += req->getEncoderInputLen();
         encoderOutputLen += req->getEncoderOutputLen();
+        if (req->isCfg()) {
+            // for CFG, repeat the encoder output twice
+            encoderOutputLen += req->getEncoderOutputLen();
+        }
         maxInputLengthInBatch
             = std::max(maxInputLengthInBatch, req->getEncoderInputLen()); // Decoder input is encoder output
     }
@@ -222,40 +226,53 @@ void EncoderBuffers::setFromInputs(RequestVector const& requests, ModelConfig co
     {
         SizeType32 const inputLength = llmReq->getEncoderInputLen();
         SizeType32 const outputLength = llmReq->getEncoderOutputLen();
-        if (llmReq->getEncoderInputFeatures())
-        {
-            auto const& reqFeatures
-                = llmReq
-                      ->getEncoderInputFeatures(); // whisper: [length, featureDim]; Vision: [batch_size, channel, W, H]
-            TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - request id = %d, input features length = %d",
-                llmReq->mRequestId, inputLength);
-            manager.copy(*reqFeatures, *ITensor::slice(inputFeatures, offset, inputLength));
-            offset += inputLength;
-        }
-        else
-        {
-            auto const& reqTokens = *llmReq->getEncoderTokens().value();
-            inputIdsAll.insert(inputIdsAll.end(), reqTokens.begin(), reqTokens.end());
-            if (tokenTypeIds)
+        for (int s = 0; s < llmReq->getNumSequences(); s++) {
+            if (llmReq->getEncoderInputFeatures())
             {
-                tokenTypeIdsAll.insert(
-                    tokenTypeIdsAll.end(), tokenTypeIdsReserved.begin(), tokenTypeIdsReserved.begin() + inputLength);
+                if (s == 0) {
+                    // copy input features from request to the buffer for conditional generation
+                    auto const& reqFeatures
+                        = llmReq
+                            ->getEncoderInputFeatures(); // whisper: [length, featureDim]; Vision: [batch_size, channel, W, H]
+                    TLLM_LOG_DEBUG("EncoderBuffers::setFromInputs - request id = %d, input features length = %d",
+                        llmReq->mRequestId, inputLength);
+                    manager.copy(*reqFeatures, *ITensor::slice(inputFeatures, offset, inputLength));
+                    offset += inputLength;
+                } else if (s == 1) {
+                    // need to add dummy input of zeros for CFG
+                    auto uncondFeatures = ITensor::slice(inputFeatures, offset, inputLength);
+                    manager.setMem(*uncondFeatures, 0);
+                    offset += inputLength;
+                } else {
+                    TLLM_CHECK_WITH_INFO(false, "Unexpected sequence index for llmReq [%ld]: %d", llmReq->mRequestId, s);
+                }
             }
+            else
+            {
+                // TODO: CFG support for encoder that proceses tokens is not implemented yet
+                auto const& reqTokens = *llmReq->getEncoderTokens().value();
+                inputIdsAll.insert(inputIdsAll.end(), reqTokens.begin(), reqTokens.end());
+                if (tokenTypeIds)
+                {
+                    tokenTypeIdsAll.insert(
+                        tokenTypeIdsAll.end(), tokenTypeIdsReserved.begin(), tokenTypeIdsReserved.begin() + inputLength);
+                }
+            }
+            if (positionIds)
+            {
+                SizeType32 const length = modelConfig.isWhisper() ? outputLength : inputLength;
+                positionIdsAll.insert(
+                    positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + length);
+            }
+            if (modelConfig.useLanguageAdapter())
+            {
+                auto const languageAdapterRouting
+                    = llmReq->getLanguageAdapterRouting(modelConfig.getNumLanguages().value(), inputLength);
+                languageAdapterRoutingAll.insert(
+                    languageAdapterRoutingAll.end(), std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
+            }
+            inputLengthsAll.push_back(inputLength);
         }
-        if (positionIds)
-        {
-            SizeType32 const length = modelConfig.isWhisper() ? outputLength : inputLength;
-            positionIdsAll.insert(
-                positionIdsAll.end(), positionIdsReserved.begin(), positionIdsReserved.begin() + length);
-        }
-        if (modelConfig.useLanguageAdapter())
-        {
-            auto const languageAdapterRouting
-                = llmReq->getLanguageAdapterRouting(modelConfig.getNumLanguages().value(), inputLength);
-            languageAdapterRoutingAll.insert(
-                languageAdapterRoutingAll.end(), std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
-        }
-        inputLengthsAll.push_back(inputLength);
     }
 
     // copy inputs from host to device
@@ -396,6 +413,9 @@ void EncoderBuffers::rearrangeOutputs(RequestVector const& requests, ModelConfig
             }
         }
         offset += size;
+        if (req->isCfg()) {
+            offset += size;
+        }
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -478,16 +498,23 @@ void EncoderBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
 
     for (auto const& llmReq : contextRequests)
     {
-        numRequests += 1;
-        encoderInputLen += llmReq->getEncoderInputLen();
+        numRequests += llmReq->getNumSequences();
         encoderOutputLen += llmReq->getEncoderOutputLen();
+        if (llmReq->isCfg()) {
+            encoderInputLen += llmReq->getEncoderInputLen();
+            encoderOutputLen += llmReq->getEncoderOutputLen();
+        }
         maxInputLengthInBatch = std::max(maxInputLengthInBatch, llmReq->getEncoderInputLen());
     }
 
     for (auto const& llmReq : genRequests)
     {
+        encoderOutputLen += llmReq->getEncoderOutputLen();
+        if (llmReq->isCfg()) {
+            encoderOutputLen += llmReq->getEncoderOutputLen();
+        }
         auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-        numRequests += reqBeamWidth; // tile by beam width
+        numRequests += reqBeamWidth * llmReq->getNumSequences(); // tile by beam width
         maxInputLengthInBatch = std::max(maxInputLengthInBatch, llmReq->getEncoderInputLen());
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
@@ -521,21 +548,26 @@ void EncoderBuffers::fill(
             // 1. only ctx requests should gather the encoder output
             // 2. only gen requests should tile encoder input lengths info by beam width
             bool isCtx = llmReq->isContextInitState();
-            if (isCtx)
-            {
+            if (isCtx) {
+                // copy encoder output to encoder output buffer for both ctx and gen requests,
+                // disable freeing enc buffer in llm request for it
                 size = llmReq->getEncoderOutputLen();
-                auto const encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
+                auto encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
                 manager.copy(*llmReq->getEncoderOutput(), *encoderOutputSlice);
                 offset += size;
-
                 inputLengthsAll.emplace_back(size);
-            }
-            else
-            {
+                if (llmReq->isCfg()) {
+                    auto encoderOutputSlice = runtime::ITensor::slice(encoderOutput, offset, size);
+                    manager.setMem(*encoderOutputSlice, 0);
+                    offset += size;
+                    inputLengthsAll.emplace_back(size);
+                }
+            } else {
                 auto const reqBeamWidth = llmReq->mSamplingConfig.beamWidth;
-                std::fill_n(std::back_inserter(inputLengthsAll), reqBeamWidth,
-                    llmReq->getEncoderOutputLen()); // although encoder output is not needed, gen phase still needs the
-                                                    // encoder length info for cross kv cache. Also tile by beam width
+                auto const numSeq = llmReq->getNumSequences();
+                // although encoder output is not needed, gen phase still needs the
+                // encoder length info for cross kv cache. Also tile by beam width
+                std::fill_n(std::back_inserter(inputLengthsAll), reqBeamWidth * numSeq, llmReq->getEncoderOutputLen());
             }
         }
     }
