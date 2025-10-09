@@ -72,10 +72,14 @@ public:
     static constexpr auto kHostContextLengthsTensorName = "host_context_lengths";
     static constexpr auto kSequenceLengthsTensorName = "sequence_length";
     static constexpr auto kPromptEmbeddingTableTensorName = "prompt_embedding_table";
+    static constexpr auto kDecoderContextFeaturesTensorName = "decoder_context_features";
+    static constexpr auto kDecoderContextFeaturesMaskTensorName = "decoder_context_features_mask";
     static constexpr auto kTasksTensorName = "tasks";
     static constexpr auto kPromptVocabSizeTensorName = "prompt_vocab_size";
     static constexpr auto kMRopeRotaryCosSinTensorName = "mrope_rotary_cos_sin";
     static constexpr auto kMRopePositionDeltasTensorName = "mrope_position_deltas";
+    static constexpr auto kAttentionPriorScoresTensorName = "attention_prior_scores";
+    static constexpr auto kAttentionPriorFocusTensorName = "attention_prior_focus";
 
     using SizeType32 = runtime::SizeType32;
     using TensorPtr = runtime::ITensor::SharedPtr;
@@ -146,6 +150,17 @@ public:
 
     //! Prompt-Tuning
     std::unique_ptr<PromptTuningBuffers> promptTuningBuffers;
+
+    //! Attention prior
+    TensorPtr attentionPriorScores; // [b*5,]
+    TensorPtr attentionPriorFocus;  // [b,]
+    bool useAttentionPrior;
+    bool useContextEmbeddings;
+    int attentionPriorLookahead;
+
+    //! Overwriting decoder context features
+    TensorPtr decoderContextFeatures;     // [b*t, d]
+    TensorPtr decoderContextFeaturesMask; // [b*t]
 
 private:
     //! Runtime
@@ -289,6 +304,9 @@ public:
     void prepareEagleBuffers(RequestVector const& contextRequests, RequestVector const& genRequests,
         runtime::EagleBuffers::Inputs const& eagleBuffers, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
+
+    void processAttentionPriorScores(
+        RequestVector const& genRequests, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig);
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> const& maxAttentionWindowVec,

@@ -45,9 +45,10 @@ public:
     HandleGenerationLogits() = default;
 
     void operator()(DecoderInputBuffers& inputBuffers, RequestVector const& generationRequests,
-        runtime::ITensor::SharedPtr const& logits, runtime::SizeType32 logitsIndex,
+        runtime::CudaStream const& stream, runtime::ITensor::SharedPtr const& logits, runtime::SizeType32 logitsIndex,
         runtime::ModelConfig const& modelConfig, runtime::BufferManager const& manager,
-        OptionalRef<RuntimeBuffers> genRuntimeBuffers, OptionalRef<MedusaBuffers> medusaBuffers) const;
+        OptionalRef<RuntimeBuffers> genRuntimeBuffers, OptionalRef<MedusaBuffers> medusaBuffers,
+        runtime::SizeType32 vocabId = 0) const;
 };
 
 } // namespace tensorrt_llm::batch_manager

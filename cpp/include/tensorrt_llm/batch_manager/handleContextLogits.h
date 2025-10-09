@@ -47,7 +47,7 @@ public:
     runtime::SizeType32 operator()(DecoderInputBuffers& inputBuffers, RequestVector const& contextRequests,
         runtime::ITensor::SharedPtr const& logits, std::vector<runtime::SizeType32> const& numContextLogitsVec,
         runtime::ModelConfig const& modelConfig, runtime::BufferManager const& manager,
-        OptionalRef<MedusaBuffers> medusaBuffers) const;
+        OptionalRef<MedusaBuffers> medusaBuffers, tr::SizeType32 vocabId = 0) const;
 };
 
 } // namespace tensorrt_llm::batch_manager

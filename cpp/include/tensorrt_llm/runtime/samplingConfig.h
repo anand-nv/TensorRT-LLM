@@ -141,6 +141,10 @@ public:
         topP = fuseValues<FloatType>(
             configs, [&configs](size_t ci) { return configs[ci].topP; }, layers::DefaultDecodingParams::getTopP());
 
+        cfgScale = fuseValues<FloatType>(
+            configs, [&configs](size_t ci) { return configs[ci].cfgScale; },
+            layers::DefaultDecodingParams::getCfgScale());
+
         // Generate a random seed for each samplingConfig with randomSeed == std::nullopt
         randomSeed = std::vector<uint64_t>(configs.size());
         for (size_t ci = 0; ci < configs.size(); ++ci)
@@ -229,6 +233,7 @@ public:
         SET_FROM_OPTIONAL(noRepeatNgramSize, NoRepeatNgramSize, SizeType32)
         SET_FROM_OPTIONAL(minP, MinP, FloatType)
         SET_FROM_OPTIONAL(beamWidthArray, BeamWidthArray, std::vector<SizeType32>)
+        SET_FROM_OPTIONAL(cfgScale, CfgScale, FloatType)
 #undef SET_FROM_OPTIONAL
     }
 
@@ -278,6 +283,8 @@ public:
         // valid &= validateVec("lengthPenalty", lengthPenalty, 0.f);
         valid &= validateVec("noRepeatNgramSize", noRepeatNgramSize, 0);
         valid &= validateVec("minP", minP, -fltEpsilon, {1.f});
+        // TODO: validation of cfgScale?
+        valid &= validateVec("cfgScale", cfgScale, -10.0f);
         // TODO: check `beamWidthArray`
 
         // Detect greedy sampling and overwrite params.
@@ -371,6 +378,8 @@ public:
 
     std::optional<bool> normalizeLogProbs;
 
+    OptVec<FloatType> cfgScale; // [1] or [batchSize]
+
     bool operator==(SamplingConfig const& other) const
     {
         return beamWidth == other.beamWidth && numReturnSequences == other.numReturnSequences
@@ -383,7 +392,8 @@ public:
             && lengthPenalty == other.lengthPenalty && earlyStopping == other.earlyStopping
             && draftAcceptanceThreshold == other.draftAcceptanceThreshold && topKMedusaHeads == other.topKMedusaHeads
             && normalizeLogProbs == other.normalizeLogProbs && outputLogProbs == other.outputLogProbs
-            && cumLogProbs == other.cumLogProbs && minP == other.minP && beamWidthArray == other.beamWidthArray;
+            && cumLogProbs == other.cumLogProbs && minP == other.minP && beamWidthArray == other.beamWidthArray
+            && cfgScale == other.cfgScale;
     }
 
     SizeType32 getNumReturnBeams() const

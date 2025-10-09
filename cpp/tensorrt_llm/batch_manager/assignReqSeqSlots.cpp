@@ -35,15 +35,27 @@ void tensorrt_llm::batch_manager::AssignReqSeqSlots::operator()(SequenceSlotMana
                 // Skip assigning sequence slot for DISAGG_GENERATION_INIT request
                 continue;
             }
-            auto const isReqNew = (llmReq->isContextInitState() && !llmReq->mSeqSlot)
+            auto const isReqNew = (llmReq->isContextInitState() && llmReq->mSeqSlots.empty())
                 || (llmReq->isDisaggGenerationTransmissionComplete());
             if (isReqNew && llmReq->getReturnPerfMetrics())
             {
                 llmReq->setFirstScheduledTime();
             }
-            auto const reqSeqSlot = seqSlotManager.getSequenceSlot(isReqNew, llmReq->mRequestId);
-            TLLM_CHECK_WITH_INFO(reqSeqSlot, "Unable to get batch slot for request ID %lu", llmReq->mRequestId);
-            llmReq->mSeqSlot = reqSeqSlot;
+            for (int i = 0; i < llmReq->getNumSequences(); i++)
+            {
+                auto const reqSeqSlot = seqSlotManager.getSequenceSlot(isReqNew, llmReq->getSeqSlotId(i));
+                TLLM_CHECK_WITH_INFO(
+                    reqSeqSlot, "Unable to get batch slot for request ID %lu", lllmReq->getSeqSlotId(i));
+
+                if ((int) llmReq->mSeqSlots.size() >= i + 1)
+                {
+                    llmReq->mSeqSlots[i] = reqSeqSlot.value();
+                }
+                else
+                {
+                    llmReq->mSeqSlots.push_back(reqSeqSlot.value());
+                }
+            }
         }
     }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);

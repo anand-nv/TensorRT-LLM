@@ -40,10 +40,36 @@ public:
         return BlockRange(cacheManager, blockIds, requestId);
     }
 
+    static BlockRange fromAllBlockIds(
+        BaseKVCacheManager const& cacheManager, LlmRequest const& llmRequest, SizeType32 beam = kFIRST_AND_ONLY_BEAM)
+    {
+        assert(kFIRST_AND_ONLY_BEAM == beam);
+        std::vector<SizeType32> blockIds;
+        auto const windowSize = firstWindowSize(cacheManager);
+        std::vector<SizeType32> blockIds;
+        const LlmRequest::RequestIdType requestId = llmRequest.getSeqSlotId(0);
+        for (int i = 0; i < llmRequest.getNumSequences(); i++)
+        {
+            auto const& thisBlockIds = cacheManager.getSequence(llmRequest.getSeqSlotId(i))
+                                           .getCacheBlockIds(windowSize)
+                                           .at(kFIRST_AND_ONLY_BEAM);
+            blockIds.insert(blockIds.end(), thisBlockIds.begin(), thisBlockIds.end());
+        }
+        return BlockRange(
+            cacheManager, blockIds, requestId); // The magpie implementation in 0.19 doesn't use requestId.
+    }
+
     static BlockRange fromNewlyAllocatedBlockIds(
         BaseKVCacheManager const& cacheManager, LlmRequest::RequestIdType requestId)
     {
         auto const windowSize = firstWindowSize(cacheManager);
+        std::vector<SizeType32> blockIds;
+        for (int i = 0; i < llmRequest.getNumSequences(); i++)
+        {
+            blockIds.insert(blockIds.end(),
+                cacheManager.getNewlyAllocatedBlockIds(llmRequest.getSequenceId(i), windowSize).begin(),
+                cacheManager.getNewlyAllocatedBlockIds(llmRequest.getSequenceId(i), windowSize).end());
+        }
         auto const blockIds = cacheManager.getNewlyAllocatedBlockIds(requestId, windowSize);
         return BlockRange(cacheManager, blockIds, requestId);
     }

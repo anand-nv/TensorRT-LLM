@@ -87,7 +87,8 @@ public:
 
     //! @brief Setup the decoder before calling `forward()`
     virtual void setup(executor::DecodingMode const& mode, SizeType32 maxNumSequences, SizeType32 maxBeamWidth,
-        nvinfer1::DataType dtype, ModelConfig const& modelConfig, WorldConfig const& worldConfig)
+        nvinfer1::DataType dtype, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        SizeType32 vocab_size = 0)
         = 0;
 
     //! @brief Disable Lookahead decoding.
