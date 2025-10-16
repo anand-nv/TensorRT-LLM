@@ -219,6 +219,10 @@ public:
         int32_t spec_decoding_max_generation_length = 1;
         // optional when fuse_fp4_quant is enabled
         int32_t start_token_idx_sf = 0;
+
+        // optional when attention prior is used.
+        float* attention_prior_scores = nullptr;
+        int32_t const* attention_prior_focus = nullptr;
     };
 
     template <typename T, typename KVCacheBuffer>
@@ -323,6 +327,31 @@ public:
         return mCrossAttention;
     }
 
+    [[nodiscard]] bool ComputeAttentionPrior() const
+    {
+        return mComputeAttentionPrior;
+    }
+
+    [[nodiscard]] bool ApplyAttentionPrior() const
+    {
+        return mApplyAttentionPrior;
+    }
+
+    [[nodiscard]] int AttentionPriorLookahead() const
+    {
+        return mAttentionPriorLookahead;
+    }
+
+    [[nodiscard]] int AttentionPriorWindowLeft() const
+    {
+        return mAttentionPriorWindowLeft;
+    }
+
+    [[nodiscard]] int AttentionPriorWindowRight() const
+    {
+        return mAttentionPriorWindowRight;
+    }
+
     [[nodiscard]] bool useKVCache() const
     {
         return mUseKVCache;
@@ -409,6 +438,11 @@ public:
     int32_t mMaxContextLength = 0;
     bool mQKVBiasEnabled = false;
     bool mCrossAttention = false;
+    bool mComputeAttentionPrior = false;
+    bool mApplyAttentionPrior = false;
+    int mAttentionPriorLookahead = 5;
+    int mAttentionPriorWindowLeft = 1;
+    int mAttentionPriorWindowRight = 5;
     int mMaxDistance = 0;
     bool mPosShiftEnabled = false;
     bool mPagedContextFMHA = false;
@@ -469,14 +503,15 @@ public:
             mRotaryEmbeddingLongMscale, mRotaryEmbeddingMaxPositions, mRotaryEmbeddingOriginalMaxPositions,
             (int8_t) mPositionEmbeddingType, mUseLognScaling, mRemovePadding, (int32_t) mMaskType,
             mBlockSparseParams.data(), mPagedKVCache, mTokensPerBlock, mKVCacheQuantMode.value(), mTpSize, mTpRank,
-            mUnfuseQkvGemm, (int32_t) mType, mMaxContextLength, mQKVBiasEnabled, mCrossAttention, mMaxDistance,
-            mPosShiftEnabled, mPagedContextFMHA, mFP8ContextFMHA, mFP8AttenOutput, mFP8ContextMLA, mFP8GenerationMLA,
-            mChunkPrefillBufferBatchSize, mDenseContextFMHA, mHasFullAttentionMask, mIsSpecDecodingEnabled,
-            mUseSpecDecoding, mIsSpecDecTree, mSpecDecodingIsGenerationLengthVariable, mSpecDecodingMaxGenerationLength,
-            mIsMLAEnabled, mIsGenerationMLA, mUseGenFlashMLA, mMLAParams.data(), mCpSize, mCpRank, mCpGroup,
-            mNumAttnHeads, mNumAttnKVHeads, mNumKVHeadsOrigin, mAttnTpSize, mAttnTpRank, mAttnCpSize, mAttnCpRank,
-            mUlyssesMQABroadcast, mEnableContextFMHA, mFMHAForceFP32Acc, mMultiBlockMode, mEnableXQA, mUseKVCache,
-            mSkipAttn, mFuseFp4Quant, mNbMultiBlockSemaphores, mAttentionChunkSize.value_or(-1));
+            mUnfuseQkvGemm, (int32_t) mType, mMaxContextLength, mQKVBiasEnabled, mCrossAttention,
+            mComputeAttentionPrior, mApplyAttentionPrior, mMaxDistance, mPosShiftEnabled, mPagedContextFMHA,
+            mFP8ContextFMHA, mFP8AttenOutput, mFP8ContextMLA, mFP8GenerationMLA, mChunkPrefillBufferBatchSize,
+            mDenseContextFMHA, mHasFullAttentionMask, mIsSpecDecodingEnabled, mUseSpecDecoding, mIsSpecDecTree,
+            mSpecDecodingIsGenerationLengthVariable, mSpecDecodingMaxGenerationLength, mIsMLAEnabled, mIsGenerationMLA,
+            mUseGenFlashMLA, mMLAParams.data(), mCpSize, mCpRank, mCpGroup, mNumAttnHeads, mNumAttnKVHeads,
+            mNumKVHeadsOrigin, mAttnTpSize, mAttnTpRank, mAttnCpSize, mAttnCpRank, mUlyssesMQABroadcast,
+            mEnableContextFMHA, mFMHAForceFP32Acc, mMultiBlockMode, mEnableXQA, mUseKVCache, mSkipAttn, mFuseFp4Quant,
+            mNbMultiBlockSemaphores, mAttentionChunkSize.value_or(-1));
     };
 
 private:

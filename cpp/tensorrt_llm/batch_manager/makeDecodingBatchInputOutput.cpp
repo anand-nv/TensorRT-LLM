@@ -90,7 +90,7 @@ std::pair<std::vector<SizeType32>, std::vector<SizeType32>> getActiveSlots(Reque
     std::vector<SizeType32> generationSteps;
     for (auto const& llmReq : decoderRequests)
     {
-        activeSlots.push_back(llmReq->mSeqSlot.value());
+        activeSlots.push_back(llmReq->mSeqSlots.at(0));
         generationSteps.push_back(llmReq->getDecodingIter());
     }
 

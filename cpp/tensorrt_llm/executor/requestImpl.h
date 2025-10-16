@@ -45,10 +45,11 @@ public:
         std::optional<VecTokens> encoderInputTokenIds, std::optional<IdType> clientId, bool returnAllGeneratedTokens,
         PriorityType priority, RequestType type, std::optional<ContextPhaseParams> contextPhaseParams,
         std::optional<Tensor> encoderInputFeatures, std::optional<SizeType32> encoderOutputLength,
-        std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
+        std::optional<Tensor> decoderContextFeatures, std::optional<Tensor> crossAttentionMask,
+        SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
         std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
         std::optional<SizeType32> languageAdapterUid, std::optional<MillisecondsType> allottedTimeMs,
-        std::optional<CacheSaltIDType> cacheSaltID)
+        std::optional<CacheSaltIDType> cacheSaltID, SizeType32 numVocabs = 1)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -78,6 +79,7 @@ public:
         , mContextPhaseParams(std::move(contextPhaseParams))
         , mEncoderInputFeatures(std::move(encoderInputFeatures))
         , mEncoderOutputLength(encoderOutputLength)
+        , mDecoderContextFeatures(std::move(decoderContextFeatures))
         , mCrossAttentionMask(std::move(crossAttentionMask))
         , mNumReturnSequences(numReturnSequences)
         , mEagleConfig(std::move(eagleConfig))
@@ -86,6 +88,7 @@ public:
         , mLanguageAdapterUid(languageAdapterUid)
         , mAllottedTimeMs(allottedTimeMs)
         , mCacheSaltID(cacheSaltID)
+        , mNumVocabs(numVocabs)
     {
         validate();
     }
@@ -259,6 +262,11 @@ public:
         return mEncoderInputFeatures;
     }
 
+    [[nodiscard]] std::optional<Tensor> getDecoderContextFeatures() const
+    {
+        return mDecoderContextFeatures;
+    }
+
     [[nodiscard]] std::optional<Tensor> getCrossAttentionMask() const
     {
         return mCrossAttentionMask;
@@ -300,6 +308,11 @@ public:
     [[nodiscard]] std::optional<CacheSaltIDType> getCacheSaltID() const
     {
         return mCacheSaltID;
+    }
+
+    [[nodiscard]] SizeType32 getNumVocabs() const
+    {
+        return mNumVocabs;
     }
 
     void setStreaming(bool streaming)
@@ -432,6 +445,11 @@ public:
         mEncoderInputFeatures = encoderInputFeatures;
     }
 
+    void setDecoderContextFeatures(Tensor decoderContextFeatures)
+    {
+        mDecoderContextFeatures = decoderContextFeatures;
+    }
+
     void setCrossAttentionMask(Tensor crossAttentionMask)
     {
         mCrossAttentionMask = crossAttentionMask;
@@ -479,6 +497,11 @@ public:
     void setCacheSaltID(CacheSaltIDType cacheSaltID)
     {
         mCacheSaltID = cacheSaltID;
+    }
+
+    void setNumVocabs(SizeType32 numVocabs)
+    {
+        mNumVocabs = numVocabs;
     }
 
 private:
@@ -540,6 +563,7 @@ private:
         lambda(mKvCacheRetentionConfig);
         lambda(mLogitsPostProcessorName);
         lambda(mEncoderInputTokenIds);
+        lambda(mDecoderContextFeatures);
         lambda(mClientId);
         lambda(mReturnAllGeneratedTokens);
         lambda(mPriority);
@@ -555,6 +579,7 @@ private:
         lambda(mLanguageAdapterUid);
         lambda(mAllottedTimeMs ? std::make_optional(mAllottedTimeMs->count()) : std::nullopt);
         lambda(mCacheSaltID);
+        lambda(mNumVocabs);
     }
 
     VecTokens mInputTokenIds;
@@ -586,6 +611,7 @@ private:
     std::optional<ContextPhaseParams> mContextPhaseParams;
     std::optional<Tensor> mEncoderInputFeatures;
     std::optional<SizeType32> mEncoderOutputLength;
+    std::optional<Tensor> mDecoderContextFeatures;
     std::optional<Tensor> mCrossAttentionMask;
     SizeType32 mNumReturnSequences;
     std::optional<EagleConfig> mEagleConfig;
@@ -594,6 +620,7 @@ private:
     std::optional<SizeType32> mLanguageAdapterUid;
     std::optional<MillisecondsType> mAllottedTimeMs;
     std::optional<CacheSaltIDType> mCacheSaltID;
+    SizeType32 mNumVocabs;
 };
 
 } // namespace tensorrt_llm::executor

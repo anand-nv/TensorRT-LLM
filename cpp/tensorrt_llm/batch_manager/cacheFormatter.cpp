@@ -44,7 +44,7 @@ BlockRange getBlockRangeForSending(BaseKVCacheManager* cacheManager, LlmRequest 
 {
     size_t requestBlockNum = llmRequest.getRequestedBlockHashes().size();
     constexpr SizeType32 beam{0};
-    auto blockRange = BlockRange::fromAllBlockIds(*cacheManager, llmRequest.mRequestId, beam);
+    auto blockRange = BlockRange::fromAllBlockIds(*cacheManager, llmRequest, beam);
     auto poolNum = cacheManager->getBlockManager().getNumPools();
     if (poolNum > 1 || common::getEnvDisableSelectiveCacheTransfer())
     {
