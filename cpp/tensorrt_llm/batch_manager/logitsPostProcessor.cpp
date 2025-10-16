@@ -49,7 +49,8 @@ bool LogitsPostProcessor::operator()(DecoderInputBuffers& inputBuffers, bool rep
     for (size_t batchIdx = 0; batchIdx < inputBuffers.decoderRequests.size(); ++batchIdx)
     {
         auto const& llmReq = inputBuffers.decoderRequests.at(batchIdx);
-        auto& logits = inputBuffers.logits.at(batchIdx);
+        auto& logits = inputBuffers.logits.at(
+            batchIdx); // Check if this should be ...at(llmReq->mSeqSlots.at(0)) instead for CFG
 
         // Invoke non-batched processor or collect arguments for batched processor
         if (llmReq->mLogitsPostProcessor)

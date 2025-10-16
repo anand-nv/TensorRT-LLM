@@ -135,12 +135,12 @@ std::optional<executor::Result> LlmRequest::createResult(bool useFastLogits, int
     for (SizeType32 beam = 0; beam < nbBeams; ++beam)
     {
         auto const& tokens = getTokens(beam);
-        auto const nbTokensOut = calculateNbTokensOut(tokens.size());
+        auto const nbTokensOut = calculateNbTokensOut(tokens.size() / getNumVocabs());
 
         if (nbTokensOut > 0)
         {
-            auto const first = tokens.data() + startTokenPos;
-            result.outputTokenIds.at(beam).assign(first, first + nbTokensOut);
+            auto const first = tokens.data() + startTokenPos * getNumVocabs();
+            result.outputTokenIds.at(beam).assign(first, first + nbTokensOut * getNumVocabs());
         }
     }
 
@@ -322,7 +322,7 @@ std::shared_ptr<LlmRequest> LlmRequest::createChildRequest(RequestIdType request
     childReq->mSequenceIndex = mChildRequests.size() + 1;
     childReq->mParentRequestId = this->mRequestId;
     childReq->mSequenceFinalVec = this->mSequenceFinalVec;
-    childReq->mSeqSlot.reset();
+    childReq->mSeqSlots.clear();
 
     // To ensure different randomness across children, assign a unique random seed to each child
     // by adding its sequence index to the base seed. If no seed is provided, the parent's seed defaults to 0.

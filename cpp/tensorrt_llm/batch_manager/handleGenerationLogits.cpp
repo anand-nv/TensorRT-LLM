@@ -24,6 +24,7 @@
 #include "tensorrt_llm/batch_manager/utils/inflightBatchingUtils.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/kernels/cfgKernels.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/utils/debugUtils.h"
 
@@ -77,11 +78,18 @@ void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr cons
 
 void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, RequestVector const& generationRequests,
     tr::ITensor::SharedPtr const& logits, tr::SizeType32 logitsIndex, tr::ModelConfig const& modelConfig,
-    tr::BufferManager const& manager, OptionalRef<RuntimeBuffers> genRuntimeBuffers,
-    OptionalRef<MedusaBuffers> medusaBuffers) const
+    tr::BufferManager const& manager, tr::CudaStream const& stream, OptionalRef<RuntimeBuffers> genRuntimeBuffers,
+    OptionalRef<MedusaBuffers> medusaBuffers, SizeType32 vocabId) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(HandleGenerationLogits);
+
+    auto vocabSizes = modelConfig.getVocabSizes();
+    SizeType32 vocabOffset = 0;
+    for (SizeType32 i = 0; i < vocabId; ++i)
+    {
+        vocabOffset += vocabSizes[i];
+    }
 
     auto& decoderRequests = inputBuffers.decoderRequests;
     decoderRequests.reserve(decoderRequests.size() + generationRequests.size());
@@ -91,7 +99,7 @@ void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, Reque
     for (auto const& llmReq : generationRequests)
     {
         auto const reqBeamWidth = llmReq->getBeamWidthByIter();
-        auto const seqSlot = llmReq->mSeqSlot.value();
+        auto const seqSlot = llmReq->mSeqSlots.at(0);
 
         auto const draftLength = llmReq->getNumDraftTokens();
         auto const numLogits = draftLength + reqBeamWidth;
@@ -108,6 +116,17 @@ void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, Reque
         TLLM_CHECK_DEBUG_WITH_INFO(tru::tensorHasInvalid<float>(*logitsView, manager, "logits") == false,
             "Found invalid number (NaN or Inf) in logits");
 
+        // CFG implementation: get unconditional logits and add them to logitsView
+        if (llmReq->isCfg())
+        {
+            logitsIndex += numLogits;
+            TensorPtr uncondLogitsView = ITensor::slice(logits, logitsIndex, numLogits);
+            // TODO: implement CFG, apply logitsView = logitsView * cfgScale + uncondLogitsView * (1 - cfgScale)
+            float cfgScale = llmReq->mSamplingConfig.cfgScale->at(0);
+            tensorrt_llm::kernels::invokeCfg(
+                stream, logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
+        }
+
         TLLM_CHECK(llmReq->isGenerationInProgressState());
         TensorPtr decoderLogits;
         if (reqBeamWidth > 1)
@@ -117,8 +136,16 @@ void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, Reque
         }
         else
         {
-            decoderLogits = logitsView;
-            decoderLogits->unsqueeze(1);
+            auto curVocablogitsView = logitsView;
+            if (logitsViewShape.d[0] == 1) // if current nTok is 1, could have multiple vocabs
+            {
+                curVocablogitsView = ITensor::slice(logitsView, {0, vocabOffset}, vocabSizes[vocabId]); // [vocabSize,]
+                curVocablogitsView = ITensor::view(
+                    curVocablogitsView, ITensor::makeShape({1, vocabSizes[vocabId]})); // [numLogits == 1, vocabSize]
+            }
+            auto const updateLogitsViewShape = curVocablogitsView->getShape();
+            decoderLogits = ITensor::view(
+                curVocablogitsView, ITensor::makeShape({updateLogitsViewShape.d[0], 1, updateLogitsViewShape.d[1]}));
         }
         decoderRequests.push_back(llmReq);
         allDecoderLogits.emplace_back(std::move(decoderLogits));
@@ -147,6 +174,7 @@ void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, Reque
         }
         if (modelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
+            // speculative decoding is not supported for numVocabs > 1
             auto& medusaLogitsHeads = inputBuffers.predictedDraftLogits.at(seqSlot);
             TLLM_CHECK(medusaBuffers);
             setupMedusaLogits(medusaLogitsHeads, medusaBuffers->medusaLogitsDevice,

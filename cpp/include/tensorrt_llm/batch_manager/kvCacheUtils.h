@@ -40,11 +40,43 @@ public:
         return BlockRange(cacheManager, blockIds, requestId);
     }
 
+    static BlockRange fromAllBlockIds(
+        BaseKVCacheManager const& cacheManager, LlmRequest const& llmRequest, SizeType32 beam = kFIRST_AND_ONLY_BEAM)
+    {
+        assert(kFIRST_AND_ONLY_BEAM == beam);
+
+        const LlmRequest::RequestIdType requestId = llmRequest.getSeqSlotId(0);
+        std::vector<SizeType32> blockIds;
+        auto const windowSize = firstWindowSize(cacheManager);
+
+        for (int i = 0; i < llmRequest.getNumSequences(); i++)
+        {
+            auto const& thisBlockIds = cacheManager.getSequence(llmRequest.getSeqSlotId(i))
+                                           .getCacheBlockIds(windowSize)
+                                           .at(kFIRST_AND_ONLY_BEAM);
+            blockIds.insert(blockIds.end(), thisBlockIds.begin(), thisBlockIds.end());
+        }
+        return BlockRange(cacheManager, blockIds, requestId);
+    }
+
     static BlockRange fromNewlyAllocatedBlockIds(
         BaseKVCacheManager const& cacheManager, LlmRequest::RequestIdType requestId)
     {
         auto const windowSize = firstWindowSize(cacheManager);
         auto const blockIds = cacheManager.getNewlyAllocatedBlockIds(requestId, windowSize);
+        return BlockRange(cacheManager, blockIds, requestId);
+    }
+
+    static BlockRange fromNewlyAllocatedBlockIds(BaseKVCacheManager const& cacheManager, LlmRequest const& llmRequest)
+    {
+        const LlmRequest::RequestIdType requestId = llmRequest.getSeqSlotId(0);
+        auto const windowSize = firstWindowSize(cacheManager);
+        std::vector<SizeType32> blockIds;
+        for (int i = 0; i < llmRequest.getNumSequences(); i++)
+        {
+            auto const& thisBlockIds = cacheManager.getNewlyAllocatedBlockIds(llmRequest.getSeqSlotId(i), windowSize);
+            blockIds.insert(blockIds.end(), thisBlockIds.begin(), thisBlockIds.end());
+        }
         return BlockRange(cacheManager, blockIds, requestId);
     }
 

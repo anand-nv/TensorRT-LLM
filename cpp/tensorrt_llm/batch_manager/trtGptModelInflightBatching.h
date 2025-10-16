@@ -461,6 +461,21 @@ protected:
 
     SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const override;
 
+    [[nodiscard]] SizeType32 getNumVocabs() const
+    {
+        return mModelConfig.getNumVocabs();
+    }
+
+    [[nodiscard]] std::vector<SizeType32> getVocabSizes() const
+    {
+        return mModelConfig.getVocabSizes();
+    }
+
+    [[nodiscard]] SizeType32 getVocabSize() const
+    {
+        return mModelConfig.getVocabSize();
+    }
+
 private:
     /******************** Configs ********************/
     // Parameters of the model (TRT engine)
@@ -484,9 +499,12 @@ private:
     // Runner for the TRT engine. The engine produces logits.
     std::unique_ptr<runtime::TllmRuntime> mRuntime;
     // Decoder that generates new tokens from the logits.
-    std::unique_ptr<runtime::GptDecoderBatched> mDecoder;
+
+    std::vector<std::unique_ptr<runtime::GptDecoderBatched>> mDecoders;
     // Decoder state for all requests
-    std::unique_ptr<runtime::decoder::DecoderState> mDecoderState;
+    // std::unique_ptr<runtime::decoder::DecoderState> mDecoderState;
+    // Decoder state for all requests
+    std::vector<std::unique_ptr<runtime::decoder::DecoderState>> mDecoderStates;
     // Synchronization handles for decoder
     std::vector<std::optional<runtime::CudaEvent>> mDecoderFinishedEvents;
 

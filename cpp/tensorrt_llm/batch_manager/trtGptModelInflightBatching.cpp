@@ -693,7 +693,7 @@ std::unique_ptr<kv_cache_manager::KVCacheManager> TrtGptModelInflightBatching::c
         kvCacheConfig.getEventBufferMaxSize() > 0
             ? std::make_unique<kv_cache_manager::KVCacheEventManager>(kvCacheConfig.getEventBufferMaxSize())
             : nullptr,
-        kvCacheConfig.getEnablePartialReuse(), kvCacheConfig.getCopyOnPartialReuse());
+        kvCacheConfig.getEnablePartialReuse(), kvCacheConfig.getCopyOnPartialReuse(), mModelConfig.getNumVocabs());
 
     reshapeKvTensors(kvCacheManager->getOffsetTableDimensions());
 
@@ -872,7 +872,8 @@ void TrtGptModelInflightBatching::forwardSync()
                     {
                         llmReq->setNumPreDecodedTokens(0, beam);
                     }
-                    if (llmReq->isGenerationToCompleteState())
+                    bool crossAttnFinished = mModelConfig.useAttentionPrior() && llmReq->isAttentionPriorFinished();
+                    if (llmReq->isGenerationToCompleteState() || crossAttnFinished)
                     {
                         llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
                         terminateRequest(llmReq);
@@ -921,7 +922,10 @@ void TrtGptModelInflightBatching::forwardSync()
                         "cacheTransceiverConfig.");
                     mCacheTransceiver->respondAndSendAsync(llmReq.get());
                 }
-                mSeqSlotManager->freeSequenceSlot(llmReq->mRequestId);
+                for (int i = 0; i < llmReq->getNumSequences(); i++)
+                {
+                    mSeqSlotManager->freeSequenceSlot(llmReq->getSeqSlotId(i));
+                }
             }
         }
     }
@@ -1098,6 +1102,13 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             }
 
             sync_check_cuda_error(mRuntime->getStream().get());
+
+            // forward the attention prior index to llm requests for the next iteration
+            if (mModelConfig.useAttentionPrior())
+            {
+                mBuffers[getFusedBufferId()]->processAttentionPriorScores(
+                    currRequests.generationRequests, *mRuntime, mModelConfig);
+            }
 
             // Postpone decoder setup if model does not need to setup buffers for the context phase.
             if (!mModelConfig.getSpeculativeDecodingMode().needsDecoderPrologue())
@@ -1479,8 +1490,8 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
-    mDecoderState = std::make_unique<runtime::decoder::DecoderState>();
-
+    // mDecoderState = std::make_unique<runtime::decoder::DecoderState>();
+    mDecoderStates.clear();
     if (mWorldConfig.isLastPipelineParallelRank())
     {
         auto decoderType = mRuntime->getEngine().getTensorDataType("logits");
@@ -1500,24 +1511,37 @@ void TrtGptModelInflightBatching::createDecoder(std::optional<executor::Decoding
             }
         }
 
-        mDecoder = std::make_unique<runtime::GptDecoderBatched>(mRuntime->getStreamPtr());
-        mDecoder->setup(
-            decodingMode, getMaxNumSequences(), mOperatingBeamWidth, decoderType, mModelConfig, mWorldConfig);
-
-        mDecoderState->setup(getMaxNumSequences(), mOperatingBeamWidth, getMaxAttentionWindow(), getSinkTokenLen(),
-            getMaxSequenceLen(), decoderType, mModelConfig, mWorldConfig, mRuntime->getBufferManager());
-
-        if (!mModelConfig.getSpeculativeDecodingMode().isNone())
+        mDecoders.clear();
+        for (SizeType32 i = 0; i < getNumVocabs(); i++)
         {
-            mDecoderState->setupSpeculativeDecoding(mModelConfig.getSpeculativeDecodingMode(),
-                mModelConfig.getMaxDecodingTokens(), decoderType, mModelConfig, mWorldConfig,
-                mRuntime->getBufferManager());
+
+            mDecoders.push_back(std::make_unique<runtime::GptDecoderBatched>(mRuntime->getStreamPtr()));
+            auto& mDecoder = mDecoders.back() mDecoder->setup(
+                decodingMode, getMaxNumSequences(), mOperatingBeamWidth, decoderType, mModelConfig, mWorldConfig);
+
+            mDecoderStates.push_back(std::make_unique<runtime::decoder::DecoderState>());
+            auto& mDecoderState = mDecoderStates.back();
+
+            mDecoderState->setup(getMaxNumSequences(), mOperatingBeamWidth, getMaxAttentionWindow(), getSinkTokenLen(),
+                getMaxSequenceLen(), decoderType, mModelConfig, mWorldConfig, mRuntime->getBufferManager());
+
+            if (!mModelConfig.getSpeculativeDecodingMode().isNone())
+            {
+                mDecoderState->setupSpeculativeDecoding(mModelConfig.getSpeculativeDecodingMode(),
+                    mModelConfig.getMaxDecodingTokens(), decoderType, mModelConfig, mWorldConfig,
+                    mRuntime->getBufferManager());
+            }
         }
     }
     else
     {
-        mDecoderState->setupCacheIndirection(
-            getMaxNumSequences(), mOperatingBeamWidth, getMaxAttentionWindow(), mRuntime->getBufferManager());
+        for (SizeType32 i = 0; i < getNumVocabs(); i++)
+        {
+            mDecoderStates.push_back(std::make_unique<runtime::decoder::DecoderState>());
+            auto& mDecoderState = mDecoderStates.back();
+            mDecoderState->setupCacheIndirection(
+                getMaxNumSequences(), mOperatingBeamWidth, getMaxAttentionWindow(), mRuntime->getBufferManager());
+        }
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
