@@ -171,7 +171,6 @@ public:
 
     [[nodiscard]] SizeType32 getNumVocabs() const
     {
-        return (mVocabSize + worldSize - 1) / worldSize * worldSize;
         return mVocabSizes ? mVocabSizes.value().size() : 1;
     }
 
@@ -1046,6 +1045,17 @@ private:
 
     // Language adapter info
     std::optional<SizeType32> mNumLanguages;
+
+    // Size of each vocab if there are multiple vocabs
+    std::optional<std::vector<SizeType32>> mVocabSizes;
+    // parameters of attention prior
+    bool mUseAttentionPrior;
+    bool mUseContextEmbeddings;
+    std::vector<SizeType32> mComputeAttentionPriorFromLayers;
+    std::vector<SizeType32> mApplyAttentionPriorToLayers;
+    SizeType32 mAttentionPriorLookahead;
+    SizeType32 mAttentionPriorWindowLeft;
+    SizeType32 mAttentionPriorWindowRight;
 };
 
 } // namespace tensorrt_llm::runtime

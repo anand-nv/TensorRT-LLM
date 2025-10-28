@@ -747,8 +747,8 @@ public:
     [[nodiscard]] std::optional<ContextPhaseParams> const& getContextPhaseParams() const;
     [[nodiscard]] std::optional<Tensor> getEncoderInputFeatures() const;
     [[nodiscard]] std::optional<SizeType32> getEncoderOutputLength() const;
-    [[nodiscard]] std::optional<Tensor> getDecoderContextFeatures() const
-        [[nodiscard]] std::optional<Tensor> getCrossAttentionMask() const;
+    [[nodiscard]] std::optional<Tensor> getDecoderContextFeatures() const;
+    [[nodiscard]] std::optional<Tensor> getCrossAttentionMask() const;
     [[nodiscard]] RequestType getRequestType() const;
     [[nodiscard]] std::optional<EagleConfig> getEagleConfig() const;
     [[nodiscard]] std::optional<Tensor> getSkipCrossAttnBlocks() const;
