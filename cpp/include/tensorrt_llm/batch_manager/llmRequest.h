@@ -281,7 +281,7 @@ public:
 
     GenericLlmRequest(RequestIdType requestId, executor::Request const& req)
         : mRequestId(requestId)
-        , mPromptLen(req.getInputTokenIds().size()/req.getNumVocabs()))
+        , mPromptLen(req.getInputTokenIds().size() / req.getNumVocabs())
         , mMaxNewTokens(req.getMaxTokens())
         , mSamplingConfig(req.getSamplingConfig(), req.getExternalDraftTokensConfig())
         , mEndId(req.getEndId())
@@ -899,7 +899,7 @@ public:
         mPrepopulatedPromptLenTarget = 0;
         mPrepopulatedPromptLenDraft = 0;
         mContextChunkSize = mPromptLen;
-        mSeqSlots, clear();
+        mSeqSlots.clear();
     }
 
     /// @brief Get the maximum length of tokens returned to the client. Use to ensure we don't return to
@@ -1986,7 +1986,7 @@ public:
     runtime::SamplingConfig mSamplingConfig;
     std::optional<TokenIdType> mEndId{std::nullopt};
     std::optional<TokenIdType> mPadId{std::nullopt};
-    std::vector<SizeType32> mSeqSlots {}
+    std::vector<SizeType32> mSeqSlots{};
     std::optional<LogitsPostProcessor> mLogitsPostProcessor{std::nullopt};
     bool mApplyLogitsPostProcessorBatched{false};
     std::optional<RequestIdType> mClientId{std::nullopt};

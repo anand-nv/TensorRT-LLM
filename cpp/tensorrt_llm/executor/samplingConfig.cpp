@@ -54,7 +54,7 @@ SamplingConfig::SamplingConfig(SizeType32 beamWidth, OptSize32 const& topK, OptF
     , mEarlyStopping(checkEarlyStopping(earlyStopping))
     , mNoRepeatNgramSize(checkNoRepeatNgramSize(noRepeatNgramSize))
     , mNumReturnSequences(checkNumReturnSequences(numReturnSequences, beamWidth))
-    , mMinP(checkMinP(minP)
+    , mMinP(checkMinP(minP))
     , mCfgScale(checkCfgScale(cfgScale))
 {
     updateNumReturnBeams();

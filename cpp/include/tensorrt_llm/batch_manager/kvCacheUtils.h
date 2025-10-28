@@ -59,14 +59,6 @@ public:
         return BlockRange(cacheManager, blockIds, requestId);
     }
 
-    static BlockRange fromNewlyAllocatedBlockIds(
-        BaseKVCacheManager const& cacheManager, LlmRequest::RequestIdType requestId)
-    {
-        auto const windowSize = firstWindowSize(cacheManager);
-        auto const blockIds = cacheManager.getNewlyAllocatedBlockIds(requestId, windowSize);
-        return BlockRange(cacheManager, blockIds, requestId);
-    }
-
     static BlockRange fromNewlyAllocatedBlockIds(BaseKVCacheManager const& cacheManager, LlmRequest const& llmRequest)
     {
         const LlmRequest::RequestIdType requestId = llmRequest.getSeqSlotId(0);
