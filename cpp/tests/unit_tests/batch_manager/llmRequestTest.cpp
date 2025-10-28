@@ -54,7 +54,7 @@ TEST_F(LlmRequestTest, fromExecutorRequest)
         EXPECT_EQ(llmReq.getOrigPromptLen(), inputTokens.size());
         EXPECT_EQ(llmReq.getMaxSentTokenLen(), inputTokens.size());
         EXPECT_EQ(llmReq.getState(), tb::LlmRequestState::kCONTEXT_INIT);
-        EXPECT_FALSE(llmReq.mSeqSlot);
+        EXPECT_FALSE(llmReq.mSeqSlots.empty());
         // No speculative decoding config, draft tokens should be empty
         EXPECT_EQ(llmReq.getDraftTokens()->size(), 0);
         EXPECT_FALSE(llmReq.getEmbeddingBias().has_value());
@@ -488,7 +488,7 @@ TEST_F(LlmRequestTest, testCreateRequests)
         EXPECT_EQ(childReq1->getState(), llmReq.getState());
         EXPECT_EQ(childReq1->mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{8});
         EXPECT_EQ(llmReq2.mSamplingConfig.randomSeed.value(), std::vector<texec::RandomSeedType>{7});
-        EXPECT_FALSE(childReq1->mSeqSlot);
+        EXPECT_FALSE(childReq1->mSeqSlots.empty()));
     }
 
     {
