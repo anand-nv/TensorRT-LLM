@@ -691,8 +691,14 @@ public:
         if (!disableSelectiveCacheTransfer)
         {
             auto* cacheManager = mFormatter->getCacheManager();
-            auto blockRange
-                = kv_cache_manager::BlockRange::fromNewlyAllocatedBlockIds(*cacheManager, llmRequest.mRequestId);
+            std::vector<SizeType32> blockIds;
+            for (int i = 0; i < llmRequest.getNumSequences(); i++)
+            {
+                auto const requestId = llmRequest.getSeqSlotId(i);
+                auto const& thisBlockIds = cacheManager->getNewlyAllocatedBlockIds(requestId);
+                blockIds.insert(blockIds.end(), thisBlockIds.begin(), thisBlockIds.end());
+            }
+            auto blockRange = kv_cache_manager::BlockRange(*cacheManager, blockIds);
             requestInfo = RequestInfo(requestId, blockRange.getBlockHashes(), mSelfState);
         }
 
