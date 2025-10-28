@@ -78,7 +78,7 @@ void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr cons
 
 void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, RequestVector const& generationRequests,
     tr::ITensor::SharedPtr const& logits, tr::SizeType32 logitsIndex, tr::ModelConfig const& modelConfig,
-    tr::BufferManager const& manager, tr::CudaStream const& stream, OptionalRef<RuntimeBuffers> genRuntimeBuffers,
+    tr::BufferManager const& manager, OptionalRef<RuntimeBuffers> genRuntimeBuffers,
     OptionalRef<MedusaBuffers> medusaBuffers, SizeType32 vocabId) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
@@ -124,8 +124,9 @@ void HandleGenerationLogits::operator()(DecoderInputBuffers& inputBuffers, Reque
             // TODO: implement CFG, apply logitsView = logitsView * cfgScale + uncondLogitsView * (1 - cfgScale)
             float cfgScale = llmReq->mSamplingConfig.cfgScale->at(0);
             tensorrt_llm::kernels::invokeCfg(
-                stream, logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
+                manager.getStream(), logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
         }
+        auto const logitsViewShape = logitsView->getShape();
 
         TLLM_CHECK(llmReq->isGenerationInProgressState());
         TensorPtr decoderLogits;

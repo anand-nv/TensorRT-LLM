@@ -22,6 +22,7 @@
 #include "tensorrt_llm/batch_manager/medusaBuffers.h"
 #include "tensorrt_llm/batch_manager/runtimeBuffers.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/kernels/cfgKernels.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 #include "tensorrt_llm/runtime/utils/debugUtils.h"
@@ -123,6 +124,8 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
         auto const numDecoderLogits = 1 + draftLength;
         auto const seqSlot = llmReq->mSeqSlots.at(0);
 
+        TensorPtr logitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
+
         // this is CFG support implementation, where we advance the logits index through the unconditional logits
         if (llmReq->isCfg())
         {
@@ -138,10 +141,8 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
                 vocabOffset += vocabSizes[i];
             }
             tensorrt_llm::kernels::invokeCfg(
-                stream, logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
+                manager.getStream(), logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
         }
-
-        TensorPtr logitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
 
         if (modelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
@@ -183,6 +184,7 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
                 decoderLogits->unsqueeze(1);
 
                 auto curVocablogitsView = logitsView;
+                auto const logitsViewShape = logitsView->getShape();
                 if (logitsViewShape.d[0] == 1) // if current nTok is 1, could have multiple vocabs
                 {
                     SizeType32 offset = 0;
