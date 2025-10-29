@@ -134,7 +134,7 @@ void initBindings(nb::module_& m)
         .def_prop_rw("streaming", &GenLlmReq::isStreaming, &GenLlmReq::setStreaming)
         .def_rw("end_id", &GenLlmReq::mEndId)
         .def_rw("pad_id", &GenLlmReq::mPadId)
-        .def_rw("seq_slot", &GenLlmReq::mSeqSlot)
+        .def_rw("seq_slots", &GenLlmReq::mSeqSlots)
         .def_prop_ro("return_log_probs", &GenLlmReq::returnLogProbs)
         .def_prop_ro("return_context_logits", &GenLlmReq::getReturnContextLogits)
         .def_prop_ro("return_generation_logits", &GenLlmReq::getReturnGenerationLogits)
@@ -281,6 +281,7 @@ void initBindings(nb::module_& m)
                 bool apply_logits_post_processor_batched, std::optional<tb::LlmRequest::VecTokens> encoder_input_tokens,
                 bool return_encoder_output, std::optional<tb::LlmRequest::RequestIdType> client_id,
                 executor::PriorityType priority, std::optional<at::Tensor> encoder_input_features,
+                std::optional<at::Tensor> decoder_context_features,
                 std::optional<tb::LlmRequest::SizeType32> encoder_output_length,
                 std::optional<at::Tensor> cross_attention_mask, tb::LlmRequestType llm_request_type,
                 std::optional<tb::LlmRequest::VecTokenExtraIds> input_token_extra_ids,
@@ -317,6 +318,7 @@ void initBindings(nb::module_& m)
                 auto lora_config_tensor_ptr = makeOptionalTensor(lora_config);
                 auto draft_logits_tensor_ptr = makeOptionalTensor(draft_logits);
                 auto encoder_input_features_tensor_ptr = makeOptionalTensor(encoder_input_features);
+                auto decoder_context_features_tensor_ptr = makeOptionalTensor(decoder_context_features);
                 auto cross_attention_mask_tensor_ptr = makeOptionalTensor(cross_attention_mask);
                 auto skip_cross_attn_blocks_tensor_ptr = makeOptionalTensor(skip_cross_attn_blocks);
 
@@ -329,10 +331,10 @@ void initBindings(nb::module_& m)
                     return_context_logits, return_generation_logits, draft_tokens, draft_logits_tensor_ptr,
                     exclude_input_from_output, logits_post_processor, apply_logits_post_processor_batched,
                     encoder_input_tokens, return_encoder_output, client_id, priority, encoder_input_features_tensor_ptr,
-                    encoder_output_length, cross_attention_mask_tensor_ptr, llm_request_type, input_token_extra_ids,
-                    num_return_sequences, eagle_config, skip_cross_attn_blocks_tensor_ptr, return_perf_metrics,
-                    guided_decoding_params, language_adapter_uid, allotted_time_ms, context_phase_params, cache_salt_id,
-                    arrival_time};
+                    encoder_output_length, decoder_context_features_tensor_ptr, cross_attention_mask_tensor_ptr,
+                    llm_request_type, input_token_extra_ids, num_return_sequences, eagle_config,
+                    skip_cross_attn_blocks_tensor_ptr, return_perf_metrics, guided_decoding_params,
+                    language_adapter_uid, allotted_time_ms, context_phase_params, cache_salt_id, arrival_time};
             },
             nb::arg("request_id"), nb::arg("max_new_tokens"), nb::arg("input_tokens"), nb::arg("sampling_config"),
             nb::arg("is_streaming"), nb::arg("end_id") = std::nullopt, nb::arg("pad_id") = std::nullopt,
@@ -351,7 +353,8 @@ void initBindings(nb::module_& m)
             nb::arg("apply_logits_post_processor_batched") = false, nb::arg("encoder_input_tokens") = std::nullopt,
             nb::arg("return_encoder_output") = false, nb::arg("client_id") = std::nullopt,
             nb::arg("priority") = executor::Request::kDefaultPriority, nb::arg("encoder_input_features") = std::nullopt,
-            nb::arg("encoder_output_len") = std::nullopt, nb::arg("cross_attention_mask") = std::nullopt,
+            nb::arg("encoder_output_len") = std::nullopt, nb::arg("decoder_context_features") = std::nullopt,
+            nb::arg("cross_attention_mask") = std::nullopt,
             nb::arg("llm_request_type") = tb::LlmRequestType::LLMREQUEST_TYPE_CONTEXT_AND_GENERATION,
             nb::arg("input_token_extra_ids") = std::nullopt, nb::arg("num_return_sequences") = 1,
             nb::arg("eagle_config") = std::nullopt, nb::arg("skip_cross_attn_blocks") = std::nullopt,
@@ -460,7 +463,7 @@ void initBindings(nb::module_& m)
             {
                 if (contextRequests[i]->isLastContextChunk())
                 {
-                    activeSlots.push_back(*contextRequests[i]->mSeqSlot);
+                    activeSlots.push_back(contextRequests[i]->mSeqSlots.at(0));
                     generationSteps.push_back(contextRequests[i]->getDecodingIter());
                     auto contextLogitsOffset = numContextLogitsPrefixSum[i + 1] - 1;
                     tr::ITensor::SharedPtr logitsView = ITensor::slice(logits, contextLogitsOffset, 1);
@@ -489,7 +492,7 @@ void initBindings(nb::module_& m)
             {
                 if (genRequests[i]->isGenerationInProgressState())
                 {
-                    activeSlots.push_back(*genRequests[i]->mSeqSlot);
+                    activeSlots.push_back(genRequests[i]->mSeqSlots.at(0));
                     generationSteps.push_back(genRequests[i]->getDecodingIter());
 
                     auto logitsOffset = genLogitsOffset + i * beamWidth;

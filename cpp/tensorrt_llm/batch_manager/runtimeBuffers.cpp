@@ -407,7 +407,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     seqSlotsDevice->reshape(numRequestsShape);
 
     auto const numTokens = getNumTokens();
-    inputsIds->reshape(ITensor::makeShape({numTokens modelConfig.getNumVocabs()}));
+    inputsIds->reshape(ITensor::makeShape({numTokens * modelConfig.getNumVocabs()}));
 
     if (modelConfig.useMrope())
     {

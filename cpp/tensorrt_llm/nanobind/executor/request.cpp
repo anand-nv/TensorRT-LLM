@@ -577,7 +577,7 @@ void initRequestBindings(nb::module_& m)
     };
     auto requestSetstate = [](tle::Request& self, nb::tuple const& state)
     {
-        if (state.size() != 34)
+        if (state.size() != 38)
         {
             throw std::runtime_error("Invalid Request state!");
         }
@@ -599,10 +599,13 @@ void initRequestBindings(nb::module_& m)
             nb::cast<tle::PriorityType>(state[24]), nb::cast<tle::RequestType>(state[25]),
             nb::cast<std::optional<tle::ContextPhaseParams>>(state[26]),
             nb::cast<std::optional<tle::Tensor>>(state[27]), nb::cast<std::optional<SizeType32>>(state[28]),
-            nb::cast<std::optional<tle::Tensor>>(state[29]), 1, nb::cast<std::optional<tle::EagleConfig>>(state[30]),
-            nb::cast<std::optional<tle::Tensor>>(state[31]),
-            nb::cast<std::optional<tle::GuidedDecodingParams>>(state[32]),
-            nb::cast<std::optional<tle::CacheSaltIDType>>(state[33]));
+            nb::cast<std::optional<tle::Tensor>>(state[29]), nb::cast<std::optional<tle::Tensor>>(state[30]), 1,
+            nb::cast<std::optional<tle::EagleConfig>>(state[31]), nb::cast<std::optional<tle::Tensor>>(state[32]),
+            nb::cast<std::optional<tle::GuidedDecodingParams>>(state[33]),
+            nb::cast<std::optional<SizeType32>>(state[34]),            // languageAdapterUid
+            nb::cast<std::optional<tle::MillisecondsType>>(state[35]), // allottedTimeMs
+            nb::cast<std::optional<tle::CacheSaltIDType>>(state[36]),  // cacheSaltID
+            nb::cast<SizeType32>(state[37]));                          // numVocabs
     };
 
     nb::class_<tle::Request> request(m, "Request", nb::dynamic_attr());
@@ -636,6 +639,7 @@ void initRequestBindings(nb::module_& m)
                  std::optional<tle::ContextPhaseParams>,        // contextPhaseParams
                  std::optional<tle::Tensor>,                    // encoderInputFeatures
                  std::optional<tle::SizeType32>,                // encoderOutputLength
+                 std::optional<tle::Tensor>,                    // decoderContextFeatures
                  std::optional<tle::Tensor>,                    // crossAttentionMask
                  SizeType32,                                    // numReturnSequences
                  std::optional<tle::EagleConfig>,               // eagleConfig
@@ -643,7 +647,8 @@ void initRequestBindings(nb::module_& m)
                  std::optional<tle::GuidedDecodingParams>,      // guidedDecodingParams
                  std::optional<tle::SizeType32>,                // languageAdapterUid
                  std::optional<tle::MillisecondsType>,          // allottedTimeMs
-                 std::optional<tle::CacheSaltIDType>            // cacheSaltID
+                 std::optional<tle::CacheSaltIDType>,           // cacheSaltID
+                 SizeType32                                     // numVocabs
                  >(),
             // clang-format off
         nb::arg("input_token_ids"),
@@ -676,6 +681,7 @@ void initRequestBindings(nb::module_& m)
         nb::arg("context_phase_params") = nb::none(),
         nb::arg("encoder_input_features") = nb::none(),
         nb::arg("encoder_output_length") = nb::none(),
+        nb::arg("decoder_context_features") = nb::none(),
         nb::arg("cross_attention_mask") = nb::none(),
         nb::arg("num_return_sequences") = 1,
         nb::arg("eagle_config") = nb::none(),
@@ -683,8 +689,9 @@ void initRequestBindings(nb::module_& m)
         nb::arg("guided_decoding_params") = nb::none(),
         nb::arg("language_adapter_uid") = nb::none(),
         nb::arg("allotted_time_ms") = nb::none(),
-        nb::arg("cache_salt_id") = nb::none()
-    )             // clang-format on
+        nb::arg("cache_salt_id") = nb::none(),
+        nb::arg("num_vocabs") = 1
+    )                         // clang-format on
         .def_prop_ro("input_token_ids", &tle::Request::getInputTokenIds)
         .def_prop_ro("max_tokens", &tle::Request::getMaxTokens)
         .def_prop_rw("streaming", &tle::Request::getStreaming, &tle::Request::setStreaming)
@@ -719,6 +726,8 @@ void initRequestBindings(nb::module_& m)
         .def_prop_rw("request_type", &tle::Request::getRequestType, &tle::Request::setRequestType)
         .def_prop_rw(
             "encoder_input_features", &tle::Request::getEncoderInputFeatures, &tle::Request::setEncoderInputFeatures)
+        .def_prop_rw("decoder_context_features", &tle::Request::getDecoderContextFeatures,
+            &tle::Request::setDecoderContextFeatures)
         .def_prop_rw("cross_attention_mask", &tle::Request::getCrossAttentionMask, &tle::Request::setCrossAttentionMask)
         .def_prop_rw("eagle_config", &tle::Request::getEagleConfig, &tle::Request::setEagleConfig)
         .def_prop_rw(
@@ -727,6 +736,7 @@ void initRequestBindings(nb::module_& m)
             "guided_decoding_params", &tle::Request::getGuidedDecodingParams, &tle::Request::setGuidedDecodingParams)
         .def_prop_rw("allotted_time_ms", &tle::Request::getAllottedTimeMs, &tle::Request::setAllottedTimeMs)
         .def_prop_rw("cache_salt_id", &tle::Request::getCacheSaltID, &tle::Request::setCacheSaltID)
+        .def_prop_rw("num_vocabs", &tle::Request::getNumVocabs, &tle::Request::setNumVocabs)
         .def_prop_rw("context_phase_params", &tle::Request::getContextPhaseParams, &tle::Request::setContextPhaseParams)
         .def("__getstate__", requestGetstate)
         .def("__setstate__", requestSetstate);

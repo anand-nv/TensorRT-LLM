@@ -280,11 +280,13 @@ NB_MODULE(TRTLLM_NB_MODULE, m)
         .def(nb::self != nb::self);
 
     nb::class_<tr::ModelConfig>(m, "ModelConfig")
-        .def(nb::init<SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, nvinfer1::DataType>(),
+        .def(nb::init<SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, SizeType32, nvinfer1::DataType,
+                 std::optional<std::vector<SizeType32>>>(),
             nb::arg("vocab_size"), nb::arg("num_layers"), nb::arg("num_attention_layers"), nb::arg("num_rnn_layers"),
-            nb::arg("num_heads"), nb::arg("hidden_size"), nb::arg("data_type"))
+            nb::arg("num_heads"), nb::arg("hidden_size"), nb::arg("data_type"), nb::arg("vocab_sizes") = nb::none())
         .def_prop_ro("vocab_size", &tr::ModelConfig::getVocabSize)
-        .def("vocab_size_padded", &tr::ModelConfig::getVocabSizePadded, nb::arg("world_size"))
+        .def(
+            "vocab_size_padded", &tr::ModelConfig::getVocabSizePadded, nb::arg("world_size"), nb::arg("vocab_size") = 0)
         .def("num_layers", &tr::ModelConfig::getNbLayers, nb::arg("pipeline_parallelism") = 1,
             nb::arg("pipeline_parallelism_rank") = 0)
         .def("num_attention_layers", &tr::ModelConfig::getNbAttentionLayers, nb::arg("pipeline_parallelism") = 1,
@@ -297,6 +299,8 @@ NB_MODULE(TRTLLM_NB_MODULE, m)
         .def_prop_ro("hidden_size", &tr::ModelConfig::getHiddenSize)
         .def_prop_ro("size_per_head", &tr::ModelConfig::getSizePerHead)
         .def_prop_ro("data_type", &tr::ModelConfig::getDataType)
+        .def_prop_ro("num_vocabs", &tr::ModelConfig::getNumVocabs)
+        .def_prop_ro("vocab_sizes", &tr::ModelConfig::getVocabSizes)
         .def_prop_ro("speculative_decoding_mode", &tr::ModelConfig::getSpeculativeDecodingMode)
         .def_prop_rw("head_size", &tr::ModelConfig::getSizePerHead, &tr::ModelConfig::setSizePerHead)
         .def_prop_rw(
@@ -306,6 +310,25 @@ NB_MODULE(TRTLLM_NB_MODULE, m)
             nb::overload_cast<bool>(&tr::ModelConfig::useGptAttentionPlugin))
         .def_prop_rw("use_packed_input", nb::overload_cast<>(&tr::ModelConfig::usePackedInput, nb::const_),
             nb::overload_cast<bool>(&tr::ModelConfig::usePackedInput))
+        .def_prop_rw("use_gpt_attention_plugin",
+            nb::overload_cast<>(&tr::ModelConfig::useGptAttentionPlugin, nb::const_),
+            nb::overload_cast<bool>(&tr::ModelConfig::useGptAttentionPlugin))
+        .def_prop_rw("use_packed_input", nb::overload_cast<>(&tr::ModelConfig::usePackedInput, nb::const_),
+            nb::overload_cast<bool>(&tr::ModelConfig::usePackedInput))
+        .def_prop_rw("use_attention_prior", nb::overload_cast<>(&tr::ModelConfig::useAttentionPrior, nb::const_),
+            nb::overload_cast<bool>(&tr::ModelConfig::useAttentionPrior))
+        .def_prop_rw("use_context_embeddings", nb::overload_cast<>(&tr::ModelConfig::useContextEmbeddings, nb::const_),
+            nb::overload_cast<bool>(&tr::ModelConfig::useContextEmbeddings))
+        .def_prop_rw("compute_attention_prior_from_layers", &tr::ModelConfig::getComputeAttentionPriorFromLayers,
+            &tr::ModelConfig::setComputeAttentionPriorFromLayers)
+        .def_prop_rw("apply_attention_prior_to_layers", &tr::ModelConfig::getApplyAttentionPriorToLayers,
+            &tr::ModelConfig::setApplyAttentionPriorToLayers)
+        .def_prop_rw("attention_prior_lookahead", &tr::ModelConfig::getAttentionPriorLookahead,
+            &tr::ModelConfig::setAttentionPriorLookahead)
+        .def_prop_rw("attention_prior_window_left", &tr::ModelConfig::getAttentionPriorWindowLeft,
+            &tr::ModelConfig::setAttentionPriorWindowLeft)
+        .def_prop_rw("attention_prior_window_right", &tr::ModelConfig::getAttentionPriorWindowRight,
+            &tr::ModelConfig::setAttentionPriorWindowRight)
         .def_prop_rw("kv_cache_type", nb::overload_cast<>(&tr::ModelConfig::getKVCacheType, nb::const_),
             nb::overload_cast<tr::ModelConfig::KVCacheType>(&tr::ModelConfig::setKVCacheType))
         .def_prop_rw("tokens_per_block", &tr::ModelConfig::getTokensPerBlock, &tr::ModelConfig::setTokensPerBlock)
@@ -375,7 +398,7 @@ NB_MODULE(TRTLLM_NB_MODULE, m)
     };
     auto SamplingConfigSetState = [](tr::SamplingConfig& self, nb::tuple t)
     {
-        if (t.size() != 19)
+        if (t.size() != 20)
         {
             throw std::runtime_error("Invalid SamplingConfig state!");
         }
@@ -400,7 +423,7 @@ NB_MODULE(TRTLLM_NB_MODULE, m)
         config.numReturnSequences = nb::cast<SizeType32>(t[16]);
         config.minP = nb::cast<OptVec<float>>(t[17]);
         config.beamWidthArray = nb::cast<OptVec<std::vector<SizeType32>>>(t[18]);
-
+        config.cfgScale = nb::cast<OptVec<float>>(t[19]);
         new (&self) tr::SamplingConfig(config);
     };
 
@@ -427,6 +450,7 @@ NB_MODULE(TRTLLM_NB_MODULE, m)
         .def_rw("num_return_sequences", &tr::SamplingConfig::numReturnSequences)
         .def_rw("min_p", &tr::SamplingConfig::minP)
         .def_rw("beam_width_array", &tr::SamplingConfig::beamWidthArray)
+        .def_rw("cfg_scale", &tr::SamplingConfig::cfgScale)
         .def_rw("normalize_log_probs", &tr::SamplingConfig::normalizeLogProbs)
         .def("__getstate__", SamplingConfigGetState)
         .def("__setstate__", SamplingConfigSetState)

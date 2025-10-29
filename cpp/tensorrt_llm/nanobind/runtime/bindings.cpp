@@ -294,7 +294,7 @@ void initBindings(nb::module_& m)
             nb::call_guard<nb::gil_scoped_release>())
         .def("setup", &tr::GptDecoderBatched::setup, nb::arg("mode"), nb::arg("max_num_sequences"),
             nb::arg("max_beam_width"), nb::arg("dtype"), nb::arg("model_config"), nb::arg("world_config"),
-            nb::call_guard<nb::gil_scoped_release>())
+            nb::arg("vocab_size") = 0, nb::call_guard<nb::gil_scoped_release>())
         .def("forward_async", &tr::GptDecoderBatched::forwardAsync, nb::arg("decoder_state"), nb::arg("input"),
             nb::call_guard<nb::gil_scoped_release>())
         .def("underlying_decoder", &tr::GptDecoderBatched::getUnderlyingDecoder, nb::rv_policy::reference)
