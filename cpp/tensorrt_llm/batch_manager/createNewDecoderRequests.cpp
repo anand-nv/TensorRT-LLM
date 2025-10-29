@@ -661,7 +661,7 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
     {
         llmReq->mSamplingConfig.normalizeLogProbs = mIsNormalizeLogProbs;
 
-        TLLM_CHECK(llmReq->mSeqSlots.at(0));
+        TLLM_CHECK(!llmReq->mSeqSlots.empty());
         auto const batchSlot = llmReq->mSeqSlots.at(0);
         auto const batchSize = decoderState.getMaxNumSequences();
         TLLM_CHECK(0 <= batchSlot && batchSlot < batchSize);
