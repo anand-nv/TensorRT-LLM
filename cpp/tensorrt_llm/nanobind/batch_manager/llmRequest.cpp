@@ -115,6 +115,7 @@ std::shared_ptr<tb::LlmRequest> LlmRequest::toTrtLlm() const
         mPriority,                                                 //
         from_torch(mEncoderInputFeatures),                         //
         mEncoderOutputLength,                                      //
+        from_torch(mDecoderContextFeatures),                       //
         from_torch(mCrossAttentionMask),                           //
         getLlmRequestType(),                                       //
         std::nullopt,                                              // inputTokenExtraIds

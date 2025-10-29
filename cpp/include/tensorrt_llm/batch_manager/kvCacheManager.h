@@ -553,8 +553,8 @@ public:
         SizeType32 blocksInSecondaryPool, SizeType32 maxNumSequences, std::shared_ptr<runtime::CudaStream> stream,
         bool onboardBlocks, CacheType cacheType, std::optional<executor::RetentionPriority> secondaryOffloadMinPriority,
         std::shared_ptr<KVCacheEventManager> eventManager, bool enablePartialReuse, bool copyOnPartialReuse,
-        std::shared_ptr<kv_connector::KvCacheConnectorManager> kvCacheConnectorManager,
-        std::shared_ptr<kvc::BaseLoopbackAgent> loopbackAgent = nullptr, SizeType32 numVocabs = 1);
+        std::shared_ptr<kv_connector::KvCacheConnectorManager> kvCacheConnectorManager, SizeType32 numVocabs = 1,
+        std::shared_ptr<kvc::BaseLoopbackAgent> loopbackAgent = nullptr);
 
     ~WindowBlockManager();
 

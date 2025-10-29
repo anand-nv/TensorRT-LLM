@@ -351,7 +351,8 @@ private:
     /// @brief Copies the content of the cache indirection outputs to the cache indirection inputs.
     /// @param[in] scheduledRequests The requests to copy the cache indirections for.
     /// @param[in] genBufferId The id of the generation buffers for those requests.
-    void copyCacheIndirectionFromOutputsToInputs(ScheduledRequests const& scheduledRequests, SizeType32 genBufferId);
+    void copyCacheIndirectionFromOutputsToInputs(
+        ScheduledRequests const& scheduledRequests, SizeType32 genBufferId, SizeType32 vocabId);
 
     [[nodiscard]] bool getGatherGenerationLogits() const override
     {
@@ -587,7 +588,7 @@ private:
     // PEFT table for each micro batch
     std::vector<PeftTable> mPeftTables;
     // Decoder input for each micro batch.
-    std::vector<std::unique_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
+    std::vector<std::vector<std::unique_ptr<runtime::decoder_batch::Input>>> mDecodingInputs;
 
     /******************** Book keeping ********************/
     // List of requests in each micro batch
