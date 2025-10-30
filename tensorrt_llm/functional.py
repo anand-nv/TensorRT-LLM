@@ -6031,6 +6031,7 @@ def gpt_attention(
         attention_prior_scores_out = _create_tensor(
             layer.get_output(expected_outputs), layer)
         assert attention_prior_scores_out is not None
+        expected_outputs += 1
 
     assert layer.num_outputs == expected_outputs, \
         f"Plugin outputs number mismatch with expected, got {layer.num_outputs}, expected {expected_outputs}"
