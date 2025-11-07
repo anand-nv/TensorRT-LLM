@@ -52,10 +52,6 @@ ITensor::UniquePtr ITensor::slice(SharedPtr tensor, Shape const& offsetDims, ITe
 
     if (TLLM_LIKELY(offsetDims.nbDims > 0))
     {
-        TLLM_LOG_INFO(
-            "offsetDims.nbDims - 1:%d, offsetDims.d[offsetDims.nbDims - 1]: %d, size: %d, shape.d[offsetDims.nbDims - "
-            "1]: %d",
-            offsetDims.nbDims - 1, offsetDims.d[offsetDims.nbDims - 1], size, shape.d[offsetDims.nbDims - 1]);
         TLLM_CHECK(offsetDims.d[offsetDims.nbDims - 1] + size <= shape.d[offsetDims.nbDims - 1]);
         offset += offsetDims.d[offsetDims.nbDims - 1] * strides.d[offsetDims.nbDims - 1];
     }
