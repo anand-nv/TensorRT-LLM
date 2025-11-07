@@ -676,6 +676,7 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
         decoderState.setBeamWidth(batchSlot, beamWidth);
 
         auto const promptLen = llmReq->getPromptLen();
+        auto const numVocabs = modelConfig.getNumVocabs();
 
         SizeType32 numDecodingEngineTokens{1};
         if (modelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
@@ -709,7 +710,8 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
         initializeLogProbs(dJointOutput, batchSlot, samplingConfig, decoderBufferManager);
 
         auto const& reqTokens = llmReq->getTokens(0);
-        TLLM_CHECK(reqTokens.size() == static_cast<decltype(reqTokens.size())>(promptLen));
+        TLLM_LOG_INFO("reqTokens.size(): %d, promptLen: %d, numVocabs: %d", reqTokens.size(), promptLen, numVocabs);
+        TLLM_CHECK(reqTokens.size() == static_cast<decltype(reqTokens.size())>(promptLen * numVocabs));
         TensorPtr requestIds = ITensor::slice(inputIds, inputOffset, promptLen);
         // Copy to pinned host memory (don't care about stream of bufferManager)
         decoderBufferManager.copy(reqTokens.data(), *requestIds);

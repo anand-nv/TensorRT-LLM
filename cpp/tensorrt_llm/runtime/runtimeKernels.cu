@@ -404,6 +404,38 @@ void invokeCopyBatch(IBuffer const& srcBuffer, IBuffer& dstBuffer, IBuffer const
         srcDataPtr, dstDataPtr, srcOffsetsPtr, dstOffsetsPtr, sizesPtr, static_cast<SizeType64>(dataTypeSize));
 }
 
+namespace
+{
+template <typename T>
+__global__ void add(T* data, std::size_t size, T const value)
+{
+    auto const tidx = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    auto const stride = static_cast<std::size_t>(blockDim.x) * gridDim.x;
+
+    for (auto idx = tidx; idx < size; idx += stride)
+    {
+        data[idx] += value;
+    }
+}
+} // namespace
+
+template <typename T>
+void invokeAdd(IBuffer& buffer, T const value, CudaStream const& stream)
+{
+    auto data = bufferCast<T>(buffer);
+    auto const size = buffer.getSize();
+    dim3 const blockSize{256};
+    std::size_t const gridx{tc::ceilDiv(size, blockSize.x)};
+    std::size_t const gridMax{std::numeric_limits<std::uint32_t>::max()};
+    dim3 const gridSize{static_cast<std::uint32_t>(std::min(gridx, gridMax))};
+
+    add<<<gridSize, blockSize, 0, stream.get()>>>(data, size, value);
+}
+
+template void invokeAdd(IBuffer&, std::int32_t, CudaStream const&);
+template void invokeAdd(IBuffer&, std::int8_t, CudaStream const&);
+template void invokeAdd(IBuffer&, float, CudaStream const&);
+
 void scatterTensor(ITensor& output, ITensor const& input, SizeType32 beamWidth, CudaStream const& stream)
 {
     switch (input.getDataType())

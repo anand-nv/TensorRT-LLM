@@ -122,7 +122,6 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
 
         // Get the logits from the last context token and draft tokens
         auto const numDecoderLogits = 1 + draftLength;
-        auto const seqSlot = llmReq->mSeqSlots.at(0);
 
         TensorPtr logitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
 
@@ -143,6 +142,7 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
             tensorrt_llm::kernels::invokeCfg(
                 manager.getStream(), logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
         }
+        auto const seqSlot = llmReq->mSeqSlots.at(0);
 
         if (modelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
@@ -180,19 +180,17 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
             }
             else
             {
-                decoderLogits = logitsView;
-                decoderLogits->unsqueeze(1);
-
                 auto curVocablogitsView = logitsView;
                 auto const logitsViewShape = logitsView->getShape();
+                auto vocabSizes = modelConfig.getVocabSizes();
                 if (logitsViewShape.d[0] == 1) // if current nTok is 1, could have multiple vocabs
                 {
                     SizeType32 offset = 0;
-                    auto vocabSizes = modelConfig.getVocabSizes();
                     for (SizeType32 i = 0; i < vocabId; ++i)
                     {
                         offset += vocabSizes[i];
                     }
+                    auto const vocabSizePadded = logitsViewShape.d[1];
                     curVocablogitsView = ITensor::slice(logitsView, {0, offset}, vocabSizes[vocabId]); // [vocabSize,]
                     curVocablogitsView
                         = ITensor::view(curVocablogitsView, ITensor::makeShape({1, vocabSizes[vocabId]}));

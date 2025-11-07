@@ -81,7 +81,7 @@ void initRequestBindings(nb::module_& m)
     };
     auto samplingConfigSetstate = [](tle::SamplingConfig& samplingConfig, nb::tuple const& state)
     {
-        if (state.size() != 19)
+        if (state.size() != 20)
         {
             throw std::runtime_error("Invalid SamplingConfig state!");
         }
@@ -103,29 +103,31 @@ void initRequestBindings(nb::module_& m)
             nb::cast<std::optional<SizeType32>>(state[15]),                       // NoRepeatNgramSize
             nb::cast<std::optional<SizeType32>>(state[16]),                       // NumReturnSequences
             nb::cast<std::optional<FloatType>>(state[17]),                        // MinP
-            nb::cast<std::optional<std::vector<SizeType32>>>(state[18])           // BeamWidthArray
+            nb::cast<std::optional<std::vector<SizeType32>>>(state[18]),          // BeamWidthArray
+            nb::cast<std::optional<FloatType>>(state[19])                         // CfgScale
         );
     };
     nb::class_<tle::SamplingConfig>(m, "SamplingConfig")
         .def(nb::init<tle::SizeType32,
-                 std::optional<tle::SizeType32> const&,             // beamWidth
-                 std::optional<tle::FloatType> const&,              // topP
-                 std::optional<tle::FloatType> const&,              // topPMin
-                 std::optional<tle::TokenIdType> const&,            // topPResetIds
-                 std::optional<tle::FloatType> const&,              // topPDecay
-                 std::optional<tle::RandomSeedType> const&,         // seed
-                 std::optional<tle::FloatType> const&,              // temperature
-                 std::optional<tle::SizeType32> const&,             // minTokens
-                 std::optional<tle::FloatType> const&,              // beamSearchDiversityRate
-                 std::optional<tle::FloatType> const&,              // repetitionPenalty
-                 std::optional<tle::FloatType> const&,              // presencePenalty
-                 std::optional<tle::FloatType> const&,              // frequencyPenalty
-                 std::optional<tle::FloatType> const&,              // lengthPenalty
-                 std::optional<tle::SizeType32> const&,             // earlyStopping
-                 std::optional<tle::SizeType32> const&,             // noRepeatNgramSize
-                 std::optional<tle::SizeType32> const&,             // numReturnSequences
-                 std::optional<tle::FloatType> const&,              // minP
-                 std::optional<std::vector<tle::SizeType32>> const& // beamWidthArray
+                 std::optional<tle::SizeType32> const&,              // beamWidth
+                 std::optional<tle::FloatType> const&,               // topP
+                 std::optional<tle::FloatType> const&,               // topPMin
+                 std::optional<tle::TokenIdType> const&,             // topPResetIds
+                 std::optional<tle::FloatType> const&,               // topPDecay
+                 std::optional<tle::RandomSeedType> const&,          // seed
+                 std::optional<tle::FloatType> const&,               // temperature
+                 std::optional<tle::SizeType32> const&,              // minTokens
+                 std::optional<tle::FloatType> const&,               // beamSearchDiversityRate
+                 std::optional<tle::FloatType> const&,               // repetitionPenalty
+                 std::optional<tle::FloatType> const&,               // presencePenalty
+                 std::optional<tle::FloatType> const&,               // frequencyPenalty
+                 std::optional<tle::FloatType> const&,               // lengthPenalty
+                 std::optional<tle::SizeType32> const&,              // earlyStopping
+                 std::optional<tle::SizeType32> const&,              // noRepeatNgramSize
+                 std::optional<tle::SizeType32> const&,              // numReturnSequences
+                 std::optional<tle::FloatType> const&,               // minP
+                 std::optional<std::vector<tle::SizeType32>> const&, // beamWidthArray
+                 std::optional<tle::FloatType> const&                // CfgScale
                  >(),
             // clang-format off
             nb::arg("beam_width") = 1,
@@ -147,7 +149,8 @@ void initRequestBindings(nb::module_& m)
             nb::arg("no_repeat_ngram_size") = nb::none(),
             nb::arg("num_return_sequences") = nb::none(),
             nb::arg("min_p") = nb::none(),
-            nb::arg("beam_width_array") = nb::none())               // clang-format on
+            nb::arg("beam_width_array") = nb::none(),
+            nb::arg("cfg_scale") = nb::none())                       // clang-format on
         .def_prop_rw("beam_width", &tle::SamplingConfig::getBeamWidth, &tle::SamplingConfig::setBeamWidth)
         .def_prop_rw("top_k", &tle::SamplingConfig::getTopK, &tle::SamplingConfig::setTopK)
         .def_prop_rw("top_p", &tle::SamplingConfig::getTopP, &tle::SamplingConfig::setTopP)
@@ -174,6 +177,7 @@ void initRequestBindings(nb::module_& m)
         .def_prop_rw("min_p", &tle::SamplingConfig::getMinP, &tle::SamplingConfig::setMinP)
         .def_prop_rw(
             "beam_width_array", &tle::SamplingConfig::getBeamWidthArray, &tle::SamplingConfig::setBeamWidthArray)
+        .def_prop_rw("cfg_scale", &tle::SamplingConfig::getCfgScale, &tle::SamplingConfig::setCfgScale)
         .def("__getstate__", samplingConfigGetstate)
         .def("__setstate__", samplingConfigSetstate);
 
@@ -572,8 +576,8 @@ void initRequestBindings(nb::module_& m)
             self.getLogitsPostProcessorName(), self.getLogitsPostProcessor(), self.getEncoderInputTokenIds(),
             self.getClientId(), self.getReturnAllGeneratedTokens(), self.getPriority(), self.getRequestType(),
             self.getContextPhaseParams(), self.getEncoderInputFeatures(), self.getEncoderOutputLength(),
-            self.getCrossAttentionMask(), self.getEagleConfig(), self.getSkipCrossAttnBlocks(),
-            self.getGuidedDecodingParams(), self.getCacheSaltID());
+            self.getDecoderContextFeatures(), self.getCrossAttentionMask(), self.getEagleConfig(),
+            self.getSkipCrossAttnBlocks(), self.getGuidedDecodingParams(), self.getCacheSaltID(), self.getNumVocabs());
     };
     auto requestSetstate = [](tle::Request& self, nb::tuple const& state)
     {
@@ -602,7 +606,7 @@ void initRequestBindings(nb::module_& m)
             nb::cast<std::optional<tle::Tensor>>(state[29]), nb::cast<std::optional<tle::Tensor>>(state[30]), 1,
             nb::cast<std::optional<tle::EagleConfig>>(state[31]), nb::cast<std::optional<tle::Tensor>>(state[32]),
             nb::cast<std::optional<tle::GuidedDecodingParams>>(state[33]),
-            nb::cast<std::optional<SizeType32>>(state[34]),            // languageAdapterUid
+            nb::cast<std::optional<tle::SizeType32>>(state[34]),       // languageAdapterUid
             nb::cast<std::optional<tle::MillisecondsType>>(state[35]), // allottedTimeMs
             nb::cast<std::optional<tle::CacheSaltIDType>>(state[36]),  // cacheSaltID
             nb::cast<SizeType32>(state[37]));                          // numVocabs

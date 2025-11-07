@@ -582,7 +582,7 @@ private:
     // Decoder input buffers for each micro batch.
     std::vector<DecoderInputBuffers> mDecoderInputBuffers;
     // Decoder output buffers for each micro batch.
-    std::vector<DecoderOutputBuffers> mDecoderOutputBuffers;
+    std::vector<std::vector<DecoderOutputBuffers>> mDecoderOutputBuffers;
     // Buffers for each slot in the decoder
     std::vector<std::unique_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
     // PEFT table for each micro batch
