@@ -738,6 +738,10 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                         if (llmReq->getNumVocabs() > 1)
                         {
                             auto const& beamTokens = llmReq->getTokens(beam);
+                            TLLM_LOG_INFO(
+                                "llmReq->getNumTokens(beam): %d, numTokens: %d, beamTokens.size(): %d, "
+                                "llmReq->getNumVocabs(): %d",
+                                llmReq->getNumTokens(beam), numTokens, beamTokens.size(), llmReq->getNumVocabs());
                             TLLM_CHECK_WITH_INFO(beamTokens.size() % llmReq->getNumVocabs() == 0,
                                 "Number of tokens needs to be a multiple of number of vocabs!");
                             inputHost.insert(
@@ -1097,6 +1101,7 @@ std::tuple<SizeType32, RuntimeBuffers::TensorMap const&, RuntimeBuffers::TensorM
     fillIOMaps(modelConfig, worldConfig);
 
     auto const numTokens = getNumTokens();
+    TLLM_LOG_INFO("[RuntimeBuffers::prepareStep] numTokens: %d", numTokens);
     auto const optProfileId = runtime.getOptProfileId(numTokens, ModelConfig::getOptProfilesSplitPoints());
     setContextIndex(optProfileId);
     TLLM_LOG_DEBUG("numTokens: %d, optProfileId: %d", numTokens, optProfileId);

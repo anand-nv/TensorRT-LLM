@@ -862,9 +862,9 @@ public:
             for (std::size_t beam = 0; beam < mTokens.size(); ++beam)
             {
                 auto& beamTokens = mTokens.at(beam);
-                beamTokens.resize(mPromptLen * mNumVocabs);
+                beamTokens.resize(mPromptLen);
                 auto& beamUniqueTokens = mUniqueTokens.at(beam);
-                beamUniqueTokens.resize(mPromptLen * mNumVocabs);
+                beamUniqueTokens.resize(mPromptLen);
                 if (returnLogProbs())
                 {
                     mLogProbs.at(beam).clear();
@@ -877,9 +877,9 @@ public:
             for (std::size_t beam = 0; beam < mTokens.size(); ++beam)
             {
                 auto& beamTokens = mTokens.at(beam);
-                beamTokens.resize(newPromptLen);
+                beamTokens.resize(newPromptLen * mNumVocabs);
                 auto& beamUniqueTokens = mUniqueTokens.at(beam);
-                beamUniqueTokens.resize(newPromptLen);
+                beamUniqueTokens.resize(newPromptLen * mNumVocabs);
 
                 if (returnLogProbs())
                 {
