@@ -2107,7 +2107,6 @@ runtime::CudaEvent TrtGptModelInflightBatching::decoderStepAsync(ScheduledReques
     for (SizeType32 vid = 0; vid < getNumVocabs(); vid++)
     {
         auto& decoderInputBuffers = mDecoderInputBuffers.at(getFusedBufferId());
-        auto& decoderOutputBuffers = mDecoderOutputBuffers[vid].at(getFusedBufferId());
         auto& decoderState = mDecoderStates[vid];
 
         auto const contextBufferId = mCtxGenFusion ? getFusedBufferId() : getContextBufferId();
