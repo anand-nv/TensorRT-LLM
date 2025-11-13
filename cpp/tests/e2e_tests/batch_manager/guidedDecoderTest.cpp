@@ -120,10 +120,10 @@ public:
         auto llmReq1 = std::make_shared<LlmRequest>(1, 100, std::make_shared<VecTokens>(10), SamplingConfig(), false);
         texec::GuidedDecodingParams guidedDecodingParams(texec::GuidedDecodingParams::GuideType::kJSON);
         llmReq1->setGuidedDecodingParams(guidedDecodingParams);
-        llmReq1->mSeqSlot = 1;
+        llmReq1->mSeqSlots.push_back(1);
 
         auto llmReq2 = std::make_shared<LlmRequest>(1, 100, std::make_shared<VecTokens>(10), SamplingConfig(), false);
-        llmReq2->mSeqSlot = 2;
+        llmReq2->mSeqSlots.push_back(2);
 
         RequestVector contextRequests{llmReq1, llmReq2};
         RequestVector generationRequests{};

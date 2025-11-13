@@ -48,7 +48,8 @@ public:
     explicit GptDecoderBatched(CudaStreamPtr stream);
 
     void setup(executor::DecodingMode const& mode, SizeType32 maxNumSequences, SizeType32 maxBeamWidth,
-        nvinfer1::DataType dtype, ModelConfig const& modelConfig, WorldConfig const& worldConfig) override;
+        nvinfer1::DataType dtype, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
+        SizeType32 vocab_size = 0) override;
 
     void disableLookahead(RequestVector const& genRequests, TensorPtr const& batchSlots) override;
 

@@ -22,6 +22,7 @@
 #include "tensorrt_llm/batch_manager/medusaBuffers.h"
 #include "tensorrt_llm/batch_manager/runtimeBuffers.h"
 #include "tensorrt_llm/common/nvtxUtils.h"
+#include "tensorrt_llm/kernels/cfgKernels.h"
 #include "tensorrt_llm/runtime/iTensor.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 #include "tensorrt_llm/runtime/utils/debugUtils.h"
@@ -70,8 +71,8 @@ void setupMedusaLogits(std::vector<TensorPtr>& medusaLogitsHeads, TensorPtr cons
 
 SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, RequestVector const& contextRequests,
     tr::ITensor::SharedPtr const& logits, std::vector<tr::SizeType32> const& numContextLogitsVec,
-    tr::ModelConfig const& modelConfig, tr::BufferManager const& manager,
-    OptionalRef<MedusaBuffers> medusaBuffers) const
+    tr::ModelConfig const& modelConfig, tr::BufferManager const& manager, OptionalRef<MedusaBuffers> medusaBuffers,
+    SizeType32 vocabId) const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(HandleContextLogits);
@@ -121,11 +122,31 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
 
         // Get the logits from the last context token and draft tokens
         auto const numDecoderLogits = 1 + draftLength;
-        auto const seqSlot = llmReq->mSeqSlot.value();
+
         TensorPtr logitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
+
+        // this is CFG support implementation, where we advance the logits index through the unconditional logits
+        if (llmReq->isCfg())
+        {
+            logitsIndex += numContextLogits + draftLength;
+            TensorPtr uncondLogitsView = ITensor::slice(logits, logitsIndex - numDecoderLogits, numDecoderLogits);
+            // TODO: implement CFG, apply logitsView = logitsView * cfgScale + uncondLogitsView * (1 - cfgScale)
+
+            float cfgScale = llmReq->mSamplingConfig.cfgScale->at(0);
+            SizeType32 vocabOffset = 0;
+            auto vocabSizes = modelConfig.getVocabSizes();
+            for (SizeType32 i = 0; i < vocabId; ++i)
+            {
+                vocabOffset += vocabSizes[i];
+            }
+            tensorrt_llm::kernels::invokeCfg(
+                manager.getStream(), logitsView, uncondLogitsView, cfgScale, vocabOffset, vocabSizes[vocabId]);
+        }
+        auto const seqSlot = llmReq->mSeqSlots.at(0);
 
         if (modelConfig.getSpeculativeDecodingMode().hasDraftLogits())
         {
+            // speculative decoding is not supported for numVocabs > 1
             auto& medusaLogitsHeads = inputBuffers.predictedDraftLogits.at(seqSlot);
             TLLM_CHECK(medusaBuffers);
             setupMedusaLogits(medusaLogitsHeads, medusaBuffers->medusaLogitsDevice,
@@ -159,14 +180,34 @@ SizeType32 HandleContextLogits::operator()(DecoderInputBuffers& inputBuffers, Re
             }
             else
             {
-                decoderLogits = logitsView;
-                decoderLogits->unsqueeze(1);
+                auto curVocablogitsView = logitsView;
+                auto const logitsViewShape = logitsView->getShape();
+                auto vocabSizes = modelConfig.getVocabSizes();
+                if (logitsViewShape.d[0] == 1) // if current nTok is 1, could have multiple vocabs
+                {
+                    SizeType32 offset = 0;
+                    for (SizeType32 i = 0; i < vocabId; ++i)
+                    {
+                        offset += vocabSizes[i];
+                    }
+                    auto const vocabSizePadded = logitsViewShape.d[1];
+                    curVocablogitsView = ITensor::slice(logitsView, {0, offset}, vocabSizes[vocabId]); // [vocabSize,]
+                    curVocablogitsView
+                        = ITensor::view(curVocablogitsView, ITensor::makeShape({1, vocabSizes[vocabId]}));
+                }
+                auto const updateLogitsViewShape = curVocablogitsView->getShape();
+                decoderLogits = ITensor::view(curVocablogitsView,
+                    ITensor::makeShape({updateLogitsViewShape.d[0], 1, updateLogitsViewShape.d[1]}));
             }
             decoderRequests.push_back(llmReq);
             allDecoderLogits.emplace_back(std::move(decoderLogits));
         }
 
         ++batchIndex;
+        if (llmReq->isCfg())
+        {
+            ++batchIndex;
+        }
     }
 
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);

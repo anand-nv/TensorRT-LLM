@@ -87,7 +87,7 @@ void GuidedDecoder::build(ScheduledRequests const& scheduledRequests)
                 {
                     continue;
                 }
-                auto const seqSlot = llmReq->mSeqSlot.value();
+                auto const seqSlot = llmReq->mSeqSlots.at(0);
                 if (llmReq->isContextInitState() && llmReq->isFirstContextChunk())
                 {
                     // The request is in the first context forward step (considering kv cache reuse).
@@ -180,7 +180,7 @@ void GuidedDecoder::execute(DecoderInputBuffers const& decoderInputBuffers, Buff
             auto const& guidedDecodingParams = llmReq->getGuidedDecodingParams();
             if (guidedDecodingParams.has_value())
             {
-                auto const seqSlot = llmReq->mSeqSlot.value();
+                auto const seqSlot = llmReq->mSeqSlots.at(0);
 
                 auto const& logits = decoderInputBuffers.logits.at(requestIdx);
                 auto const logitsBitmask = ITensor::at(mLogitsBitmask, {seqSlot});

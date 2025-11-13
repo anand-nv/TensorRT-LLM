@@ -75,7 +75,7 @@ void copySequenceLengths(RequestVector const& contextRequests, DecoderInputBuffe
         auto const currentSequenceLen
             = llmReq->mPromptLen + llmReq->getMaxNumGeneratedTokens() + disaggFirstGenTokenSize;
         // Get position of the current sequence in the decoder
-        auto const seqSlot = llmReq->mSeqSlot.value();
+        auto const seqSlot = llmReq->mSeqSlots.at(0);
         batchSlotsRange[batchIdx] = seqSlot;
         fillValuesRange[batchIdx] = currentSequenceLen;
         ++batchIdx;
@@ -661,8 +661,8 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
     {
         llmReq->mSamplingConfig.normalizeLogProbs = mIsNormalizeLogProbs;
 
-        TLLM_CHECK(llmReq->mSeqSlot.has_value());
-        auto const batchSlot = llmReq->mSeqSlot.value();
+        TLLM_CHECK(!llmReq->mSeqSlots.empty());
+        auto const batchSlot = llmReq->mSeqSlots.at(0);
         auto const batchSize = decoderState.getMaxNumSequences();
         TLLM_CHECK(0 <= batchSlot && batchSlot < batchSize);
 
@@ -676,6 +676,7 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
         decoderState.setBeamWidth(batchSlot, beamWidth);
 
         auto const promptLen = llmReq->getPromptLen();
+        auto const numVocabs = modelConfig.getNumVocabs();
 
         SizeType32 numDecodingEngineTokens{1};
         if (modelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
@@ -709,7 +710,7 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
         initializeLogProbs(dJointOutput, batchSlot, samplingConfig, decoderBufferManager);
 
         auto const& reqTokens = llmReq->getTokens(0);
-        TLLM_CHECK(reqTokens.size() == static_cast<decltype(reqTokens.size())>(promptLen));
+        TLLM_CHECK(reqTokens.size() == static_cast<decltype(reqTokens.size())>(promptLen * numVocabs));
         TensorPtr requestIds = ITensor::slice(inputIds, inputOffset, promptLen);
         // Copy to pinned host memory (don't care about stream of bufferManager)
         decoderBufferManager.copy(reqTokens.data(), *requestIds);

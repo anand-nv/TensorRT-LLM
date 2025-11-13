@@ -79,6 +79,10 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
+    useAttentionPrior = modelConfig.useAttentionPrior();
+    useContextEmbeddings = modelConfig.useContextEmbeddings();
+    attentionPriorLookahead = modelConfig.getAttentionPriorLookahead();
+
     auto const& manager = runtime.getBufferManager();
     auto const& engine = runtime.getEngine();
 
@@ -117,6 +121,20 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     logitsIdsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
     inputsIds = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
+
+    if (useAttentionPrior)
+    {
+        // probs in attention kernel are in full precision
+        attentionPriorScores = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kFLOAT);
+        attentionPriorFocus = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
+    }
+
+    if (useContextEmbeddings)
+    {
+        auto const featsType = engine.getTensorDataType(kDecoderContextFeaturesTensorName);
+        decoderContextFeatures = manager.emptyTensor(MemoryType::kGPU, featsType);
+        decoderContextFeaturesMask = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kBOOL);
+    }
 
     if (worldConfig.isPipelineParallel())
     {
@@ -246,17 +264,21 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     NVTX3_SCOPED_RANGE(runtimeBuffersSetBufferSizes);
 
     // set context sizes
-    numContextRequests = static_cast<SizeType32>(contextRequests.size());
+    numContextRequests = 0;
+    for (auto const& llmReq : contextRequests)
+    {
+        numContextRequests += llmReq->getNumSequences();
+    }
     auto numContextLogits = numContextRequests;
     numContextTokens = 0;
     maxContextLength = 0;
     for (auto const& llmReq : contextRequests)
     {
         auto const draftLength = llmReq->isLastContextChunk() ? llmReq->getNumDraftTokens() : 0;
-        numContextLogits += draftLength;
+        numContextLogits += draftLength * llmReq->getNumSequences();
 
         auto const contextChunkSize = llmReq->getContextChunkSize();
-        numContextTokens += contextChunkSize + draftLength;
+        numContextTokens += (contextChunkSize + draftLength) * llmReq->getNumSequences();
         if (maxContextLength < llmReq->mPromptLen)
         {
             maxContextLength = llmReq->mPromptLen;
@@ -264,15 +286,19 @@ void RuntimeBuffers::setBufferSizes(RequestVector const& contextRequests, Reques
     }
 
     // set generation sizes
-    numGenRequests = static_cast<SizeType32>(genRequests.size());
+    numGenRequests = 0;
+    for (auto const& llmReq : genRequests)
+    {
+        numGenRequests += llmReq->getNumSequences();
+    }
     numGenSequences = 0;
     numGenTokens = 0;
     for (auto const& llmReq : genRequests)
     {
         auto const reqBeamWidth = llmReq->getBeamWidthByIter();
-        numGenSequences += reqBeamWidth;
+        numGenSequences += reqBeamWidth * llmReq->getNumSequences();
         auto const draftLen = llmReq->getNumDraftTokens();
-        numGenTokens += draftLen + reqBeamWidth;
+        numGenTokens += (draftLen + reqBeamWidth) * llmReq->getNumSequences();
     }
 
     numLogits = numContextLogits + numGenTokens;
@@ -381,7 +407,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     seqSlotsDevice->reshape(numRequestsShape);
 
     auto const numTokens = getNumTokens();
-    inputsIds->reshape(ITensor::makeShape({numTokens}));
+    inputsIds->reshape(ITensor::makeShape({numTokens * modelConfig.getNumVocabs()}));
 
     if (modelConfig.useMrope())
     {
@@ -416,6 +442,18 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         tensor->reshape(shape);
     }
 
+    if (useAttentionPrior)
+    {
+        attentionPriorScores->reshape(ITensor::makeShape({attentionPriorLookahead * getNumSequences()}));
+        attentionPriorFocus->reshape(ITensor::makeShape({getNumSequences()}));
+    }
+
+    if (useContextEmbeddings)
+    {
+        decoderContextFeatures->reshape(ITensor::makeShape({numTokens, modelConfig.getHiddenSize()}));
+        decoderContextFeaturesMask->reshape(ITensor::makeShape({numTokens}));
+        runtime.getBufferManager().setMem(*decoderContextFeaturesMask, 0);
+    }
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
@@ -491,9 +529,11 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             for (auto const& llmReq : requests)
             {
                 // Get position of the current sequence in the decoder
-                auto const seqSlot = llmReq->mSeqSlot.value();
-                seqSlotIndices[batchIdx] = seqSlot;
-                ++batchIdx;
+                for (auto const& seqSlot : llmReq->mSeqSlots)
+                {
+                    seqSlotIndices[batchIdx] = seqSlot;
+                    ++batchIdx;
+                }
             }
         }
 
@@ -501,11 +541,17 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         manager.copy(*seqSlots, *seqSlotsDevice);
     }
 
+    SizeType32 contextRequestsSize = 0;
+    for (auto const& llmReq : contextRequests)
+    {
+        contextRequestsSize += llmReq->getNumSequences();
+    }
+
     // context preparation loop
-    if (!contextRequests.empty())
+    if (contextRequestsSize > 0)
     {
         NVTX3_SCOPED_RANGE(contextPrepareLoop);
-        numContextLogits.resize(contextRequests.size());
+        numContextLogits.resize(contextRequestsSize);
 
         SizeType32 batchIdx{0};
         for (auto const& llmReq : contextRequests)
@@ -516,202 +562,266 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 llmReq->getMaxNumGeneratedTokens() == 0, "Context request should not have generated tokens.");
 
             auto const& reqTokens = llmReq->getTokens(0);
-            auto const& draftTokens = llmReq->getDraftTokens();
-            auto const draftLength = llmReq->getNumDraftTokens();
-            auto const& positionIds = llmReq->getPositionIds();
-
-            auto const contextChunkSize = llmReq->getContextChunkSize();
-            auto const beginCompute = llmReq->getContextCurrentPosition();
-            auto const endCompute = beginCompute + contextChunkSize;
-            inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute, reqTokens.begin() + endCompute);
-
-            logitsIdsHostPtr[totalNumLogits++] = contextChunkSize;
-            numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? contextChunkSize : 1;
-
-            if (llmReq->isLastContextChunk())
+            // for CFG requests, add the inputs to the buffer twice
+            std::vector<bool> is_conditional_vec{true};
+            if (llmReq->isCfg())
             {
-                inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
-                std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
-                totalNumLogits += draftLength;
+                is_conditional_vec.push_back(false);
             }
-            auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
-            contextLengthsHostPtr[batchIdx] = inputLength;
-            auto const sequenceLen = inputLength + llmReq->getContextCurrentPosition();
-            sequenceLengthsHostPtr[batchIdx] = sequenceLen;
-
-            if (static_cast<bool>(pastKeyValueLengthsPtr))
+            for (auto const& is_conditional : is_conditional_vec)
             {
-                pastKeyValueLengthsPtr[batchIdx] = beginCompute + inputLength;
-            }
-
-            if (positionIds.has_value())
-            {
-                TLLM_CHECK_WITH_INFO(!(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
-                positionIdsHost.insert(positionIdsHost.end(), positionIds.value()->begin() + beginCompute,
-                    positionIds.value()->begin() + endCompute);
-            }
-            else
-            {
-                if (isChatGlm)
+                auto const& origTokens = llmReq->getTokens(0);
+                std::vector<TokenIdType> dummyTokens;
+                if (!is_conditional)
                 {
-                    // Specialize for ChatGLM-6B with 2D-Position-Embedding
-                    positionIdsHost.resize(totalInputSize + inputLength);
-                    std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                    positionIdsHost.back() = positionIdsHost.back() - 1;
-
-                    positionIdsHostRow2.resize(totalInputSize + inputLength);
-                    positionIdsHostRow2.back() = 1;
+                    // that is special token added in "convert_checkpoint",
+                    // that is expanded to all zeros
+                    dummyTokens.assign(origTokens.size(), modelConfig.getVocabSize());
                 }
-                else if (isGlm)
+
+                auto const& reqTokens = is_conditional ? origTokens : dummyTokens;
+                auto const& draftTokens = llmReq->getDraftTokens();
+                auto const draftLength = llmReq->getNumDraftTokens();
+                auto const& positionIds = llmReq->getPositionIds();
+
+                auto const contextChunkSize = llmReq->getContextChunkSize();
+                auto const beginCompute = llmReq->getContextCurrentPosition();
+                auto const endCompute = beginCompute + contextChunkSize;
+                inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute,
+                    reqTokens.begin() + beginCompute + contextChunkSize * llmReq->getNumVocabs());
+
+                logitsIdsHostPtr[totalNumLogits++] = contextChunkSize;
+                numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? contextChunkSize : 1;
+
+                if (llmReq->isLastContextChunk())
                 {
-                    // Specialize for GLM-10B with 2D-Position-Embedding and special value of the mask id position
-                    auto start = inputHost.begin() + totalInputSize;
-                    auto end = start + inputLength;
-                    auto it = std::find_if(
-                        start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
-                    llmReq->mMaskPosition = (it != end) ? std::distance(start, it) : maxContextLength;
+                    inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
+                    std::fill_n(logitsIdsHostPtr + totalNumLogits, draftLength, 1);
+                    totalNumLogits += draftLength;
+                }
+                auto const inputLength = contextChunkSize + (llmReq->isLastContextChunk() ? draftLength : 0);
+                contextLengthsHostPtr[batchIdx] = inputLength;
+                auto const sequenceLen = inputLength + llmReq->getContextCurrentPosition();
+                sequenceLengthsHostPtr[batchIdx] = sequenceLen;
 
-                    positionIdsHost.resize(totalInputSize + inputLength);
-                    std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
-                    positionIdsHost.back() = llmReq->mMaskPosition;
+                if (static_cast<bool>(pastKeyValueLengthsPtr))
+                {
+                    pastKeyValueLengthsPtr[batchIdx] = beginCompute + inputLength;
+                }
 
-                    positionIdsHostRow2.resize(totalInputSize + inputLength);
-                    positionIdsHostRow2.back() = 1;
+                if (positionIds.has_value())
+                {
+                    TLLM_CHECK_WITH_INFO(
+                        !(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
+                    positionIdsHost.insert(positionIdsHost.end(), positionIds.value()->begin() + beginCompute,
+                        positionIds.value()->begin() + endCompute);
                 }
                 else
                 {
-                    // Other models
-                    positionIdsHost.resize(totalInputSize + inputLength);
-                    std::iota(std::begin(positionIdsHost) + totalInputSize,
-                        std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
-                }
-            }
-            if (modelConfig.useMrope())
-            {
-                auto optMropeRotaryCosSin = llmReq->getMropeRotaryCosSin().value();
-                TLLM_CHECK_WITH_INFO(optMropeRotaryCosSin->getShape().d[0] == mropeRotaryCosSinSize,
-                    "Provided MropeRotarySinCos is %ld and expected is %d.\n", optMropeRotaryCosSin->getShape().d[0],
-                    int(mropeRotaryCosSinSize));
-
-                auto const mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, batchIdx, 1);
-                manager.copy(*optMropeRotaryCosSin, *mropeRotaryCosSinCtx);
-            }
-
-            if (modelConfig.useLanguageAdapter())
-            {
-                auto const languageAdapterRouting = llmReq->getLanguageAdapterRouting(
-                    modelConfig.getNumLanguages().value(), endCompute - beginCompute);
-                languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
-                    std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
-            }
-            totalInputSize += inputLength;
-            ++batchIdx;
-        }
-
-        if (rnnStateBuffers)
-        {
-            rnnStateBuffers->fillSlotMappings(contextRequests, rnnStateManagerPtr);
-        }
-    }
-
-    // generation preparation loop
-    if (!genRequests.empty())
-    {
-        NVTX3_SCOPED_RANGE(genPrepareLoop);
-
-        auto const numContextRequests = static_cast<SizeType32>(contextRequests.size());
-        auto numSequences = numContextRequests;
-        for (auto const& llmReq : genRequests)
-        {
-            auto const reqBeamWidth = llmReq->getBeamWidthByIter();
-            auto const draftLength = llmReq->getNumDraftTokens();
-            auto const& draftTokens = llmReq->getDraftTokens();
-            auto const numLogits = draftLength + reqBeamWidth;
-            TLLM_CHECK(draftLength == 0 || reqBeamWidth == 1);
-
-            auto const promptLen = llmReq->mPromptLen;
-            auto const sequenceLen
-                = promptLen + llmReq->getMaxNumGeneratedTokens() + static_cast<SizeType32>(trtOverlap);
-            auto const& positionIds = llmReq->getPositionIds();
-            for (int beam = 0; beam < reqBeamWidth; ++beam)
-            {
-                auto const numTokens = llmReq->getNumTokens(beam) + static_cast<SizeType32>(trtOverlap);
-                // TODO: can this be removed completely?
-                if (!trtOverlap)
-                {
-                    auto const lastToken = llmReq->getLastTokens(beam);
-                    inputHost.push_back(lastToken);
-                    if (draftLength > 0)
+                    if (isChatGlm)
                     {
-                        inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
+                        // Specialize for ChatGLM-6B with 2D-Position-Embedding
+                        positionIdsHost.resize(totalInputSize + inputLength);
+                        std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                        positionIdsHost.back() = positionIdsHost.back() - 1;
+
+                        positionIdsHostRow2.resize(totalInputSize + inputLength);
+                        positionIdsHostRow2.back() = 1;
                     }
-                }
-
-                // If model updates generation position ids do not append them here.
-                if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
-                {
-                    if (positionIds.has_value())
+                    else if (isGlm)
                     {
-                        TLLM_CHECK_WITH_INFO(
-                            !(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
-                        auto last_context_position_id = positionIds.value()->back();
-                        positionIdsHost.push_back(
-                            static_cast<SizeType32>(last_context_position_id + sequenceLen - promptLen));
+                        // Specialize for GLM-10B with 2D-Position-Embedding and special value of the mask id position
+                        auto start = inputHost.begin() + totalInputSize;
+                        auto end = start + inputLength;
+                        auto it = std::find_if(
+                            start, end, [](SizeType32 id) { return id == 50260 || id == 50263 || id == 50264; });
+                        llmReq->mMaskPosition = (it != end) ? std::distance(start, it) : maxContextLength;
+
+                        positionIdsHost.resize(totalInputSize + inputLength);
+                        std::iota(std::begin(positionIdsHost) + totalInputSize, std::end(positionIdsHost), 0);
+                        positionIdsHost.back() = llmReq->mMaskPosition;
+
+                        positionIdsHostRow2.resize(totalInputSize + inputLength);
+                        positionIdsHostRow2.back() = 1;
                     }
                     else
                     {
-                        if (isChatGlm) // ChatGLM-6B
-                        {
-                            positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
-                            positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
-                        }
-                        else if (isGlm)
-                        {
-                            positionIdsHost.push_back(llmReq->mMaskPosition);
-                            positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
-                        }
-                        else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
-                        {
-                            // positionIds is just the size of tokens -1
-                            positionIdsHost.push_back(numTokens - 1);
-                        }
+                        // Other models
+                        positionIdsHost.resize(totalInputSize + inputLength);
+                        std::iota(std::begin(positionIdsHost) + totalInputSize,
+                            std::begin(positionIdsHost) + totalInputSize + inputLength, beginCompute);
                     }
                 }
-
                 if (modelConfig.useMrope())
                 {
-                    auto optMropePositionDeltas = llmReq->getMropePositionDeltas().value();
-                    mropePositionDeltasHost.push_back(optMropePositionDeltas);
+                    auto optMropeRotaryCosSin = llmReq->getMropeRotaryCosSin().value();
+                    TLLM_CHECK_WITH_INFO(optMropeRotaryCosSin->getShape().d[0] == mropeRotaryCosSinSize,
+                        "Provided MropeRotarySinCos is %ld and expected is %d.\n",
+                        optMropeRotaryCosSin->getShape().d[0], int(mropeRotaryCosSinSize));
+
+                    auto const mropeRotaryCosSinCtx = ITensor::slice(mropeRotaryCosSin, batchIdx, 1);
+                    manager.copy(*optMropeRotaryCosSin, *mropeRotaryCosSinCtx);
                 }
 
                 if (modelConfig.useLanguageAdapter())
                 {
-                    // Generation requests only have one token per sequence
-                    auto const languageAdapterRouting
-                        = llmReq->getLanguageAdapterRouting(modelConfig.getNumLanguages().value(), 1);
+                    auto const languageAdapterRouting = llmReq->getLanguageAdapterRouting(
+                        modelConfig.getNumLanguages().value(), endCompute - beginCompute);
                     languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
                         std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
                 }
+                totalInputSize += inputLength;
+                ++batchIdx;
             }
+        }
 
-            if (static_cast<bool>(pastKeyValueLengthsPtr))
+        if (rnnStateBuffers)
+        {
+            // TODO: dont implement CFG for rnn state buffers for now
+            rnnStateBuffers->fillSlotMappings(contextRequests, rnnStateManagerPtr);
+        }
+
+        // set decoder context features and mask
+        if (useContextEmbeddings)
+        {
+            SizeType32 tokenIdx = 0;
+            for (auto const& llmReq : contextRequests)
             {
-                SizeType32 pastKeyValueLength = sequenceLen - 1;
-                std::fill_n(pastKeyValueLengthsPtr + numSequences, reqBeamWidth, pastKeyValueLength);
+                auto const contextPosition = llmReq->getContextCurrentPosition();
+                auto const contextChunkSize = llmReq->getContextChunkSize();
+                if (llmReq->getDecoderContextFeatures())
+                {
+                    auto const& reqFeatures = llmReq->getDecoderContextFeatures();
+                    TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= reqFeatures->getShape().d[0],
+                        "Decoder context features [%d, %d], but request is at position %d and chunk size %d",
+                        (int) reqFeatures->getShape().d[0], (int) reqFeatures->getShape().d[1], contextPosition,
+                        contextChunkSize);
+                    // specifying offset and size across 0th dimension
+                    manager.copy(*ITensor::slice(reqFeatures, contextPosition, contextChunkSize),
+                        *ITensor::slice(decoderContextFeatures, tokenIdx, contextChunkSize));
+                    manager.setMem(*ITensor::slice(decoderContextFeaturesMask, tokenIdx, contextChunkSize), 1);
+                }
+                tokenIdx += llmReq->getNumSequences() * contextChunkSize;
             }
-            totalInputSize += numLogits;
+        }
+    }
 
-            std::fill_n(logitsIdsHostPtr + totalNumLogits, numLogits, 1);
+    // generation preparation loop - CHECK THIS LINE ONWARDS
+    if (!genRequests.empty())
+    {
+        NVTX3_SCOPED_RANGE(genPrepareLoop);
 
-            totalNumLogits += numLogits;
+        auto numSequences = contextRequestsSize;
 
-            if (rnnStateBuffers)
+        for (auto const& llmReq : genRequests)
+        {
+            for (int s = 0; s < llmReq->getNumSequences(); s++)
             {
-                auto const seqSlot = llmReq->mSeqSlot.value();
-                auto& rnnStateManager = *rnnStateManagerPtr;
-                rnnStateManager.fillSlotMapping(*rnnStateBuffers->slotMappingHost, numSequences, seqSlot, reqBeamWidth);
+                auto reqBeamWidth = llmReq->getBeamWidthByIter();
+                auto const draftLength = llmReq->getNumDraftTokens();
+                auto const& draftTokens = llmReq->getDraftTokens();
+                auto const numLogits = draftLength + reqBeamWidth;
+                TLLM_CHECK(draftLength == 0 || reqBeamWidth == 1);
+
+                auto const promptLen = llmReq->mPromptLen;
+                auto const sequenceLen
+                    = promptLen + llmReq->getMaxNumGeneratedTokens() + static_cast<SizeType32>(trtOverlap);
+                auto const& positionIds = llmReq->getPositionIds();
+                for (int reqBeam = 0; reqBeam < reqBeamWidth; ++reqBeam)
+                {
+                    // for CFG, simply use tokens from the 0th beam during generation
+                    int beam = llmReq->isCfg() ? 0 : reqBeam;
+                    auto const numTokens = llmReq->getNumTokens(beam) + static_cast<SizeType32>(trtOverlap);
+                    // TODO: can this be removed completely?
+                    if (!trtOverlap)
+                    {
+                        if (llmReq->getNumVocabs() > 1)
+                        {
+                            auto const& beamTokens = llmReq->getTokens(beam);
+                            TLLM_CHECK_WITH_INFO(beamTokens.size() % llmReq->getNumVocabs() == 0,
+                                "Number of tokens needs to be a multiple of number of vocabs!");
+                            inputHost.insert(
+                                inputHost.end(), beamTokens.cend() - llmReq->getNumVocabs(), beamTokens.cend());
+                        }
+                        else
+                        {
+                            auto const lastToken = llmReq->getLastTokens(beam);
+                            inputHost.push_back(lastToken);
+                        }
+                        if (draftLength > 0)
+                        {
+                            inputHost.insert(inputHost.end(), draftTokens->begin(), draftTokens->end());
+                        }
+                    }
+
+                    // If model updates generation position ids do not append them here.
+                    if (!modelConfig.getSpeculativeDecodingMode().updatesPositionIds())
+                    {
+                        if (positionIds.has_value())
+                        {
+                            TLLM_CHECK_WITH_INFO(
+                                !(isChatGlm || isGlm), "ChatGLM-6B and Glm only use the default initialization");
+                            auto last_context_position_id = positionIds.value()->back();
+                            positionIdsHost.push_back(
+                                static_cast<SizeType32>(last_context_position_id + sequenceLen - promptLen));
+                        }
+                        else
+                        {
+                            if (isChatGlm) // ChatGLM-6B
+                            {
+                                positionIdsHost.push_back(static_cast<SizeType32>(promptLen - 2));
+                                positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                            }
+                            else if (isGlm)
+                            {
+                                positionIdsHost.push_back(llmReq->mMaskPosition);
+                                positionIdsHostRow2.push_back(static_cast<SizeType32>(sequenceLen - promptLen + 1));
+                            }
+                            else // GPT / ChatGLM2-6B / ChatGLM3-6B / BART
+                            {
+                                // positionIds is just the size of tokens -1
+                                positionIdsHost.push_back(numTokens - 1);
+                            }
+                        }
+                    }
+
+                    if (modelConfig.useMrope())
+                    {
+                        auto optMropePositionDeltas = llmReq->getMropePositionDeltas().value();
+                        mropePositionDeltasHost.push_back(optMropePositionDeltas);
+                    }
+
+                    if (modelConfig.useLanguageAdapter())
+                    {
+                        // Generation requests only have one token per sequence
+                        auto const languageAdapterRouting
+                            = llmReq->getLanguageAdapterRouting(modelConfig.getNumLanguages().value(), 1);
+                        languageAdapterRoutingsHost.insert(languageAdapterRoutingsHost.end(),
+                            std::begin(languageAdapterRouting), std::end(languageAdapterRouting));
+                    }
+                }
+
+                if (static_cast<bool>(pastKeyValueLengthsPtr))
+                {
+                    SizeType32 pastKeyValueLength = sequenceLen - 1;
+                    std::fill_n(pastKeyValueLengthsPtr + numSequences, reqBeamWidth, pastKeyValueLength);
+                }
+                totalInputSize += numLogits;
+
+                std::fill_n(logitsIdsHostPtr + totalNumLogits, numLogits, 1);
+
+                totalNumLogits += numLogits;
+
+                if (rnnStateBuffers)
+                {
+                    TLLM_CHECK_WITH_INFO(!llmReq->isCfg(), "CFG is not supported for rnn state buffers");
+                    auto const seqSlot = llmReq->mSeqSlots[0];
+                    auto& rnnStateManager = *rnnStateManagerPtr;
+                    rnnStateManager.fillSlotMapping(
+                        *rnnStateBuffers->slotMappingHost, numSequences, seqSlot, reqBeamWidth);
+                }
+                numSequences += reqBeamWidth;
             }
-            numSequences += reqBeamWidth;
         }
 
         if (transformerBuffers && maxBeamWidth > 1)
@@ -719,25 +829,45 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             transformerBuffers->copyCacheIndirection(genRequests, decoderState.getCacheIndirectionOutput(), stream);
         }
 
-        numSequences = numContextRequests;
+        numSequences = contextRequestsSize;
         for (auto const& llmReq : genRequests)
         {
-            auto const reqBeamWidth = llmReq->getBeamWidthByIter();
-            auto const draftLength = llmReq->getNumDraftTokens();
+            for (int s = 0; s < llmReq->getNumSequences(); s++)
+            {
+                auto const reqBeamWidth = llmReq->getBeamWidthByIter();
+                auto const draftLength = llmReq->getNumDraftTokens();
 
-            auto const contextQLength = llmReq->mPromptLen + draftLength;
-            auto const sequenceLen
-                = contextQLength + llmReq->getMaxNumGeneratedTokens() + static_cast<SizeType32>(trtOverlap);
+                auto const contextQLength = llmReq->mPromptLen + draftLength;
+                auto const sequenceLen
+                    = contextQLength + llmReq->getMaxNumGeneratedTokens() + static_cast<SizeType32>(trtOverlap);
 
-            std::fill_n(contextLengthsHostPtr + numSequences, reqBeamWidth, contextQLength);
-            std::fill_n(sequenceLengthsHostPtr + numSequences, reqBeamWidth, sequenceLen);
-            numSequences += reqBeamWidth;
+                std::fill_n(contextLengthsHostPtr + numSequences, reqBeamWidth, contextQLength);
+                std::fill_n(sequenceLengthsHostPtr + numSequences, reqBeamWidth, sequenceLen);
+                numSequences += reqBeamWidth;
+            }
         }
+
         if (modelConfig.getSpeculativeDecodingMode().isLookaheadDecoding())
         {
             // copy from lookahead decoding buffer
             mLookaheadBuffers->setFromInputs(numContextRequests, numGenRequests, *requestTypes, *seqSlots,
                 decoderState.getLookaheadBuffers(), runtime, modelConfig, worldConfig);
+        }
+
+        if (useAttentionPrior)
+        {
+            // set to zero attention prior scores, so scores from different layers can be accumulated
+            manager.setMem(*attentionPriorScores, 0);
+            // copy focus indices from llm requests to a buffer
+            std::vector<int> focus_lst(numContextRequests, 0);
+            for (auto const& llmReq : genRequests)
+            {
+                for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++)
+                {
+                    focus_lst.push_back(llmReq->getAttentionPriorIdx(modelConfig));
+                }
+            }
+            manager.copy(focus_lst.data(), *attentionPriorFocus, runtime::MemoryType::kCPU);
         }
     }
 
@@ -901,6 +1031,51 @@ void RuntimeBuffers::prepareEagleBuffers(RequestVector const& contextRequests, R
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
+void RuntimeBuffers::processAttentionPriorScores(
+    RequestVector const& genRequests, TllmRuntime const& runtime, ModelConfig const& modelConfig)
+{
+    /**
+     * is called after inference is done. processes the "scores" buffer and sets up
+     * the index with most attention focus for each request.
+     */
+    if (!useAttentionPrior)
+    {
+        TLLM_LOG_WARNING("processing attention prior scores, when attention prior is disabled");
+        return;
+    }
+
+    // copy scores to host
+    auto const& manager = runtime.getBufferManager();
+    auto const& stream = runtime.getStream();
+    auto scoresHost
+        = manager.cpu(ITensor::makeShape({getNumSequences() * attentionPriorLookahead}), nvinfer1::DataType::kFLOAT);
+    manager.copy(*attentionPriorScores, *scoresHost);
+    stream.synchronize();
+
+    // for each generation request, analyze scores and set the attention prior idx
+    size_t scoresOffset = numContextRequests * attentionPriorLookahead;
+    auto* scoresHostPtr = bufferCast<float>(*scoresHost);
+    for (auto const& llmReq : genRequests)
+    {
+        size_t prevPriorIdx = llmReq->getAttentionPriorIdx(modelConfig);
+        float maxScore = scoresHostPtr[scoresOffset];
+        int idxShift = 0;
+        for (int i = 1; i < attentionPriorLookahead; i++)
+        {
+            if (scoresHostPtr[scoresOffset + i] > maxScore)
+            {
+                maxScore = scoresHostPtr[scoresOffset + i];
+                idxShift = i;
+            }
+        }
+
+        llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);
+
+        // TODO: remove hardcode of lookahead size
+        scoresOffset += attentionPriorLookahead * llmReq->getNumSequences();
+    }
+}
+
 std::tuple<SizeType32, RuntimeBuffers::TensorMap const&, RuntimeBuffers::TensorMap&> RuntimeBuffers::prepareStep(
     RequestVector const& contextRequests, RequestVector const& genRequests, SizeType32 maxBeamWidth,
     SizeType32 maxAttentionWindow, runtime::decoder::DecoderState const& decoderState,
@@ -974,6 +1149,15 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     inputMap.insert_or_assign(kHostContextLengthsTensorName, contextLengthsHost);
     inputMap.insert_or_assign(kSequenceLengthsTensorName, sequenceLengthsDevice);
 
+    if (useContextEmbeddings)
+    {
+        inputMap.insert_or_assign(kDecoderContextFeaturesTensorName, decoderContextFeatures);
+        inputMap.insert_or_assign(kDecoderContextFeaturesMaskTensorName, decoderContextFeaturesMask);
+    }
+    if (useAttentionPrior)
+    {
+        inputMap.insert_or_assign(kAttentionPriorFocusTensorName, attentionPriorFocus);
+    }
     if (modelConfig.useCrossAttention())
     {
         encoderBuffers->insertInputTensors(inputMap);
@@ -1016,6 +1200,10 @@ void RuntimeBuffers::fillIOMaps(ModelConfig const& modelConfig, WorldConfig cons
     if (mEagleBuffers)
     {
         mEagleBuffers->insertInputTensors(inputMap, outputMap, worldConfig);
+    }
+    if (useAttentionPrior)
+    {
+        outputMap.insert_or_assign(kAttentionPriorScoresTensorName, attentionPriorScores);
     }
 
     for (auto const& outputTensor : mAdditionalOutputTensors)

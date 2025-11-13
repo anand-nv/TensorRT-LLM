@@ -258,24 +258,28 @@ void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, S
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     // If a sequence slot is associated with this request id, free it
-    seqSlotManager.freeSequenceSlot(llmReq.mRequestId);
-    // Remove the sequence from kvCacheManager
-    auto const requestId = llmReq.mRequestId;
-    if (kvCacheManager)
+    for (int i = 0; i < llmReq.getNumSequences(); i++)
     {
-        kvCacheManager->removeSequence(requestId, llmReq);
-    }
-    if (crossKvCacheManager)
-    {
-        crossKvCacheManager->removeSequence(requestId, llmReq);
-    }
-    if (pause && !llmReq.isGenerationCompleteState())
-    {
-        llmReq.pause(maxInputLen);
-    }
-    else
-    {
-        TLLM_LOG_DEBUG("terminated: request ID %lu, paused: %d", requestId, pause);
+        auto const requestId = llmReq.getSeqSlotId(i);
+        seqSlotManager.freeSequenceSlot(requestId);
+
+        // Remove the sequence from kvCacheManager
+        if (kvCacheManager)
+        {
+            kvCacheManager->removeSequence(requestId, llmReq);
+        }
+        if (crossKvCacheManager)
+        {
+            crossKvCacheManager->removeSequence(requestId, llmReq);
+        }
+        if (pause && !llmReq.isGenerationCompleteState())
+        {
+            llmReq.pause(maxInputLen);
+        }
+        else
+        {
+            TLLM_LOG_DEBUG("terminated: request ID %lu, paused: %d", requestId, pause);
+        }
     }
 
     if (peftCacheManager)

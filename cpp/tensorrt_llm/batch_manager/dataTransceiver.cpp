@@ -691,8 +691,7 @@ public:
         if (!disableSelectiveCacheTransfer)
         {
             auto* cacheManager = mFormatter->getCacheManager();
-            auto blockRange
-                = kv_cache_manager::BlockRange::fromNewlyAllocatedBlockIds(*cacheManager, llmRequest.mRequestId);
+            auto blockRange = kv_cache_manager::BlockRange::fromNewlyAllocatedBlockIds(*cacheManager, llmRequest);
             requestInfo = RequestInfo(requestId, blockRange.getBlockHashes(), mSelfState);
         }
 

@@ -115,6 +115,12 @@ struct FusedQKVMaskedAttentionDispatchParams
     KVCacheBuffer kv_block_array;
     KVLinearBuffer shift_k_cache_buffer;
     bool cross_attention = false;
+    float* attention_prior_scores = nullptr;
+    int const* attention_prior_focus = nullptr;
+    bool apply_attention_prior = false;
+    int attention_prior_lookahead = 5;
+    int attention_prior_window_left = 1;
+    int attention_prior_window_right = 5;
     int const* memory_length_per_sample = nullptr;
     int max_distance = 0;
     bool block_sparse_attention = false;
@@ -630,6 +636,17 @@ void fusedQKV_masked_attention_dispatch(Multihead_attention_params<T_MMHA, CROSS
     // Attention mask input.
     params.attention_mask = input_params.attention_mask;
     params.attention_mask_stride = input_params.attention_mask_stride;
+
+    // forward attention prior params only if its a cross attention
+    if (CROSS_ATTENTION)
+    {
+        params.attention_prior_scores = input_params.attention_prior_scores;
+        params.attention_prior_focus = input_params.attention_prior_focus;
+        params.apply_attention_prior = input_params.apply_attention_prior;
+        params.attention_prior_lookahead = input_params.attention_prior_lookahead;
+        params.attention_prior_window_left = input_params.attention_prior_window_left;
+        params.attention_prior_window_right = input_params.attention_prior_window_right;
+    }
 
     // Attention sinks.
     params.attention_sinks = input_params.attention_sinks;
@@ -2406,6 +2423,18 @@ int AttentionOp::enqueueGeneration(EnqueueGenerationParams<T> const& params, cud
     dispatch_params.rotary_cogvlm_vision_start = mVisionStart;
     dispatch_params.rotary_cogvlm_vision_length = mVisionLength;
     dispatch_params.cross_attention = isCrossAttention();
+    if (ComputeAttentionPrior())
+    {
+        dispatch_params.attention_prior_scores = params.attention_prior_scores;
+        dispatch_params.attention_prior_lookahead = mAttentionPriorLookahead;
+        dispatch_params.attention_prior_window_left = mAttentionPriorWindowLeft;
+        dispatch_params.attention_prior_window_right = mAttentionPriorWindowRight;
+    }
+    if (ApplyAttentionPrior() || ComputeAttentionPrior())
+    {
+        dispatch_params.attention_prior_focus = params.attention_prior_focus;
+        dispatch_params.apply_attention_prior = mApplyAttentionPrior;
+    }
     dispatch_params.memory_length_per_sample = params.encoder_input_lengths;
     dispatch_params.block_sparse_attention = mMaskType == AttentionMaskType::BLOCKSPARSE;
     dispatch_params.block_sparse_params = mBlockSparseParams;
@@ -2967,6 +2996,11 @@ std::string AttentionOp::toString() const
     ss << "mMaxContextLength: " << mMaxContextLength << std::endl;
     ss << "mQKVBiasEnabled: " << std::boolalpha << mQKVBiasEnabled << std::endl;
     ss << "mCrossAttention: " << std::boolalpha << mCrossAttention << std::endl;
+    ss << "mComputeAttentionPrior: " << std::boolalpha << mComputeAttentionPrior << std::endl;
+    ss << "mApplyAttentionPrior: " << std::boolalpha << mApplyAttentionPrior << std::endl;
+    ss << "mAttentionPriorLookahead: " << mAttentionPriorLookahead << std::endl;
+    ss << "mAttentionPriorWindowLeft: " << mAttentionPriorWindowLeft << std::endl;
+    ss << "mAttentionPriorWindowRight: " << mAttentionPriorWindowRight << std::endl;
     ss << "mMaxDistance: " << mMaxDistance << std::endl;
     ss << "mPosShiftEnabled: " << std::boolalpha << mPosShiftEnabled << std::endl;
     ss << "mPagedContextFMHA: " << std::boolalpha << mPagedContextFMHA << std::endl;

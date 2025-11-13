@@ -388,7 +388,7 @@ void initBindings(pybind11::module_& m)
             py::call_guard<py::gil_scoped_release>())
         .def("setup", &tr::GptDecoderBatched::setup, py::arg("mode"), py::arg("max_num_sequences"),
             py::arg("max_beam_width"), py::arg("dtype"), py::arg("model_config"), py::arg("world_config"),
-            py::call_guard<py::gil_scoped_release>())
+            py::arg("vocab_size") = 0, py::call_guard<py::gil_scoped_release>())
         .def("forward_async", &tr::GptDecoderBatched::forwardAsync, py::arg("decoder_state"), py::arg("input"),
             py::call_guard<py::gil_scoped_release>())
         .def("underlying_decoder", &tr::GptDecoderBatched::getUnderlyingDecoder, py::return_value_policy::reference)

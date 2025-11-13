@@ -43,6 +43,9 @@ void invokeGatherBatch(IBuffer& buffer, IBuffer const& values, IBuffer const& sl
 void invokeCopyBatch(IBuffer const& srcBuffer, IBuffer& dstBuffer, IBuffer const& srcOffsets, IBuffer const& dstOffsets,
     IBuffer const& sizes, std::size_t maxStride, CudaStream const& stream);
 
+template <typename T>
+void invokeAdd(IBuffer& buffer, T value, CudaStream const& stream);
+
 void scatterTensor(ITensor& output, ITensor const& input, SizeType32 beamWidth, CudaStream const& stream);
 
 void tileTensor(ITensor& output, ITensor const& input, SizeType32 beamWidth, CudaStream const& stream);

@@ -351,7 +351,8 @@ private:
     /// @brief Copies the content of the cache indirection outputs to the cache indirection inputs.
     /// @param[in] scheduledRequests The requests to copy the cache indirections for.
     /// @param[in] genBufferId The id of the generation buffers for those requests.
-    void copyCacheIndirectionFromOutputsToInputs(ScheduledRequests const& scheduledRequests, SizeType32 genBufferId);
+    void copyCacheIndirectionFromOutputsToInputs(
+        ScheduledRequests const& scheduledRequests, SizeType32 genBufferId, SizeType32 vocabId);
 
     [[nodiscard]] bool getGatherGenerationLogits() const override
     {
@@ -461,6 +462,21 @@ protected:
 
     SizeType32 getMaxCapacityBatchSize(SizeType32 inputLength, SizeType32 outputLength) const override;
 
+    [[nodiscard]] SizeType32 getNumVocabs() const
+    {
+        return mModelConfig.getNumVocabs();
+    }
+
+    [[nodiscard]] std::vector<SizeType32> getVocabSizes() const
+    {
+        return mModelConfig.getVocabSizes();
+    }
+
+    [[nodiscard]] SizeType32 getVocabSize() const
+    {
+        return mModelConfig.getVocabSize();
+    }
+
 private:
     /******************** Configs ********************/
     // Parameters of the model (TRT engine)
@@ -484,9 +500,12 @@ private:
     // Runner for the TRT engine. The engine produces logits.
     std::unique_ptr<runtime::TllmRuntime> mRuntime;
     // Decoder that generates new tokens from the logits.
-    std::unique_ptr<runtime::GptDecoderBatched> mDecoder;
+
+    std::vector<std::unique_ptr<runtime::GptDecoderBatched>> mDecoders;
     // Decoder state for all requests
-    std::unique_ptr<runtime::decoder::DecoderState> mDecoderState;
+    // std::unique_ptr<runtime::decoder::DecoderState> mDecoderState;
+    // Decoder state for all requests
+    std::vector<std::unique_ptr<runtime::decoder::DecoderState>> mDecoderStates;
     // Synchronization handles for decoder
     std::vector<std::optional<runtime::CudaEvent>> mDecoderFinishedEvents;
 
@@ -563,13 +582,13 @@ private:
     // Decoder input buffers for each micro batch.
     std::vector<DecoderInputBuffers> mDecoderInputBuffers;
     // Decoder output buffers for each micro batch.
-    std::vector<DecoderOutputBuffers> mDecoderOutputBuffers;
+    std::vector<std::vector<DecoderOutputBuffers>> mDecoderOutputBuffers;
     // Buffers for each slot in the decoder
     std::vector<std::unique_ptr<SlotDecoderBuffers>> mSlotDecoderBuffers;
     // PEFT table for each micro batch
     std::vector<PeftTable> mPeftTables;
     // Decoder input for each micro batch.
-    std::vector<std::unique_ptr<runtime::decoder_batch::Input>> mDecodingInputs;
+    std::vector<std::vector<std::unique_ptr<runtime::decoder_batch::Input>>> mDecodingInputs;
 
     /******************** Book keeping ********************/
     // List of requests in each micro batch

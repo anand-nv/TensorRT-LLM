@@ -37,19 +37,20 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<LogitsPostProcessor> logitslogitsPostProcessor, std::optional<VecTokens> encoderInputTokenIds,
     std::optional<IdType> clientId, bool returnAllGeneratedTokens, float priority, RequestType type,
     std::optional<ContextPhaseParams> contextPhaseParams, std::optional<Tensor> encoderInputFeatures,
-    std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> crossAttentionMask,
-    SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig, std::optional<Tensor> skipCrossAttnBlocks,
-    std::optional<GuidedDecodingParams> guidedDecodingParams, std::optional<SizeType32> languageAdapterUid,
-    std::optional<MillisecondsType> allottedTimeMs, std::optional<CacheSaltIDType> cacheSaltID)
+    std::optional<SizeType32> encoderOutputLength, std::optional<Tensor> decoderContextFeatures,
+    std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
+    std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
+    std::optional<SizeType32> languageAdapterUid, std::optional<MillisecondsType> allottedTimeMs,
+    std::optional<CacheSaltIDType> cacheSaltID, SizeType32 numVocabs)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(multimodalInput),
         std::move(multimodalEmbedding), std::move(mRopeConfig), std::move(loraConfig), lookaheadConfig,
         std::move(kvCacheRetentionConfig), std::move(logitsPostProcessorName), std::move(logitslogitsPostProcessor),
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
-        std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength, crossAttentionMask,
-        numReturnSequences, eagleConfig, skipCrossAttnBlocks, std::move(guidedDecodingParams), languageAdapterUid,
-        allottedTimeMs, cacheSaltID))
+        std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
+        std::move(decoderContextFeatures), crossAttentionMask, numReturnSequences, eagleConfig, skipCrossAttnBlocks,
+        std::move(guidedDecodingParams), languageAdapterUid, allottedTimeMs, cacheSaltID, numVocabs))
 {
 }
 
@@ -183,6 +184,11 @@ std::optional<VecTokens> Request::getEncoderInputTokenIds() const
     return mImpl->getEncoderInputTokenIds();
 }
 
+std::optional<Tensor> Request::getDecoderContextFeatures() const
+{
+    return mImpl->getDecoderContextFeatures();
+}
+
 std::optional<IdType> Request::getClientId() const
 {
     return mImpl->getClientId();
@@ -251,6 +257,11 @@ std::optional<SizeType32> Request::getLanguageAdapterUid() const
 std::optional<CacheSaltIDType> Request::getCacheSaltID() const
 {
     return mImpl->getCacheSaltID();
+}
+
+SizeType32 Request::getNumVocabs() const
+{
+    return mImpl->getNumVocabs();
 }
 
 void Request::setStreaming(bool streaming)
@@ -388,6 +399,11 @@ void Request::setEncoderOutputLength(SizeType32 encoderOutputLength)
     mImpl->setEncoderOutputLength(encoderOutputLength);
 }
 
+void Request::setDecoderContextFeatures(Tensor decoderContextFeatures)
+{
+    return mImpl->setDecoderContextFeatures(decoderContextFeatures);
+}
+
 void Request::setCrossAttentionMask(Tensor crossAttentionMask)
 {
     mImpl->setCrossAttentionMask(crossAttentionMask);
@@ -421,5 +437,10 @@ void Request::setLanguageAdapterUid(SizeType32 languageAdapterUid)
 void Request::setCacheSaltID(CacheSaltIDType cacheSaltID)
 {
     return mImpl->setCacheSaltID(cacheSaltID);
+}
+
+void Request::setNumVocabs(SizeType32 numVocabs)
+{
+    return mImpl->setNumVocabs(numVocabs);
 }
 } // namespace tensorrt_llm::executor
