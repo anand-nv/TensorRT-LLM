@@ -1067,6 +1067,8 @@ void RuntimeBuffers::processAttentionPriorScores(
                 maxScore = scoresHostPtr[scoresOffset + i];
                 idxShift = i;
             }
+            TLLM_LOG_INFO("prevPriorIdx: %d, idxShift: %d, maxScore: %f, scoresHostPtr[scoresOffset + i]: %f",
+                prevPriorIdx, idxShift, maxScore, scoresHostPtr[scoresOffset + idxShift]);
         }
 
         llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);

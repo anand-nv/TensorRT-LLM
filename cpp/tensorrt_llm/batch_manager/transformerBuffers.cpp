@@ -577,7 +577,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             else
             {
                 numTokens += size;
-                TLLM_LOG_WARNING(
+                TLLM_LOG_DEBUG(
                     "CrossAttentionMask is not provided for sequence %d of request. Default padding attention mask "
                     "will be "
                     "created.",
@@ -646,7 +646,7 @@ void TransformerBuffers::copyCrossAttentionMasks(RequestVector const& contextReq
             else
             {
                 numTokens++;
-                TLLM_LOG_WARNING(
+                TLLM_LOG_DEBUG(
                     "CrossAttentionMask is not provided for sequence %d of generation request. Full valid "
                     "attentionMask will "
                     "be used "

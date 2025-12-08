@@ -23,7 +23,9 @@ sm2name = {
     87: 'ampere',
     89: 'ada',
     90: 'hopper',
+    100: 'blackwell',
     120: 'blackwell',
+    121: 'blackwell',
 }
 
 dtype2traits = {

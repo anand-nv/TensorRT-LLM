@@ -103,13 +103,14 @@ namespace mmha
 //
 // The kernel ends with a loop over the values in V. We use THREADS_PER_VALUE to control how many
 // timesteps are computed by loop iteration. As with the keys, the values are read from a cache
-// except for the current timestep. The layout of the cache buffer for the values is same as the key,
+// except for the current timestep. The layout of the cache buffer for the vaqlues is same as the key,
 // which is [B, H, L, Dh].
 //
 // Note that we have remapped key layout to make sure it shares the same pattern as value [B, H, L, Dh].
 // It helps coalescing memory access, and reducing register pressure.
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
+constexpr float HALF_FLT_MAX = 65504.f;
 
 template <typename T, int Dh_MAX>
 struct Qk_vec_m_
@@ -1469,7 +1470,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     static constexpr bool HANDLE_KV{!DO_CROSS_ATTENTION};
 
     // While doing the product Q*K^T for the different keys we track the max.
-    float qk_max = -FLT_MAX;
+    float qk_max = -HALF_FLT_MAX;
 
     float qk = 0.0F;
 
@@ -2216,7 +2217,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     }
 
     // The warps finalize the reduction.
-    qk_max = lane < WARPS_PER_BLOCK ? red_smem[lane] : -FLT_MAX;
+    qk_max = lane < WARPS_PER_BLOCK ? red_smem[lane] : -HALF_FLT_MAX;
 #pragma unroll
     for (int mask = WARPS_PER_BLOCK / 2; mask >= 1; mask /= 2)
     {
@@ -2262,6 +2263,10 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     }
 
     // Compute the sum.
+    printf(
+        "WARPS_PER_BLOCK: %d, WARP_SIZE: %d, THREADS_PER_BLOCK: %d, \n", WARPS_PER_BLOCK, WARP_SIZE, THREADS_PER_BLOCK);
+    printf("WARPS_PER_BLOCK: %d, red_sum[WARPS_PER_BLOCK]: %f, sum: %f, qk_max: %f, Dh: %d, Dh_MAX: %d\n",
+        WARPS_PER_BLOCK, red_smem[WARPS_PER_BLOCK], sum, qk_max, Dh, Dh_MAX);
     sum = block_sum<WARPS_PER_BLOCK>(&red_smem[WARPS_PER_BLOCK], sum);
 
     // Add the attention sinks.
@@ -2278,6 +2283,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     float logit_scale = 1.f;
 #endif // MMHA_FP8_SCALE_P_INSTEAD_OF_V
     float inv_sum = __fdividef(logit_scale, sum + 1.e-6f);
+    printf("logit_scale: %f, logit_scale sum: %f, inv_sum: %f\n", logit_scale, sum, inv_sum);
 
     int const normlization_loop_end = MULTI_BLOCK_FLAG ? timesteps_per_block : kv_loop_length;
     float sum_rescale = 0.0f;
@@ -2296,6 +2302,8 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 {
                     prob *= 0.1f;
                 }
+                printf("first loop ti: %d, prob: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob, qk_smem[ti], inv_sum);
+
                 // store back
                 qk_smem[ti] = prob;
                 sum_rescale += prob;
@@ -2303,6 +2311,8 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             else
             {
                 convert_from_float(&logits_smem[ti], prob);
+                printf("else loop ti: %d, prob: %f, logits_smem[ti]: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob,
+                    __bfloat162float(logits_smem[ti]), qk_smem[ti], inv_sum);
             }
         }
         else

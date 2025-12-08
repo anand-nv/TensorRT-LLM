@@ -1267,7 +1267,7 @@ public:
 
     bool isAttentionPriorFinished() const
     {
-        return mAttentionPriorCounterCloseToEnd >= 20;
+        return mAttentionPriorCounterCloseToEnd >= 16;
     }
 
     [[nodiscard]] SizeType32 getAttentionPriorIdx(runtime::ModelConfig const& modelConfig)
