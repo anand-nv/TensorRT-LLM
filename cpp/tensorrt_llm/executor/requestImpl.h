@@ -49,7 +49,8 @@ public:
         SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
         std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
         std::optional<SizeType32> languageAdapterUid, std::optional<MillisecondsType> allottedTimeMs,
-        std::optional<CacheSaltIDType> cacheSaltID, SizeType32 numVocabs = 1)
+        std::optional<CacheSaltIDType> cacheSaltID, SizeType32 numVocabs = 1, SizeType32 leftOffset = 0,
+        SizeType32 maxAttendCount = 8, SizeType32 maxEndAttendCount = 16)
         : mInputTokenIds(std::move(inputTokenIds))
         , mMaxNewTokens(maxNewTokens)
         , mStreaming(streaming)
@@ -89,6 +90,9 @@ public:
         , mAllottedTimeMs(allottedTimeMs)
         , mCacheSaltID(cacheSaltID)
         , mNumVocabs(numVocabs)
+        , mLeftOffset(leftOffset)
+        , mMaxAttendCount(maxAttendCount)
+        , mMaxEndAttendCount(maxEndAttendCount)
     {
         validate();
     }
@@ -315,6 +319,21 @@ public:
         return mNumVocabs;
     }
 
+    [[nodiscard]] SizeType32 getLeftOffset() const
+    {
+        return mLeftOffset;
+    }
+
+    [[nodiscard]] SizeType32 getMaxAttendCount() const
+    {
+        return mMaxAttendCount;
+    }
+
+    [[nodiscard]] SizeType32 getMaxEndAttendCount() const
+    {
+        return mMaxEndAttendCount;
+    }
+
     void setStreaming(bool streaming)
     {
         mStreaming = streaming;
@@ -504,6 +523,21 @@ public:
         mNumVocabs = numVocabs;
     }
 
+    void setLeftOffset(SizeType32 leftOffset)
+    {
+        mLeftOffset = leftOffset;
+    }
+
+    void setMaxAttendCount(SizeType32 maxAttendCount)
+    {
+        mMaxAttendCount = maxAttendCount;
+    }
+
+    void setMaxEndAttendCount(SizeType32 maxEndAttendCount)
+    {
+        mMaxEndAttendCount = maxEndAttendCount;
+    }
+
 private:
     void validate()
     {
@@ -580,6 +614,9 @@ private:
         lambda(mAllottedTimeMs ? std::make_optional(mAllottedTimeMs->count()) : std::nullopt);
         lambda(mCacheSaltID);
         lambda(mNumVocabs);
+        lambda(mLeftOffset);
+        lambda(mMaxAttendCount);
+        lambda(mMaxEndAttendCount);
     }
 
     VecTokens mInputTokenIds;
@@ -621,6 +658,9 @@ private:
     std::optional<MillisecondsType> mAllottedTimeMs;
     std::optional<CacheSaltIDType> mCacheSaltID;
     SizeType32 mNumVocabs;
+    SizeType32 mLeftOffset;
+    SizeType32 mMaxAttendCount;
+    SizeType32 mMaxEndAttendCount;
 };
 
 } // namespace tensorrt_llm::executor

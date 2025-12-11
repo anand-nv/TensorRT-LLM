@@ -75,7 +75,8 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
     std::vector<SizeType32> const& maxAttentionWindowVec, SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen,
     TllmRuntime const& runtime, ModelConfig const& modelConfig, WorldConfig const& worldConfig,
     executor::DecodingConfig const& decodingConfig, bool gatherGenerationLogits,
-    std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs)
+    std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs,
+    TensorPtr priorAttentionPriorScores)
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
 
