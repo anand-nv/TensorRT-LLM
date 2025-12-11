@@ -142,7 +142,8 @@ public:
         std::optional<MillisecondsType> allottedTimeMs = std::nullopt,
         std::optional<executor::ContextPhaseParams> const& contextPhaseParams = std::nullopt,
         std::optional<CacheSaltIDType> cacheSaltID = std::nullopt, std::optional<TimePoint> arrivalTime = std::nullopt,
-        SizeType32 numVocabs = 1)
+        SizeType32 numVocabs = 1, SizeType32 leftOffset = 0, SizeType32 maxAttendCount = 8,
+        SizeType32 maxEndAttendCount = 16)
         : mRequestId(requestId)
         , mPromptLen(inputTokens->size() / numVocabs)
         , mMaxNewTokens(maxNewTokens)
@@ -202,6 +203,9 @@ public:
         , mAllottedTimeMs(allottedTimeMs)
         , mCacheSaltID(cacheSaltID)
         , mNumVocabs{numVocabs}
+        , mLeftOffset(leftOffset)
+        , mMaxAttendCount(maxAttendCount)
+        , mMaxEndAttendCount(maxEndAttendCount)
     {
         if (mEncoderTokens.has_value() || encoderInputFeatures.has_value())
         {
@@ -229,7 +233,8 @@ public:
         executor::PriorityType priority = executor::Request::kDefaultPriority, SizeType32 numReturnSequences = 1,
         std::optional<SizeType32> languageAdapterUid = std::nullopt,
         std::optional<executor::ContextPhaseParams> const& contextPhaseParams = std::nullopt,
-        std::optional<CacheSaltIDType> cacheSaltID = std::nullopt, SizeType32 numVocabs = 1)
+        std::optional<CacheSaltIDType> cacheSaltID = std::nullopt, SizeType32 numVocabs = 1, SizeType32 leftOffset = 0,
+        SizeType32 maxAttendCount = 8, SizeType32 maxEndAttendCount = 16)
         : mRequestId(requestId)
         , mPromptLen(inputTokens.size() / numVocabs)
         , mMaxNewTokens(maxNewTokens)
@@ -271,6 +276,9 @@ public:
         , mLanguageAdapterUid(languageAdapterUid)
         , mCacheSaltID(cacheSaltID)
         , mNumVocabs{numVocabs}
+        , mLeftOffset(leftOffset)
+        , mMaxAttendCount(maxAttendCount)
+        , mMaxEndAttendCount(maxEndAttendCount)
     {
         if (mEncoderTokens.has_value())
         {
@@ -311,6 +319,9 @@ public:
         , mAllottedTimeMs(req.getAllottedTimeMs())
         , mCacheSaltID(req.getCacheSaltID())
         , mNumVocabs(req.getNumVocabs())
+        , mLeftOffset(req.getLeftOffset())
+        , mMaxAttendCount(req.getMaxAttendCount())
+        , mMaxEndAttendCount(req.getMaxEndAttendCount())
     {
         if (req.getRequestType() == executor::RequestType::REQUEST_TYPE_GENERATION_ONLY)
         {
@@ -534,6 +545,27 @@ public:
     [[nodiscard]] SizeType32 getNumVocabs() const
     {
         return mNumVocabs;
+    }
+
+    /// @brief Get offset of prior idx for following segments
+    /// @return  The prior idx left offset
+    [[nodiscard]] SizeType32 getLeftOffset() const
+    {
+        return mLeftOffset;
+    }
+
+    /// @brief Get max number of attend count for following segments
+    /// @return  The max number of attend count
+    [[nodiscard]] SizeType32 getMaxAttendCount() const
+    {
+        return mMaxAttendCount;
+    }
+
+    /// @brief Get max number of end attend count for following segments
+    /// @return  The max number of end attend count
+    [[nodiscard]] SizeType32 getMaxEndAttendCount() const
+    {
+        return mMaxEndAttendCount;
     }
 
     /// @brief Get total number of tokens for this req (prompt + generated)
@@ -1241,6 +1273,12 @@ public:
     void setAttentionPriorIdx(SizeType32 attentionPriorIdx, runtime::ModelConfig const& modelConfig)
     {
         auto const lastIdx = getEncoderOutputLen() - modelConfig.getAttentionPriorWindowRight() - 1;
+        TLLM_CHECK_WITH_INFO(
+            lastIdx > getLeftOffset(), "Encoder output len should be larger than left offset+right attention window ");
+        if (attentionPriorIdx < getLeftOffset())
+        {
+            attentionPriorIdx = getLeftOffset();
+        }
         if (attentionPriorIdx > lastIdx)
         {
             // no need to move further the attention window will cover all tokens till end
@@ -1252,13 +1290,17 @@ public:
             // TODO: lazy initialization due to inconsistencies between
             // runtime::ITensor::SharedPtr and at::Tensor
             mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
+            for (SizeType32 i = 0; i < getLeftOffset(); i++)
+            {
+                mAttentionPriorCounters[i] = getMaxAttendCount();
+            }
         }
         mAttentionPriorCounters[attentionPriorIdx]++;
         if (attentionPriorIdx >= lastIdx)
         {
             mAttentionPriorCounterCloseToEnd++;
         }
-        else if (mAttentionPriorCounters[attentionPriorIdx] >= 8)
+        else if (mAttentionPriorCounters[attentionPriorIdx] >= getMaxAttendCount())
         {
             // increment to avoid getting stuck in the same encoder output
             setAttentionPriorIdx(attentionPriorIdx + 1, modelConfig);
@@ -1267,7 +1309,7 @@ public:
 
     bool isAttentionPriorFinished() const
     {
-        return mAttentionPriorCounterCloseToEnd >= 16;
+        return mAttentionPriorCounterCloseToEnd >= getMaxEndAttendCount();
     }
 
     [[nodiscard]] SizeType32 getAttentionPriorIdx(runtime::ModelConfig const& modelConfig)
@@ -2165,6 +2207,9 @@ protected:
     std::vector<size_t> mRequestedBlockHashes;
 
     SizeType32 mNumVocabs;
+    SizeType32 mLeftOffset;
+    SizeType32 mMaxAttendCount;
+    SizeType32 mMaxEndAttendCount;
 
     bool mIsDummyRequest{false};
 

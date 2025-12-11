@@ -577,11 +577,12 @@ void initRequestBindings(nb::module_& m)
             self.getClientId(), self.getReturnAllGeneratedTokens(), self.getPriority(), self.getRequestType(),
             self.getContextPhaseParams(), self.getEncoderInputFeatures(), self.getEncoderOutputLength(),
             self.getDecoderContextFeatures(), self.getCrossAttentionMask(), self.getEagleConfig(),
-            self.getSkipCrossAttnBlocks(), self.getGuidedDecodingParams(), self.getCacheSaltID(), self.getNumVocabs());
+            self.getSkipCrossAttnBlocks(), self.getGuidedDecodingParams(), self.getCacheSaltID(), self.getNumVocabs(),
+            self.getLeftOffset(), self.getMaxAttendCount(), self.getMaxEndAttendCount());
     };
     auto requestSetstate = [](tle::Request& self, nb::tuple const& state)
     {
-        if (state.size() != 38)
+        if (state.size() != 41)
         {
             throw std::runtime_error("Invalid Request state!");
         }
@@ -609,7 +610,10 @@ void initRequestBindings(nb::module_& m)
             nb::cast<std::optional<tle::SizeType32>>(state[34]),       // languageAdapterUid
             nb::cast<std::optional<tle::MillisecondsType>>(state[35]), // allottedTimeMs
             nb::cast<std::optional<tle::CacheSaltIDType>>(state[36]),  // cacheSaltID
-            nb::cast<SizeType32>(state[37]));                          // numVocabs
+            nb::cast<SizeType32>(state[37]),                           // numVocabs
+            nb::cast<SizeType32>(state[38]),                           // leftOffset
+            nb::cast<SizeType32>(state[39]),                           // maxAttendCount
+            nb::cast<SizeType32>(state[40]));                          // maxEndAttendCount
     };
 
     nb::class_<tle::Request> request(m, "Request", nb::dynamic_attr());
@@ -652,7 +656,10 @@ void initRequestBindings(nb::module_& m)
                  std::optional<tle::SizeType32>,                // languageAdapterUid
                  std::optional<tle::MillisecondsType>,          // allottedTimeMs
                  std::optional<tle::CacheSaltIDType>,           // cacheSaltID
-                 SizeType32                                     // numVocabs
+                 SizeType32,                                    // numVocabs
+                 SizeType32,                                    // leftOffset
+                 SizeType32,                                    // maxAttendCount
+                 SizeType32                                     // maxEndAttendCount
                  >(),
             // clang-format off
         nb::arg("input_token_ids"),
@@ -694,8 +701,11 @@ void initRequestBindings(nb::module_& m)
         nb::arg("language_adapter_uid") = nb::none(),
         nb::arg("allotted_time_ms") = nb::none(),
         nb::arg("cache_salt_id") = nb::none(),
-        nb::arg("num_vocabs") = 1
-    )                         // clang-format on
+        nb::arg("num_vocabs") = 1,
+        nb::arg("left_offset") = 0,
+        nb::arg("max_attend_count") = 8,
+        nb::arg("max_end_attend_count") = 16
+    )              // clang-format on
         .def_prop_ro("input_token_ids", &tle::Request::getInputTokenIds)
         .def_prop_ro("max_tokens", &tle::Request::getMaxTokens)
         .def_prop_rw("streaming", &tle::Request::getStreaming, &tle::Request::setStreaming)
@@ -741,6 +751,9 @@ void initRequestBindings(nb::module_& m)
         .def_prop_rw("allotted_time_ms", &tle::Request::getAllottedTimeMs, &tle::Request::setAllottedTimeMs)
         .def_prop_rw("cache_salt_id", &tle::Request::getCacheSaltID, &tle::Request::setCacheSaltID)
         .def_prop_rw("num_vocabs", &tle::Request::getNumVocabs, &tle::Request::setNumVocabs)
+        .def_prop_rw("left_offset", &tle::Request::getLeftOffset, &tle::Request::setLeftOffset)
+        .def_prop_rw("max_attend_count", &tle::Request::getMaxAttendCount, &tle::Request::setMaxAttendCount)
+        .def_prop_rw("max_end_attend_count", &tle::Request::getMaxEndAttendCount, &tle::Request::setMaxEndAttendCount)
         .def_prop_rw("context_phase_params", &tle::Request::getContextPhaseParams, &tle::Request::setContextPhaseParams)
         .def("__getstate__", requestGetstate)
         .def("__setstate__", requestSetstate);

@@ -154,6 +154,7 @@ public:
     //! Attention prior
     TensorPtr attentionPriorScores; // [b*5,]
     TensorPtr attentionPriorFocus;  // [b,]
+    TensorPtr prevAttentionPriorScores;
     bool useAttentionPrior;
     bool useContextEmbeddings;
     int attentionPriorLookahead;
@@ -313,7 +314,8 @@ private:
         SizeType32 maxAttentionWindow, SizeType32 sinkTokenLen, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig,
         executor::DecodingConfig const& decodingConfig, bool gatherGenerationLogits,
-        std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs = std::nullopt);
+        std::optional<std::vector<executor::AdditionalModelOutput>> const& additionalModelOutputs = std::nullopt,
+        TensorPtr priorAttentionPriorScores = nullptr);
 
     //! @brief set max sizes for pre-allocation
     void setMaxBufferSizes(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, runtime::ModelConfig const& modelConfig,

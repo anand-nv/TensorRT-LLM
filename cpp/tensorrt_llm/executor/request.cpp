@@ -41,7 +41,8 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
     std::optional<Tensor> crossAttentionMask, SizeType32 numReturnSequences, std::optional<EagleConfig> eagleConfig,
     std::optional<Tensor> skipCrossAttnBlocks, std::optional<GuidedDecodingParams> guidedDecodingParams,
     std::optional<SizeType32> languageAdapterUid, std::optional<MillisecondsType> allottedTimeMs,
-    std::optional<CacheSaltIDType> cacheSaltID, SizeType32 numVocabs)
+    std::optional<CacheSaltIDType> cacheSaltID, SizeType32 numVocabs, SizeType32 leftOffset, SizeType32 maxAttendCount,
+    SizeType32 maxEndAttendCount)
     : mImpl(std::make_unique<Impl>(std::move(inputTokenIds), maxTokens, streaming, samplingConfig, outputConfig, endId,
         padId, std::move(positionIds), std::move(badWords), std::move(stopWords), std::move(embeddingBias),
         std::move(externalDraftTokensConfig), std::move(pTuningConfig), std::move(multimodalInput),
@@ -50,7 +51,8 @@ Request::Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming, 
         std::move(encoderInputTokenIds), clientId, returnAllGeneratedTokens, priority, type,
         std::move(contextPhaseParams), std::move(encoderInputFeatures), encoderOutputLength,
         std::move(decoderContextFeatures), crossAttentionMask, numReturnSequences, eagleConfig, skipCrossAttnBlocks,
-        std::move(guidedDecodingParams), languageAdapterUid, allottedTimeMs, cacheSaltID, numVocabs))
+        std::move(guidedDecodingParams), languageAdapterUid, allottedTimeMs, cacheSaltID, numVocabs, leftOffset,
+        maxAttendCount, maxEndAttendCount))
 {
 }
 
@@ -264,6 +266,21 @@ SizeType32 Request::getNumVocabs() const
     return mImpl->getNumVocabs();
 }
 
+SizeType32 Request::getLeftOffset() const
+{
+    return mImpl->getLeftOffset();
+}
+
+SizeType32 Request::getMaxAttendCount() const
+{
+    return mImpl->getMaxAttendCount();
+}
+
+SizeType32 Request::getMaxEndAttendCount() const
+{
+    return mImpl->getMaxEndAttendCount();
+}
+
 void Request::setStreaming(bool streaming)
 {
     mImpl->setStreaming(streaming);
@@ -443,4 +460,20 @@ void Request::setNumVocabs(SizeType32 numVocabs)
 {
     return mImpl->setNumVocabs(numVocabs);
 }
+
+void Request::setLeftOffset(SizeType32 leftOffset)
+{
+    return mImpl->setLeftOffset(leftOffset);
+}
+
+void Request::setMaxAttendCount(SizeType32 maxAttendCount)
+{
+    return mImpl->setMaxAttendCount(maxAttendCount);
+}
+
+void Request::setMaxEndAttendCount(SizeType32 maxEndAttendCount)
+{
+    return mImpl->setMaxEndAttendCount(maxEndAttendCount);
+}
+
 } // namespace tensorrt_llm::executor
