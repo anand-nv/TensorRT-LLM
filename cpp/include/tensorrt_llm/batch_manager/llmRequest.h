@@ -1277,7 +1277,7 @@ public:
             lastIdx > getLeftOffset(), "Encoder output len should be larger than left offset+right attention window ");
         if (attentionPriorIdx < getLeftOffset())
         {
-            attentionPriorIdx = getLeftOffset();
+            skipTokens += 1;
         }
         if (attentionPriorIdx > lastIdx)
         {
@@ -1290,10 +1290,6 @@ public:
             // TODO: lazy initialization due to inconsistencies between
             // runtime::ITensor::SharedPtr and at::Tensor
             mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
-            for (SizeType32 i = 0; i < getLeftOffset(); i++)
-            {
-                mAttentionPriorCounters[i] = getMaxAttendCount();
-            }
         }
         mAttentionPriorCounters[attentionPriorIdx]++;
         if (attentionPriorIdx >= lastIdx)
@@ -2068,6 +2064,7 @@ protected:
     SizeType32 mPrepopulatedPromptLenDraft{0};
 
     SizeType32 mMaxSentTokenLen;
+    SizeType32 skipTokens{0};
 
     std::optional<TensorPtr> mEmbeddingBias{std::nullopt};
     std::optional<TensorPtr> mBadWordsList{std::nullopt};

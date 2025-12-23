@@ -123,9 +123,10 @@ std::optional<executor::Result> LlmRequest::createResult(bool useFastLogits, int
 
     result.outputTokenIds.resize(nbBeams);
 
-    auto const startTokenPos = maxNbTokens - maxNbTokensOut;
+    auto const startTokenPos = maxNbTokens - maxNbTokensOut + skipTokens;
 
-    auto const shouldSendResponse = isFinished() || (mIsStreaming && maxNbTokens > getMaxSentTokenLen());
+    auto const shouldSendResponse = (isFinished() || (mIsStreaming && maxNbTokens > getMaxSentTokenLen()))
+        && mAttentionPriorIdx >= getLeftOffset();
 
     if (!shouldSendResponse)
     {
@@ -140,7 +141,7 @@ std::optional<executor::Result> LlmRequest::createResult(bool useFastLogits, int
         if (nbTokensOut > 0)
         {
             auto const first = tokens.data() + startTokenPos * getNumVocabs();
-            result.outputTokenIds.at(beam).assign(first, first + nbTokensOut * getNumVocabs());
+            result.outputTokenIds.at(beam).assign(first, first + (nbTokensOut + skipTokens) * getNumVocabs());
         }
     }
 
