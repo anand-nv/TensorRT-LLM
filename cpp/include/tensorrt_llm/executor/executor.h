@@ -678,6 +678,9 @@ public:
     /// that may involve multiple micro-batches). A request can be timed-out before ever being scheduled.
     /// @param cacheSaltID Salt ID for KV cache blocks to limit the kv cache reuse to the requests with the same string.
     /// @param numVocabs The number of vocabs.
+    /// @param leftOffset The left offset for the attention prior.
+    /// @param maxAttendCount The max attend count for the attention prior.
+    /// @param maxEndAttendCount The max end attend count for the attention prior.
     Request(VecTokens inputTokenIds, SizeType32 maxTokens, bool streaming = false,
         SamplingConfig const& samplingConfig = SamplingConfig(), OutputConfig const& outputConfig = OutputConfig(),
         std::optional<SizeType32> const& endId = std::nullopt, std::optional<SizeType32> const& padId = std::nullopt,
@@ -706,7 +709,8 @@ public:
         std::optional<GuidedDecodingParams> guidedDecodingParams = std::nullopt,
         std::optional<SizeType32> languageAdapterUid = std::nullopt,
         std::optional<MillisecondsType> allottedTimeMs = std::nullopt,
-        std::optional<CacheSaltIDType> cacheSaltID = std::nullopt, SizeType32 numVocabs = 1);
+        std::optional<CacheSaltIDType> cacheSaltID = std::nullopt, SizeType32 numVocabs = 1, SizeType32 leftOffset = 0,
+        SizeType32 maxAttendCount = 8, SizeType32 maxEndAttendCount = 16);
 
     /// @brief This logits postprocessor name will dispatch to the batched logits postprocessor
     static auto constexpr kBatchedPostProcessorName = "batched";
@@ -758,6 +762,9 @@ public:
     [[nodiscard]] std::optional<CacheSaltIDType> getCacheSaltID() const;
     [[nodiscard]] std::optional<std::vector<std::string>> getAdditionalOutputNames() const;
     [[nodiscard]] SizeType32 getNumVocabs() const;
+    [[nodiscard]] SizeType32 getLeftOffset() const;
+    [[nodiscard]] SizeType32 getMaxAttendCount() const;
+    [[nodiscard]] SizeType32 getMaxEndAttendCount() const;
 
     void setStreaming(bool streaming);
     void setSamplingConfig(SamplingConfig const& config);
@@ -795,6 +802,9 @@ public:
     void setAllottedTimeMs(MillisecondsType allottedTimeMs);
     void setCacheSaltID(CacheSaltIDType cacheSaltID);
     void setNumVocabs(SizeType32 numVocabs);
+    void setLeftOffset(SizeType32 leftOffset);
+    void setMaxAttendCount(SizeType32 maxAttendCount);
+    void setMaxEndAttendCount(SizeType32 maxEndAttendCount);
 
 private:
     friend class Serialization;
