@@ -163,12 +163,13 @@ void RuntimeBuffers::create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth,
         && worldConfig.isLastPipelineParallelRank())
     {
         auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
+        auto const hiddenSize = modelConfig.getHiddenSize();
         auto const logitsType = engine.getTensorDataType(batch_manager::RuntimeBuffers::kLogitsTensorName);
 
         generationLogitsCache.transposedLogits = manager.gpu(
-            ITensor::makeShape({maxBeamWidth, GenerationLogitsCache::kCACHE_LENGTH, vocabSizePadded}), logitsType);
+            ITensor::makeShape({maxBeamWidth, GenerationLogitsCache::kCACHE_LENGTH, hiddenSize}), logitsType);
         generationLogitsCache.logits = manager.gpu(
-            ITensor::makeShape({GenerationLogitsCache::kCACHE_LENGTH, maxBatchSize * maxBeamWidth, vocabSizePadded}),
+            ITensor::makeShape({GenerationLogitsCache::kCACHE_LENGTH, maxBatchSize * maxBeamWidth, hiddenSize}),
             logitsType);
 
         generationLogitsCache.fragmentPointerDevice
@@ -321,6 +322,7 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     if (worldConfig.isLastPipelineParallelRank())
     {
         auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
+        auto const hiddenSize = modelConfig.getHiddenSize();
 
         if (modelConfig.computeContextLogits() && (numContextRequests > 0))
         {
@@ -329,7 +331,8 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
             auto const& engine = runtime.getEngine();
             auto const& manager = runtime.getBufferManager();
             auto const logitsType = engine.getTensorDataType(kLogitsTensorName);
-            logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, vocabSizePadded}), logitsType);
+            //logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, vocabSizePadded}), logitsType);
+            logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, hiddenSize}), logitsType);
         }
         else if (gatherGenerationLogits && modelConfig.getSpeculativeDecodingMode().isNone())
         {
@@ -343,7 +346,8 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
         }
         else
         {
-            logits->reshape(ITensor::makeShape({numLogits, vocabSizePadded}));
+            //logits->reshape(ITensor::makeShape({numLogits, vocabSizePadded}));
+            logits->reshape(ITensor::makeShape({numLogits, hiddenSize}));
         }
     }
 
@@ -545,6 +549,9 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
     SizeType32 contextRequestsSize = 0;
     for (auto const& llmReq : contextRequests)
     {
+        //auto numSeq = llmReq->getNumSequences();
+        // For CFG requests, we process inputs twice (conditional + unconditional)
+        //contextRequestsSize += numSeq * (llmReq->isCfg() ? 2 : 1);
         contextRequestsSize += llmReq->getNumSequences();
     }
 
@@ -693,9 +700,13 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 if (llmReq->getDecoderContextFeatures())
                 {
                     auto const& reqFeatures = llmReq->getDecoderContextFeatures();
-                    TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= reqFeatures->getShape().d[0],
+                    auto const& reqFeaturesShape = reqFeatures->getShape();
+                    TLLM_CHECK_WITH_INFO(reqFeaturesShape.nbDims >= 2,
+                        "Decoder context features must have at least 2 dimensions, but got %d dimensions for request %lu",
+                        reqFeaturesShape.nbDims, llmReq->mRequestId);
+                    TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= reqFeaturesShape.d[0],
                         "Decoder context features [%d, %d], but request is at position %d and chunk size %d",
-                        (int) reqFeatures->getShape().d[0], (int) reqFeatures->getShape().d[1], contextPosition,
+                        (int) reqFeaturesShape.d[0], (int) reqFeaturesShape.d[1], contextPosition,
                         contextChunkSize);
                     // specifying offset and size across 0th dimension
                     manager.copy(*ITensor::slice(reqFeatures, contextPosition, contextChunkSize),
@@ -740,7 +751,7 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                         {
                             auto const& beamTokens = llmReq->getTokens(beam);
                             TLLM_CHECK_WITH_INFO(beamTokens.size() % llmReq->getNumVocabs() == 0,
-                                "Number of tokens needs to be a multiple of number of vocabs!");
+                                "Number of tokens needs to be a multiple of number of vocabs! %d %d", beamTokens.size(), llmReq->getNumVocabs());
                             inputHost.insert(
                                 inputHost.end(), beamTokens.cend() - llmReq->getNumVocabs(), beamTokens.cend());
                         }

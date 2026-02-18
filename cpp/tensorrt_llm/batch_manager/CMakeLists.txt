@@ -48,6 +48,7 @@ set(SRCS
     transformerBuffers.cpp
     trtEncoderModel.cpp
     trtGptModelInflightBatching.cpp
+    trtLocalTransformer.cpp
     updateDecoderBuffers.cpp
     utils/debugUtils.cpp
     utils/inflightBatchingUtils.cpp

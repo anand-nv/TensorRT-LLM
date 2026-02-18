@@ -74,6 +74,9 @@ public:
     //! @returns [batchSize, beamWidth], finished states of type FinishedState, on gpu
     [[nodiscard]] TensorPtr getFinishReasons() const;
 
+    //! @returns [batchSize, beamWidth], finished states of type FinishedState, in pinned memory
+    [[nodiscard]] TensorPtr getFinishReasonsHost() const;
+
     //! @returns [batchSize, maxBeamWidth, maxInputLength + maxNewTokens], contains input token ids and generated token
     //! ids without padding, on gpu. In case of beam search, contains the ungathered data.
     [[nodiscard]] TensorPtr getIds() const;

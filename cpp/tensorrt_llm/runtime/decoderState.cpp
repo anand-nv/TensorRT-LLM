@@ -96,6 +96,8 @@ void DecoderState::setupBuffers(nvinfer1::DataType dtype, BufferManager const& b
 
     dOutput->finishReasons
         = bufferManager.emptyTensor(MemoryType::kGPU, TRTDataType<tk::FinishedState::UnderlyingType>::value);
+    dOutput->finishReasonsHost
+        = bufferManager.emptyTensor(MemoryType::kPINNEDPOOL, TRTDataType<tk::FinishedState::UnderlyingType>::value);
     dInput->finishReasons = dOutput->finishReasons;
 
     dOutput->logProbsTiled = bufferManager.emptyTensor(MemoryType::kGPU, nvFloatType);
@@ -479,6 +481,11 @@ TensorPtr DecoderState::getFinishReasons() const
     return mJointDecodingOutput->finishReasons;
 }
 
+TensorPtr DecoderState::getFinishReasonsHost() const
+{
+    return mJointDecodingOutput->finishReasonsHost;
+}
+
 TensorPtr DecoderState::getIds() const
 {
     return mJointDecodingOutput->ids;
@@ -526,6 +533,8 @@ TensorPtr DecoderState::getLogProbs(SizeType32 batchIdx) const
 
 TensorPtr DecoderState::getSequenceLengths() const
 {
+    TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
+    TLLM_LOG_INFO("mJointDecodingOutput->lengths: %d", mJointDecodingOutput->lengths);
     return mJointDecodingOutput->lengths;
 }
 

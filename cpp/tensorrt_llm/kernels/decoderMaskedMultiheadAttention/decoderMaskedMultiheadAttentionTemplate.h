@@ -2263,10 +2263,10 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     }
 
     // Compute the sum.
-    printf(
-        "WARPS_PER_BLOCK: %d, WARP_SIZE: %d, THREADS_PER_BLOCK: %d, \n", WARPS_PER_BLOCK, WARP_SIZE, THREADS_PER_BLOCK);
-    printf("WARPS_PER_BLOCK: %d, red_sum[WARPS_PER_BLOCK]: %f, sum: %f, qk_max: %f, Dh: %d, Dh_MAX: %d\n",
-        WARPS_PER_BLOCK, red_smem[WARPS_PER_BLOCK], sum, qk_max, Dh, Dh_MAX);
+    //printf(
+    //    "WARPS_PER_BLOCK: %d, WARP_SIZE: %d, THREADS_PER_BLOCK: %d, \n", WARPS_PER_BLOCK, WARP_SIZE, THREADS_PER_BLOCK);
+    //printf("WARPS_PER_BLOCK: %d, red_sum[WARPS_PER_BLOCK]: %f, sum: %f, qk_max: %f, Dh: %d, Dh_MAX: %d\n",
+    //    WARPS_PER_BLOCK, red_smem[WARPS_PER_BLOCK], sum, qk_max, Dh, Dh_MAX);
     sum = block_sum<WARPS_PER_BLOCK>(&red_smem[WARPS_PER_BLOCK], sum);
 
     // Add the attention sinks.
@@ -2283,7 +2283,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     float logit_scale = 1.f;
 #endif // MMHA_FP8_SCALE_P_INSTEAD_OF_V
     float inv_sum = __fdividef(logit_scale, sum + 1.e-6f);
-    printf("logit_scale: %f, logit_scale sum: %f, inv_sum: %f\n", logit_scale, sum, inv_sum);
+    //printf("logit_scale: %f, logit_scale sum: %f, inv_sum: %f\n", logit_scale, sum, inv_sum);
 
     int const normlization_loop_end = MULTI_BLOCK_FLAG ? timesteps_per_block : kv_loop_length;
     float sum_rescale = 0.0f;
@@ -2302,7 +2302,7 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 {
                     prob *= 0.1f;
                 }
-                printf("first loop ti: %d, prob: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob, qk_smem[ti], inv_sum);
+                //printf("first loop ti: %d, prob: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob, qk_smem[ti], inv_sum);
 
                 // store back
                 qk_smem[ti] = prob;
@@ -2311,8 +2311,8 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             else
             {
                 convert_from_float(&logits_smem[ti], prob);
-                printf("else loop ti: %d, prob: %f, logits_smem[ti]: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob,
-                    __bfloat162float(logits_smem[ti]), qk_smem[ti], inv_sum);
+                //printf("else loop ti: %d, prob: %f, logits_smem[ti]: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob,
+                    //__bfloat162float(logits_smem[ti]), qk_smem[ti], inv_sum);
             }
         }
         else

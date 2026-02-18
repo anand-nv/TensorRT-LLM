@@ -1,0 +1,114 @@
+# Makefile for CategoricalSamplingPlugin Test
+# Simple alternative to CMake build system
+
+# Compiler settings
+CXX := g++
+NVCC := nvcc
+CXX_FLAGS := -std=c++17 -fPIC -O3 -Wall -Wextra
+NVCC_FLAGS := -std=c++17 --expt-relaxed-constexpr --expt-extended-lambda -Xcompiler=-fPIC
+
+# TensorRT paths - adjust if needed
+TENSORRT_ROOT ?= /usr/local/tensorrt
+TENSORRT_INCLUDE := $(TENSORRT_ROOT)/include
+TENSORRT_LIB := $(TENSORRT_ROOT)/lib
+
+# CUDA paths
+CUDA_ROOT ?= /usr/local/cuda
+CUDA_INCLUDE := $(CUDA_ROOT)/include
+CUDA_LIB := $(CUDA_ROOT)/lib64
+
+# Include and library paths
+INCLUDES := -I. -Icuda_kernel/include -I$(TENSORRT_INCLUDE) -I$(CUDA_INCLUDE)
+LIB_DIRS := -L$(TENSORRT_LIB) -L$(CUDA_LIB)
+LIBS := -lnvinfer -lnvinfer_plugin -lcudart
+
+# CUDA architectures - adjust based on your GPU
+# 70=V100, 75=T4/RTX2080, 80=A100, 86=RTX3090, 89=RTX4090, 90=H100
+CUDA_ARCHS := -gencode arch=compute_70,code=sm_70 \
+              -gencode arch=compute_75,code=sm_75 \
+              -gencode arch=compute_80,code=sm_80 \
+              -gencode arch=compute_86,code=sm_86 \
+              -gencode arch=compute_89,code=sm_89
+
+# Output directories
+BUILD_DIR := build_makefile
+OBJ_DIR := $(BUILD_DIR)/obj
+BIN_DIR := $(BUILD_DIR)/bin
+LIB_DIR := $(BUILD_DIR)/lib
+
+# Source files
+PLUGIN_CPP := CategoricalSamplingPlugin.cpp
+PLUGIN_CU := cuda_kernel/src/categorical_sampling.cu
+TEST_CPP := test_plugin.cpp
+
+# Object files
+PLUGIN_CPP_OBJ := $(OBJ_DIR)/CategoricalSamplingPlugin.o
+PLUGIN_CU_OBJ := $(OBJ_DIR)/categorical_sampling.o
+TEST_OBJ := $(OBJ_DIR)/test_plugin.o
+
+# Output files
+PLUGIN_LIB := $(LIB_DIR)/libCategoricalSamplingPlugin.so
+TEST_EXE := $(BIN_DIR)/test_plugin
+
+# Targets
+.PHONY: all clean test directories
+
+all: directories $(PLUGIN_LIB) $(TEST_EXE)
+
+directories:
+	@mkdir -p $(OBJ_DIR) $(BIN_DIR) $(LIB_DIR)
+
+# Compile plugin C++ source
+$(PLUGIN_CPP_OBJ): $(PLUGIN_CPP) CategoricalSamplingPlugin.h
+	@echo "Compiling $<..."
+	$(CXX) $(CXX_FLAGS) $(INCLUDES) -c $< -o $@
+
+# Compile CUDA kernel
+$(PLUGIN_CU_OBJ): $(PLUGIN_CU) cuda_kernel/include/categorical_sampling.cuh
+	@echo "Compiling $<..."
+	$(NVCC) $(NVCC_FLAGS) $(CUDA_ARCHS) $(INCLUDES) -c $< -o $@
+
+# Link plugin library
+$(PLUGIN_LIB): $(PLUGIN_CPP_OBJ) $(PLUGIN_CU_OBJ)
+	@echo "Linking plugin library..."
+	$(NVCC) -shared $(PLUGIN_CPP_OBJ) $(PLUGIN_CU_OBJ) $(LIB_DIRS) $(LIBS) -o $@
+
+# Compile test source
+$(TEST_OBJ): $(TEST_CPP) CategoricalSamplingPlugin.h
+	@echo "Compiling $<..."
+	$(CXX) $(CXX_FLAGS) $(INCLUDES) -c $< -o $@
+
+# Link test executable
+$(TEST_EXE): $(TEST_OBJ) $(PLUGIN_LIB)
+	@echo "Linking test executable..."
+	$(CXX) $(TEST_OBJ) -L$(LIB_DIR) -lCategoricalSamplingPlugin $(LIB_DIRS) $(LIBS) -o $@
+
+# Run test
+test: all
+	@echo "Running test..."
+	@export LD_LIBRARY_PATH=$(LD_LIBRARY_PATH):$(LIB_DIR):$(TENSORRT_LIB):$(CUDA_LIB) && $(TEST_EXE)
+
+# Clean build artifacts
+clean:
+	@echo "Cleaning..."
+	@rm -rf $(BUILD_DIR)
+
+# Help target
+help:
+	@echo "CategoricalSamplingPlugin Test Makefile"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all      - Build plugin library and test executable (default)"
+	@echo "  test     - Build and run the test"
+	@echo "  clean    - Remove build artifacts"
+	@echo "  help     - Show this help message"
+	@echo ""
+	@echo "Configuration:"
+	@echo "  TENSORRT_ROOT - TensorRT installation path (default: /usr/local/tensorrt)"
+	@echo "  CUDA_ROOT     - CUDA installation path (default: /usr/local/cuda)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make                                    # Build with defaults"
+	@echo "  make TENSORRT_ROOT=/opt/tensorrt        # Build with custom TensorRT path"
+	@echo "  make test                               # Build and run test"
+	@echo "  make clean                              # Clean build artifacts"

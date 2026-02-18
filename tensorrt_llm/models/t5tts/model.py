@@ -23,15 +23,15 @@ from tensorrt_llm._common import default_net
 from tensorrt_llm._utils import numpy_to_torch, str_dtype_to_torch
 from tensorrt_llm.functional import (
     ACT2FN, LayerNormPositionType, LayerNormType, MLPType,
-    PositionEmbeddingType, Tensor, assertion, concat, expand_dims,
-    gather_last_token_logits, maximum, mean, minimum, recv, send, shape,
-    squeeze, stack, transpose, unsqueeze, view, where)
+    PositionEmbeddingType, Tensor, assertion, cast, concat, constant, expand_dims,
+    gather, gather_last_token_logits, maximum, mean, minimum, recv, scatter, send, shape,
+    softmax, squeeze, stack, sum as trt_sum, topk, transpose, unsqueeze, view, where)
 from tensorrt_llm.layers import (MLP, Attention, AttentionMaskParams,
                                  AttentionMaskType, AttentionParams,
                                  BertAttention, ColumnLinear, Conv1d, Embedding,
                                  FusedGatedMLP, GatedMLP, GroupNorm,
                                  KeyValueCacheParams, LayerNorm,
-                                 PromptTuningEmbedding, RmsNorm)
+                                 PromptTuningEmbedding, RmsNorm, RowLinear)
 from tensorrt_llm.mapping import Mapping
 from tensorrt_llm.models.modeling_utils import PretrainedConfig, PretrainedModel
 from tensorrt_llm.module import Module, ModuleList
@@ -618,6 +618,362 @@ class T5TTSDecoderLayer(Module):
         return results
 
 
+class MOERouter(Module):
+    """
+    Router for Mixture of Experts that selects which experts to use for each token.
+    Supports multiple routing strategies including top-k and Sinkhorn routing.
+    
+    Args:
+        d_model (int): Model dimension (hidden_size).
+        num_experts (int): Number of experts.
+        top_k (int): Number of experts to select per token. Default: 2.
+        router_jitter_noise (float): Add noise to router logits for exploration during training. Default: 0.0.
+        routing_strategy (str): Strategy for routing ("top_k" or "sinkhorn"). Default: "top_k".
+        bias (bool): Whether to use bias in the linear layer. Default: False.
+        dtype: Data type for the router weights. Default: None (uses float32).
+        tp_group: Tensor parallelism group. Default: None.
+        tp_size (int): Tensor parallelism size. Default: 1.
+        strict_dtype (bool): Whether to enforce strict dtype. Default: True.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_experts: int,
+        top_k: int = 2,
+        router_jitter_noise: float = 0.0,
+        routing_strategy: str = "top_k",
+        bias: bool = False,
+        dtype=None,
+        tp_group=None,
+        tp_size: int = 1,
+        strict_dtype: bool = True,
+    ):
+        super().__init__()
+        self.d_model = d_model
+        self.num_experts = num_experts
+        self.top_k = min(top_k, num_experts)
+        self.router_jitter_noise = router_jitter_noise
+        self.routing_strategy = routing_strategy
+        assert routing_strategy in ["top_k", "sinkhorn"], "Invalid routing strategy"
+        
+        # Routing is sensitive since it conditions what experts are used
+        # Use float32 for precision unless explicitly specified
+        router_dtype = dtype if dtype is not None else "float32"
+        
+        # Router is a simple linear layer that outputs logits for each expert
+        self.router = RowLinear(
+            d_model,
+            num_experts,
+            bias=bias,
+            dtype=router_dtype,
+            tp_group=tp_group,
+            tp_size=tp_size,
+            strict_dtype=strict_dtype,
+        )
+        
+        # Set up weight mapping for external key dictionary
+        self.router.tllm_to_externel_key_dict = {
+            "mlp": "block_sparse_moe",
+            "router": "gate"
+        }
+
+    def forward(
+        self,
+        x: Tensor,
+        x_mask: Optional[Tensor] = None,
+        lora_layer_params=None,
+    ) -> tuple:
+        """
+        Compute routing decisions for each token.
+        
+        Args:
+            x (Tensor): Input tensor of shape (B, T, C) or (num_tokens, C).
+            x_mask (Optional[Tensor]): Mask tensor of shape (B, T) or (num_tokens,) where 1=valid token, 0=padding.
+            lora_layer_params: Optional LoRA layer parameters for the router.
+        
+        Returns:
+            Tuple containing:
+                - expert_weights (Tensor): Normalized weights for selected experts of shape (B, T, top_k) or (num_tokens, top_k).
+                    For padded positions, weights are set to 0.
+                - expert_indices (Tensor): Indices of selected experts of shape (B, T, top_k) or (num_tokens, top_k).
+                    For padded positions, indices are set to -1 (sentinel value).
+                - router_logits (Tensor): Raw router logits of shape (B, T, num_experts) or (num_tokens, num_experts).
+                    Padded positions are masked to zero.
+                - router_probs (Tensor): Router probabilities after softmax of shape (B, T, num_experts) or (num_tokens, num_experts).
+                    Padded positions are masked to zero.
+        """
+        # Cast to float32 for routing precision
+        # routing_input = cast(x, trt.float32)
+        routing_input = x
+        # Apply mask if provided
+        if x_mask is not None:
+            # Expand mask to match input dimensions
+            if len(shape(x)) == 2:  # (num_tokens, hidden_size)
+                x_mask_expanded = expand_dims(x_mask, -1)  # (num_tokens, 1)
+            else:  # (B, T, C)
+                x_mask_expanded = expand_dims(x_mask, -1)  # (B, T, 1)
+            routing_input = routing_input * x_mask_expanded
+        
+        # Compute router logits
+        router_logits = self.router(routing_input, lora_layer_params)
+        
+        # Mask router logits to ensure padded positions remain zero
+        if x_mask is not None:
+            if len(shape(router_logits)) == 2:  # (num_tokens, num_experts)
+                x_mask_expanded = x_mask
+            else:  # (B, T, num_experts)
+                x_mask_expanded = expand_dims(x_mask, -1)
+            router_logits = router_logits * x_mask_expanded
+        
+        # Compute routing probabilities
+        router_probs = softmax(router_logits, dim=-1)
+        
+        # Select top-k experts
+        # expert_weights: (B, T, top_k) or (num_tokens, top_k), expert_indices: (B, T, top_k) or (num_tokens, top_k)
+        expert_weights, expert_indices = topk(
+            router_probs,
+            k=self.top_k,
+            dim=-1
+        )
+        
+        # Normalize weights to sum to 1
+        # For padded positions: uniform probs -> 1/top_k
+        # For valid positions: normal routing weights
+        # Avoid division by zero when all weights are zero.
+        weight_sums = trt_sum(expert_weights, dim=-1, keepdim=True)
+        expert_weights = expert_weights / where(
+            weight_sums > 0,
+            weight_sums,
+            constant(1.0, shape=weight_sums.shape, dtype=weight_sums.dtype)
+        )
+        
+        # Mask expert_weights and expert_indices for padded positions
+        # Set expert_indices to -1 for padding so they don't match any valid expert (0 to num_experts-1)
+        # This prevents padded tokens from being processed through experts
+        if x_mask is not None:
+            if len(shape(expert_weights)) == 2:  # (num_tokens, top_k)
+                x_mask_expanded = x_mask
+            else:  # (B, T, top_k)
+                x_mask_expanded = expand_dims(x_mask, -1)  # (B, T, 1)
+            
+            expert_weights = expert_weights * x_mask_expanded
+            
+            padding_value = where(
+                x_mask_expanded > 0,
+                constant(0, shape=expert_indices.shape, dtype=expert_indices.dtype),
+                constant(-1, shape=expert_indices.shape, dtype=expert_indices.dtype)
+            )
+            expert_indices = expert_indices*x_mask_expanded + padding_value
+            router_probs = router_probs * x_mask_expanded
+        
+        return expert_weights, expert_indices, router_logits, router_probs
+
+
+class PositionwiseConvFFMoE(Module):
+    """
+    Mixture of Experts version of PositionwiseConvFF.
+    Uses multiple expert FFN networks with a learned router.
+    
+    Args:
+        d_model (int): Input and output dimension (hidden_size).
+        d_ffn (int): Hidden dimension of FFN (ffn_hidden_size).
+        p_dropout (float): Dropout probability.
+        num_experts (int): Number of expert networks. Default: 8.
+        top_k_experts (int): Number of experts to use per token. Default: 2.
+        kernel_size (int): Convolution kernel size. Default: 1.
+        bias (bool): Whether to use bias in convolution layers. Default: False.
+        is_causal (bool): Whether to use causal convolution. Default: True.
+        hidden_act (str): Activation function name. Default: 'gelu'.
+        padding (int): Padding size. Default: 0.
+        dilation (int): Dilation size. Default: 1.
+        dtype: Data type for the layers. Default: None.
+        groups (int): Number of groups for convolution. Default: 1.
+        router_jitter_noise (float): Noise for router exploration during training. Default: 0.0.
+        routing_strategy (str): Routing strategy ("top_k" or "sinkhorn"). Default: "top_k".
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ffn: int,
+        p_dropout: float,
+        num_experts: int = 8,
+        top_k_experts: int = 2,
+        kernel_size: int = 1,
+        bias: bool = False,
+        is_causal: bool = True,
+        hidden_act: str = 'gelu',
+        padding: int = 0,
+        dilation: int = 1,
+        dtype=None,
+        groups: int = 1,
+        router_jitter_noise: float = 0.0,
+        routing_strategy: str = "top_k",
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.d_ffn = d_ffn
+        self.num_experts = num_experts
+        self.top_k_experts = min(top_k_experts, num_experts)
+        self.hidden_act = ACT2FN[hidden_act]
+        self.is_causal = is_causal
+        self.p_dropout = p_dropout
+        
+        if self.is_causal:
+            self.causal_padding = ((kernel_size - 1) * dilation, 0)
+            padding = 0
+        
+        # Router for expert selection
+        self.router = MOERouter(
+            d_model=d_model,
+            num_experts=num_experts,
+            top_k=top_k_experts,
+            router_jitter_noise=router_jitter_noise,
+            routing_strategy=routing_strategy,
+            bias=False,
+            dtype="float32",
+            tp_group=None,
+            tp_size=1,
+            strict_dtype=True,
+        )
+        
+        # Create multiple expert FFN networks
+        self.experts = ModuleList()
+        for _ in range(num_experts):
+            expert = Module()
+            expert.proj = Conv1d(
+                d_model,
+                d_ffn,
+                kernel_size=kernel_size,
+                padding=padding,
+                bias=bias,
+                dilation=dilation,
+                dtype=dtype,
+                groups=groups,
+            )
+            expert.o_net = Conv1d(
+                d_ffn,
+                d_model,
+                kernel_size=kernel_size,
+                padding=padding,
+                bias=bias,
+                dilation=dilation,
+                dtype=dtype,
+                groups=groups,
+            )
+            self.experts.append(expert)
+
+    def forward(
+        self,
+        x: Tensor,
+        x_mask: Optional[Tensor] = None,
+        lora_layer_params=None,
+    ) -> tuple:
+        """
+        Apply Mixture of Experts feedforward layer.
+        
+        For each valid token (x_mask=1), routes to top_k experts based on router predictions.
+        Padded tokens (x_mask=0) are assigned expert_indices=-1 and are not processed through any expert,
+        ensuring they remain zero in the output.
+        
+        Args:
+            x (Tensor): Input tensor of shape (B, T, C) or (num_tokens, C).
+            x_mask (Optional[Tensor]): Mask tensor of shape (B, T) or (num_tokens,) where 1=valid token, 0=padding.
+            lora_layer_params: Optional LoRA layer parameters for the router.
+        
+        Returns:
+            Tuple containing:
+                - output (Tensor): Output tensor of shape (B, T, C) or (num_tokens, C).
+                    Valid tokens contain weighted combination of top_k expert outputs.
+                    Padded positions remain zero (never processed by experts).
+                - router_logits (Tensor): Raw router logits for auxiliary loss of shape (B, T, num_experts) or (num_tokens, num_experts).
+                    Padded positions are masked to zero.
+                - router_probs (Tensor): Router probabilities for auxiliary loss of shape (B, T, num_experts) or (num_tokens, num_experts).
+                    Padded positions are masked to zero.
+                - expert_indices (Tensor): Selected expert indices of shape (B, T, top_k) or (num_tokens, top_k).
+                    For padded positions, indices are -1. For computing expert selection statistics.
+        """
+        # Get expert routing from router
+        expert_weights, expert_indices, router_logits, router_probs = self.router(x, x_mask, lora_layer_params)
+        # expert_weights: (B, T, top_k)
+        # expert_indices: (B, T, top_k)
+        # router_logits: (B, T, num_experts)
+        # router_probs: (B, T, num_experts)
+        
+        # Initialize output
+        output = constant(0.0, shape=shape(x), dtype=x.dtype)
+        
+        # Prepare input for convolution: (num_tokens, hidden_size) -> (1, hidden_size, num_tokens)
+        # or (B, T, C) -> (B, C, T)
+        if len(shape(x)) == 2:  # (num_tokens, hidden_size)
+            x_transposed = transpose(x, 0, 1)  # (hidden_size, num_tokens)
+            x_unsqueezed = unsqueeze(x_transposed, 0)  # (1, hidden_size, num_tokens)
+            is_2d = True
+        else:  # (B, T, C)
+            x_transposed = transpose(x, 1, 2)  # (B, C, T)
+            x_unsqueezed = x_transposed
+            is_2d = False
+        
+        # Process each expert
+        # Note: In TensorRT-LLM, we process all tokens through each expert, then weight by routing decisions
+        # This is different from the PyTorch version which batches tokens per expert, but necessary
+        # due to TensorRT-LLM's graph-based execution model
+        expert_outputs = []
+        
+        for expert_idx in range(self.num_experts):
+            # Process through expert
+            expert_out = self.experts[expert_idx].proj(x_unsqueezed)
+            expert_out = self.hidden_act(expert_out)
+            expert_out = self.experts[expert_idx].o_net(expert_out)
+            
+            # Convert back to original shape
+            if is_2d:
+                expert_out = squeeze(expert_out, 0)  # (hidden_size, num_tokens)
+                expert_out = transpose(expert_out, 1, 0)  # (num_tokens, hidden_size)
+            else:
+                expert_out = transpose(expert_out, 1, 2)  # (B, T, C)
+            
+            expert_outputs.append(expert_out)
+        
+        # Combine expert outputs based on routing decisions
+        # For each token, gather outputs from its selected experts and weight them
+        
+        # Process each top-k position
+        for k_idx in range(self.top_k_experts):
+            # Get expert indices and weights for this top-k position
+            # expert_indices is (B, T, top_k) or (num_tokens, top_k), so dim=1 for 2D or dim=-1 for 3D
+            if len(shape(expert_indices)) == 2:  # (num_tokens, top_k)
+                expert_idx = gather(expert_indices, dim=1, indices=k_idx)  # (num_tokens,)
+                expert_weight = gather(expert_weights, dim=1, indices=k_idx)  # (num_tokens,)
+            else:  # (B, T, top_k)
+                expert_idx = gather(expert_indices, dim=-1, indices=k_idx)  # (B, T)
+                expert_weight = gather(expert_weights, dim=-1, indices=k_idx)  # (B, T)
+            
+            # Expand weight: (B, T, 1) or (num_tokens, 1)
+            expert_weight_expanded = expand_dims(expert_weight, -1)  # (B, T, 1) or (num_tokens, 1)
+            
+            # For each expert, check if it's selected and add weighted output
+            for expert_idx_val in range(self.num_experts):
+                # Create mask: (B, T) or (num_tokens,) where True if this expert is selected
+                expert_mask = (expert_idx == expert_idx_val)  # (B, T) or (num_tokens,)
+                expert_mask_expanded = expand_dims(cast(expert_mask, trt.float32), -1)  # (B, T, 1) or (num_tokens, 1)
+                
+                # Get this expert's output
+                expert_out = expert_outputs[expert_idx_val]
+                
+                # Apply mask and weight
+                weighted_expert_out = expert_out * expert_mask_expanded * expert_weight_expanded
+                
+                if k_idx == 0 and expert_idx_val == 0:
+                    output = weighted_expert_out
+                else:
+                    output = output + weighted_expert_out
+        
+        return output #, router_logits, router_probs, expert_indices
+
+
 class T5TTSEncoderModel(PretrainedModel):
 
     def __init__(self, config: PretrainedConfig):
@@ -1144,6 +1500,8 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('max_distance', None)
         config.set_if_not_exist('relative_attention', False)
         config.set_if_not_exist('residual_scaling', 1.0)
+        config.set_if_not_exist('use_local_transformer', True)
+        config.set_if_not_exist('lt_path', None)
 
     def forward(self,
                 decoder_input_ids: Tensor,
@@ -1245,8 +1603,9 @@ class T5TTSDecoderModel(PretrainedModel):
                 default_net().plugin_config.remove_input_padding)
 
             # [bs, hidden_size] -> [bs, vocab_size]
-            lm_logits = self.lm_head(hidden_states)
-            lm_logits.mark_output('logits', self._logits_dtype)
+            #lm_logits = self.lm_head(hidden_states)
+            #lm_logits.mark_output('logits', self._logits_dtype)
+            hidden_states.mark_output('logits', self._logits_dtype)
         else:
             hidden_states = send(hidden_states, self.mapping.next_pp_rank())
             hidden_states.mark_output('hidden_states_output', self._dtype)
@@ -1259,11 +1618,13 @@ class T5TTSDecoderModel(PretrainedModel):
                     present[1].mark_output(f'cross_present_key_value_{i}',
                                            self._kv_dtype)
             if self.mapping.is_last_pp_rank():
-                return (lm_logits, tuple(presents))
+                #return (lm_logits, tuple(presents))
+                return (hidden_states, tuple(presents))
             return (hidden_states, tuple(presents))
         else:
             if self.mapping.is_last_pp_rank():
-                return lm_logits
+                #return lm_logits
+                return hidden_states
             return hidden_states
 
     def prepare_inputs(self,

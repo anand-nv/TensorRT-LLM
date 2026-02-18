@@ -1,0 +1,102 @@
+cmake_minimum_required(VERSION 3.18)
+project(CategoricalSamplingPluginTest LANGUAGES CXX CUDA)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+
+# Find required packages
+find_package(CUDA REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+
+# TensorRT paths - adjust these if needed
+set(TENSORRT_ROOT "/usr/local/tensorrt" CACHE PATH "TensorRT installation directory")
+
+if(NOT EXISTS ${TENSORRT_ROOT})
+    # Try common TensorRT installation paths
+    if(EXISTS "/usr/local/TensorRT")
+        set(TENSORRT_ROOT "/usr/local/TensorRT")
+    elseif(EXISTS "/opt/tensorrt")
+        set(TENSORRT_ROOT "/opt/tensorrt")
+    else()
+        message(WARNING "TensorRT not found in default paths. Please set TENSORRT_ROOT")
+    endif()
+endif()
+
+set(TENSORRT_INCLUDE_DIR ${TENSORRT_ROOT}/include)
+set(TENSORRT_LIB_DIR ${TENSORRT_ROOT}/lib)
+
+# Include directories
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda_kernel/include
+    ${TENSORRT_INCLUDE_DIR}
+    ${CUDA_INCLUDE_DIRS}
+)
+
+# Link directories
+link_directories(
+    ${TENSORRT_LIB_DIR}
+    ${CUDA_TOOLKIT_ROOT_DIR}/lib64
+)
+
+# Plugin library
+add_library(CategoricalSamplingPlugin SHARED
+    CategoricalSamplingPlugin.cpp
+    cuda_kernel/src/categorical_sampling.cu
+)
+
+target_link_libraries(CategoricalSamplingPlugin
+    nvinfer
+    nvinfer_plugin
+    cudart
+)
+
+set_target_properties(CategoricalSamplingPlugin PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# Test executable
+add_executable(test_plugin
+    test_plugin.cpp
+)
+
+target_link_libraries(test_plugin
+    CategoricalSamplingPlugin
+    nvinfer
+    nvinfer_plugin
+    cudart
+)
+
+# Set CUDA architectures (adjust based on your GPU)
+set_property(TARGET CategoricalSamplingPlugin PROPERTY CUDA_ARCHITECTURES 70 75 80 86 89 90)
+set_property(TARGET test_plugin PROPERTY CUDA_ARCHITECTURES 70 75 80 86 89 90)
+
+# Add compile definitions
+target_compile_definitions(CategoricalSamplingPlugin PRIVATE
+    $<$<CONFIG:Debug>:DEBUG>
+    $<$<CONFIG:Debug>:_DEBUG>
+)
+
+# Compiler flags
+target_compile_options(CategoricalSamplingPlugin PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:
+        --expt-relaxed-constexpr
+        --expt-extended-lambda
+        -Xcompiler=-fPIC
+    >
+)
+
+# Set output directory
+set_target_properties(CategoricalSamplingPlugin test_plugin PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+)
+
+# Print configuration
+message(STATUS "TensorRT Root: ${TENSORRT_ROOT}")
+message(STATUS "TensorRT Include: ${TENSORRT_INCLUDE_DIR}")
+message(STATUS "TensorRT Lib: ${TENSORRT_LIB_DIR}")
+message(STATUS "CUDA Include: ${CUDA_INCLUDE_DIRS}")

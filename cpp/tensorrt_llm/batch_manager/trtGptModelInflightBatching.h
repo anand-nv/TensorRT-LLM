@@ -25,6 +25,7 @@
 #include "tensorrt_llm/runtime/rawEngine.h"
 #include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include "tensorrt_llm/runtime/worldConfig.h"
+#include "tensorrt_llm/batch_manager/trtLocalTransformer.h"
 #include "trtGptModel.h"
 
 #include <NvInferRuntime.h>
@@ -265,6 +266,7 @@ private:
     //! These blocks become reusable from next step.
     void storeContextBlocks(std::shared_ptr<LlmRequest> const& req);
 
+
     //! @brief Store newest kv cache block for reuse.
     //! The block become reusable from next step.
     void storeNewBlock(std::shared_ptr<LlmRequest> const& req);
@@ -330,7 +332,8 @@ private:
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
     void setupDecoderStep(
-        RequestVector const& contextRequests, RuntimeBuffers const& buffers, DecoderInputBuffers& inputBuffers);
+        RequestVector const& contextRequests, RuntimeBuffers const& buffers, 
+        std::shared_ptr<runtime::GptDecoderBatched> decoder, DecoderInputBuffers& inputBuffers);
     runtime::CudaEvent decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
         ScheduledRequests const& scheduledRequests, std::optional<runtime::CudaEvent> const& decoderFinishEvent);
@@ -499,6 +502,7 @@ private:
     std::shared_ptr<nvinfer1::ILogger> mLogger;
     // Runner for the TRT engine. The engine produces logits.
     std::unique_ptr<runtime::TllmRuntime> mRuntime;
+    std::shared_ptr<tensorrt_llm::batch_manager::TrtLocalTransformer> mLocalTransformer;
     // Decoder that generates new tokens from the logits.
 
     std::vector<std::unique_ptr<runtime::GptDecoderBatched>> mDecoders;

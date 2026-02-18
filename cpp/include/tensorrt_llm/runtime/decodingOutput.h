@@ -84,6 +84,8 @@ public:
     //! Optional parameters
     //! FinishedState by decoding if any of the stop conditions are met or if DecodingInput.finished is true, [BS, BM]
     TensorPtr finishReasons;
+    //! FinishedState by decoding if any of the stop conditions are met or if DecodingInput.finished is true, [BS, BM], in pinned memory
+    TensorPtr finishReasonsHost;
     //! The sum of finished sequences per request, in pinned memory, [BS]
     TensorPtr finishedSum;
 

@@ -1,0 +1,104 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#pragma once
+
+#include <NvInferRuntime.h>
+#include <curand_kernel.h>
+#include <string>
+#include <vector>
+
+namespace nvinfer1
+{
+namespace plugin
+{
+
+// TensorRT V3 Plugin using IPluginCreatorV3One API
+// Uses clock-based seeding for non-reproducible random sampling
+class CategoricalSamplingPlugin : public IPluginV3,
+                                  public IPluginV3OneCore,
+                                  public IPluginV3OneBuild,
+                                  public IPluginV3OneRuntime
+{
+public:
+    CategoricalSamplingPlugin();
+    CategoricalSamplingPlugin(CategoricalSamplingPlugin const& other);
+    ~CategoricalSamplingPlugin() override = default;
+
+    friend class CategoricalSamplingPluginCreator;
+
+    // IPluginV3 methods
+    IPluginCapability* getCapabilityInterface(PluginCapabilityType type) noexcept override;
+    IPluginV3* clone() noexcept override;
+
+    // IPluginV3OneCore methods
+    char const* getPluginName() const noexcept override;
+    char const* getPluginVersion() const noexcept override;
+    char const* getPluginNamespace() const noexcept override;
+
+    // IPluginV3OneBuild methods
+    int32_t getNbOutputs() const noexcept override;
+    int32_t configurePlugin(DynamicPluginTensorDesc const* in, int32_t nbInputs, DynamicPluginTensorDesc const* out,
+        int32_t nbOutputs) noexcept override;
+    bool supportsFormatCombination(
+        int32_t pos, DynamicPluginTensorDesc const* inOut, int32_t nbInputs, int32_t nbOutputs) noexcept override;
+    int32_t getOutputDataTypes(
+        DataType* outputTypes, int32_t nbOutputs, DataType const* inputTypes, int32_t nbInputs) const noexcept override;
+    int32_t getOutputShapes(DimsExprs const* inputs, int32_t nbInputs, DimsExprs const* shapeInputs,
+        int32_t nbShapeInputs, DimsExprs* outputs, int32_t nbOutputs, IExprBuilder& exprBuilder) noexcept override;
+    size_t getWorkspaceSize(DynamicPluginTensorDesc const* inputs, int32_t nbInputs,
+        DynamicPluginTensorDesc const* outputs, int32_t nbOutputs) const noexcept override;
+    int32_t getValidTactics(int32_t* tactics, int32_t nbTactics) noexcept override;
+    int32_t getNbTactics() noexcept override;
+    char const* getTimingCacheID() noexcept override;
+    int32_t getFormatCombinationLimit() noexcept override;
+    char const* getMetadataString() noexcept override;
+
+    // IPluginV3OneRuntime methods
+    int32_t enqueue(PluginTensorDesc const* inputDesc, PluginTensorDesc const* outputDesc, void const* const* inputs,
+        void* const* outputs, void* workspace, cudaStream_t stream) noexcept override;
+    int32_t onShapeChange(
+        PluginTensorDesc const* in, int32_t nbInputs, PluginTensorDesc const* out, int32_t nbOutputs) noexcept override;
+    IPluginV3* attachToContext(IPluginResourceContext* context) noexcept override;
+    PluginFieldCollection const* getFieldsToSerialize() noexcept override;
+    int32_t setTactic(int32_t tactic) noexcept override;
+
+private:
+    std::string mNamespace;
+};
+
+class CategoricalSamplingPluginCreator : public IPluginCreatorV3One
+{
+public:
+    CategoricalSamplingPluginCreator();
+    ~CategoricalSamplingPluginCreator() override = default;
+
+    char const* getPluginName() const noexcept override;
+    char const* getPluginVersion() const noexcept override;
+    PluginFieldCollection const* getFieldNames() noexcept override;
+    IPluginV3* createPlugin(char const* name, PluginFieldCollection const* fc, TensorRTPhase phase) noexcept override;
+    char const* getPluginNamespace() const noexcept override;
+    void setPluginNamespace(char const* pluginNamespace) noexcept;
+
+private:
+    static PluginFieldCollection mFC;
+    static std::vector<PluginField> mPluginAttributes;
+    std::string mNamespace;
+};
+
+} // namespace plugin
+} // namespace nvinfer1

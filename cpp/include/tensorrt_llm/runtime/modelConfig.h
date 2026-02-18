@@ -145,6 +145,8 @@ public:
         , mVocabSizes{vocabSizes}
         , mUseAttentionPrior(false)
         , mUseContextEmbeddings(false)
+        , mUseLocalTransformer(true)
+        , mLtPath(std::nullopt)
     {
         TLLM_CHECK_WITH_INFO(mNbLayers >= mNbAttentionLayers + mNbRnnLayers,
             "Number of layers (%d) expected to be >= number of attention (%d) + number of rnn layers (%d)", mNbLayers,
@@ -976,6 +978,21 @@ public:
         return getModelName() == "WhisperEncoder";
     }
 
+    [[nodiscard]] bool constexpr useLocalTransformer() const noexcept
+    {
+        return mUseLocalTransformer;
+    }
+
+    [[nodiscard]] std::optional<std::string> getLtPath() const noexcept
+    {
+        return mLtPath.value_or(std::string());
+    }
+
+    void setLtPath(std::string const& ltPath) noexcept
+    {
+        mLtPath = ltPath;
+    }
+
 private:
     SizeType32 mVocabSize;
     SizeType32 mNbLayers;
@@ -1051,6 +1068,8 @@ private:
     // parameters of attention prior
     bool mUseAttentionPrior;
     bool mUseContextEmbeddings;
+    bool mUseLocalTransformer;
+    std::optional<std::string> mLtPath;
     std::vector<SizeType32> mComputeAttentionPriorFromLayers;
     std::vector<SizeType32> mApplyAttentionPriorToLayers;
     SizeType32 mAttentionPriorLookahead;
