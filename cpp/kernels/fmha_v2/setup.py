@@ -6365,7 +6365,7 @@ def enumerate_kernels():
     # yapf: disable
     specs_names = [(kspec, *encode_name(kspec)) for kspec in specs_expanded
                   # Volta is deprecated in TRT-LLM.
-                  if  (kspec.sm            in [80, 86, 89, 90, 120]
+                  if  (kspec.sm            in [80, 86, 89, 90, 100, 120]
                   and kspec.dtype         in ['fp16', 'bf16', 'fp16_fp32', 'e4m3', 'e4m3_fp32']
                   and kspec.head_size     <= 256
                   and kspec.head_size_v   == 0
