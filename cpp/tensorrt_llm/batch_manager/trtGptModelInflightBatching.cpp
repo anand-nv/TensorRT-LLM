@@ -271,17 +271,18 @@ TrtGptModelInflightBatching::TrtGptModelInflightBatching(std::shared_ptr<nvinfer
     //{
     //    try
     //    {
-            void* pluginHandle = dlopen("/code/tensorrt_llm/build/libcategorical_sampling_plugin.so", RTLD_LAZY | RTLD_GLOBAL);
-            if (!pluginHandle)
-            {
-                TLLM_LOG_ERROR("Failed to load categorical sampling plugin: %s", dlerror());
-            }
-            else
-            {
-                TLLM_LOG_INFO("Categorical sampling plugin loaded successfully");
-            }
-            TLLM_LOG_INFO("Creating local transformer with num_vocabs size %d 0", getNumVocabs());
-            auto const placeholderEnginePath = std::filesystem::path("/code/lt/local_transformer.plan");
+            //void* pluginHandle = dlopen("/code/tensorrt_llm/build/libcategorical_sampling_plugin.so", RTLD_LAZY | RTLD_GLOBAL);
+            //if (!pluginHandle)
+            //{
+            //    TLLM_LOG_ERROR("Failed to load categorical sampling plugin: %s", dlerror());
+            //}
+            //else
+            //{
+            //    TLLM_LOG_INFO("Categorical sampling plugin loaded successfully");
+            //}
+            auto const ltPath = mModelConfig.getLtPath();
+            TLLM_LOG_INFO("Creating local transformer with num_vocabs size %d from path %s", getNumVocabs(), ltPath->c_str());
+            auto const placeholderEnginePath = std::filesystem::path(ltPath.value());
             TLLM_LOG_INFO("Creating local transformer with vocab size %d", mModelConfig.getNumVocabs());
             if (std::filesystem::exists(placeholderEnginePath))
             {
@@ -957,7 +958,7 @@ void TrtGptModelInflightBatching::forwardSync()
         }
 
         // Finished context requests have been moved to generationRequests by moveFinishedContextRequestsToGeneration
-        for (auto const& llmReq : currRequests.generationRequests)
+        for (auto& llmReq : currRequests.generationRequests)
         {
             // If a context-only request is finished, send its KV cache and mark it.
             if (llmReq->isContextOnlyRequest() && llmReq->isContextFinished())
@@ -973,6 +974,9 @@ void TrtGptModelInflightBatching::forwardSync()
                 {
                     mSeqSlotManager->freeSequenceSlot(llmReq->getSeqSlotId(i));
                 }
+                // Keep LlmRequest in sync with SequenceSlotManager so a later schedule cannot treat the sequence as
+                // continuing with a stale mSeqSlots / missing manager mapping.
+                llmReq->mSeqSlots.clear();
             }
         }
     }
@@ -2370,7 +2374,12 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
     NVTX3_SCOPED_RANGE(updateRequests);
 
-    // Get the HOST copies from mLocalTransformer (populated by updateDecoderStateAfterGeneration)
+    // Local transformer copies logits on its own runtime stream; main mRuntime sync does not cover it.
+    mLocalTransformer->getRuntimeStream().synchronize();
+    mLocalTransformer->updateDecoderStateAfterGeneration(scheduledRequests.contextRequests,
+        scheduledRequests.generationRequests, mLocalTransformer->getOutLogitsHost());
+
+    // Host sequence length / finished-sum buffers are filled by updateDecoderStateAfterGeneration above.
     auto const* const sequenceLengthsHostData
         = bufferCast<SizeType32 const>(*mLocalTransformer->getSequenceLengthsHost());
     auto const* const decoderFinishedSumPtr 
@@ -2429,7 +2438,6 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             // Sequence length is only advanced for accepted tokens.
             auto const seqLen = sequenceLengthsHostData[seqSlot * mOperatingBeamWidth + beam];
             // Actual number of tokens that should be added to the request.
-            TLLM_LOG_INFO("seqLen: %d", seqLen);
             auto const numNewOutputTokens = seqLen - llmReq->getNumTokens(beam);
             if (reqBeamWidth == 1)
             {
@@ -2440,54 +2448,27 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             }
             //numNewTokens[beam] = std::min(numGeneratedTokens, numNewOutputTokens);
             //numDroppedTokens[beam] = numGeneratedTokens - numNewTokens[beam];
-            TLLM_LOG_INFO("numNewTokens[beam]: %d", numNewTokens[beam]);
-            TLLM_LOG_INFO("numGeneratedTokens: %d", numGeneratedTokens);
-            TLLM_LOG_INFO("numDroppedTokens[beam]: %d", numDroppedTokens[beam]);
-            TLLM_LOG_INFO("numTokens: %d", numTokens);
-            TLLM_LOG_INFO("batch_idx: %d", batch_idx);
-            TLLM_LOG_INFO("seqSlot: %d", seqSlot);
-            TLLM_LOG_INFO("beam: %d", beam);
-            TLLM_LOG_INFO("reqBeamWidth: %d", reqBeamWidth);
+            //TLLM_LOG_INFO("numNewTokens[beam]: %d", numNewTokens[beam]);
+            //TLLM_LOG_INFO("numGeneratedTokens: %d", numGeneratedTokens);
+            //TLLM_LOG_INFO("numDroppedTokens[beam]: %d", numDroppedTokens[beam]);
+            //TLLM_LOG_INFO("numTokens: %d", numTokens);
+            //TLLM_LOG_INFO("batch_idx: %d", batch_idx);
+            //TLLM_LOG_INFO("seqSlot: %d", seqSlot);
+            //TLLM_LOG_INFO("beam: %d", beam);
+            //TLLM_LOG_INFO("reqBeamWidth: %d", reqBeamWidth);
             for (SizeType32 step = 0; step < 1; ++step)
             {
+                #ifndef NDEBUG
+                TLLM_LOG_DEBUG("Adding numVocabs: %d, beam: %d, stackingFactor: %d", getNumVocabs(), beam, mModelConfig.getStackingFactor());
+                #endif
+                auto outLogitsHost = mLocalTransformer->getOutLogitsHost();
+                auto const numLogitCols = outLogitsHost->getShape().d[1];
                 SizeType32 vocabOffset = 0;
                 for (SizeType32 vid = 0; vid < getNumVocabs(); ++vid)
                 {
-
-                    //auto const& vocabDecoderOutputBuffers = mDecoderOutputBuffers[vid].at(getFusedBufferId());
-                    //auto const hostNewOutputTokensShape = vocabDecoderOutputBuffers.newOutputTokensHost->getShape();
-                    //auto const newTokenIdx = tc::flat_index(hostNewOutputTokensShape.d, step, seqSlot, beam);
-                    //auto const* const hostNewOutputTokensData
-                    //    = bufferCast<TokenIdType const>(*vocabDecoderOutputBuffers.newOutputTokensHost);
-                    //auto const newToken = hostNewOutputTokensData[newTokenIdx];
-                    //llmReq->addNewToken(newToken + vocabOffset, beam);
-                    //TLLM_LOG_DEBUG("request ID %ld beam %d newToken %d", llmReq->mRequestId, beam, newToken);
-                    //auto& decoderBuffers = mLocalTransformer->getDecoderBuffers(vid);
-                    auto outLogitsHost = mLocalTransformer->getOutLogitsHost();
-                    //auto const hostNewOutputTokensShape = decoderBuffers->newOutputTokensHost->getShape();
-                    //auto const* const hostNewOutputTokensData
-                    //    = bufferCast<TokenIdType const>(*decoderBuffers->newOutputTokensHost);
-                    auto const newTokenIdx = tc::flat_index2(batch_idx, vid, outLogitsHost->getShape().d[1]);
+                    auto const newTokenIdx = tc::flat_index2(batch_idx, vid, static_cast<long int>(numLogitCols));
                     auto newToken = bufferCast<TokenIdType const>(*outLogitsHost)[newTokenIdx];
-                    TLLM_LOG_INFO("newTokenIdx: %d, newToken: %d, vid: %d", newTokenIdx, newToken, vid);
                     llmReq->addNewToken(newToken + vocabOffset, beam);
-
-                    //if (llmReq->returnLogProbs())
-                    //{
-                    //    auto const* const cumLogProbsPtr
-                    //        = bufferCast<float const>(*vocabDecoderOutputBuffers.cumLogProbsHost);
-                    //    auto const cumLogProb = cumLogProbsPtr[seqSlot * mOperatingBeamWidth + beam];
-                    //    llmReq->setCumLogProb(cumLogProb, beam);
-
-                    //    auto const beginLogProbsOffset = reqBeamWidth == 1 ? llmReq->mPromptLen : 0;
-                    //    SizeType32 offset
-                    //        = (seqSlot * mOperatingBeamWidth + beam) * getMaxSequenceLen() + beginLogProbsOffset;
-                    //    auto const generatedLength = seqLen - llmReq->mPromptLen;
-                    //    auto const* const logProbsPtr
-                    //        = bufferCast<float const>(*vocabDecoderOutputBuffers.logProbsHost);
-                    //    std::vector<float> logProbs(logProbsPtr + offset, logProbsPtr + offset + generatedLength);
-                    //    llmReq->setLogProbs(logProbs, beam);
-                    //}
                     vocabOffset += mModelConfig.getVocabSizes()[vid];
                 }
             }
@@ -2566,12 +2547,13 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
                 if (llmReq->getReturnGenerationLogits() && mSpeculativeDecodingFastLogits && mIsLeaderInOrchMode)
                 {
                     mDraftRequestsWaitingToSendLogits.push_back(llmReq);
+                    llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
                 }
                 else
                 {
+                    llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
                     terminateRequest(llmReq);
                 }
-                llmReq->setState(LlmRequestState::kGENERATION_COMPLETE);
             }
             else
             {
@@ -2581,7 +2563,7 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
         else
         {
             // gather tokens in the case of streaming and beam search
-            if (llmReq->isStreaming() && llmReq->mSamplingConfig.beamWidth > 1)
+            if (llmReq->isStreaming() && llmReq->mSamplingConfig.beamWidth >= 1)
             {
                 postProcessRequest(*llmReq, numDroppedTokens);
             }

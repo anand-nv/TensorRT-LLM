@@ -51,6 +51,10 @@ public:
     /// mMaxSequenceIdleMicroseconds
     void freeIdleSequenceSlots();
 
+    /// If @p sequenceId has an allocated slot, refresh its last-activity time so
+    /// freeIdleSequenceSlots() will not reclaim it while the request is still active.
+    void touchSequenceActivity(SequenceIdType sequenceId);
+
 private:
     SlotIdType mMaxNumSlots;
     std::chrono::microseconds mMaxSequenceIdleMicroseconds;

@@ -107,4 +107,13 @@ void SequenceSlotManager::freeIdleSequenceSlots()
     }
 }
 
+void SequenceSlotManager::touchSequenceActivity(SequenceIdType sequenceId)
+{
+    auto const it = mSequenceIdToSlot.find(sequenceId);
+    if (it != mSequenceIdToSlot.end())
+    {
+        mLastTimepoint[it->second] = std::chrono::steady_clock::now();
+    }
+}
+
 } // namespace tensorrt_llm::batch_manager

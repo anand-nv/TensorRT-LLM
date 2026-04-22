@@ -449,7 +449,9 @@ class ModelRunnerCpp(ModelRunnerMixin):
 
     def _check_inputs(self, batch_input_ids: List[List[int]],
                       encoder_input_ids: Optional[List[List[int]]],
-                      sampling_config: trtllm.SamplingConfig, max_new_tokens):
+                      sampling_config: trtllm.SamplingConfig, max_new_tokens,
+                      encoder_input_features: Optional[List] = None,
+                      decoder_context_features: Optional[List] = None):
         batch_size = len(encoder_input_ids) if encoder_input_ids else len(
             batch_input_ids)
         if batch_size > self.max_batch_size:
@@ -460,10 +462,40 @@ class ModelRunnerCpp(ModelRunnerMixin):
             len(x) for x in encoder_input_ids
         ] if encoder_input_ids else [len(x) for x in batch_input_ids]
         max_length = max(input_lengths)
-        if max_length > self.max_input_len * len(self.model_config.vocab_sizes):
+        if max_length > self.max_input_len * self._executor_num_vocabs():
             raise RuntimeError(
                 f"Maximum input length ({max_length}) exceeds the engine or specified limit ({self.max_input_len})"
             )
+        nv = self._executor_num_vocabs()
+        if decoder_context_features is not None:
+            for i, feat in enumerate(decoder_context_features):
+                if feat is None:
+                    continue
+                ntok = len(batch_input_ids[i])
+                if ntok % nv != 0:
+                    raise RuntimeError(
+                        f"batch_input_ids[{i}] length ({ntok}) must be divisible by num_vocabs ({nv}) "
+                        f"for joint decoding / decoder context features."
+                    )
+                prompt_positions = ntok // nv
+                rows = int(feat.shape[0])
+                if rows != prompt_positions:
+                    raise RuntimeError(
+                        f"decoder_context_features[{i}] has {rows} rows (dim 0) but batch_input_ids[{i}] "
+                        f"implies {prompt_positions} prompt positions (len={ntok}, num_vocabs={nv}). "
+                        f"These must match."
+                    )
+        if encoder_input_features is not None:
+            for i, enc in enumerate(encoder_input_features):
+                if enc is None:
+                    continue
+                enc_len = int(enc.shape[0])
+                if enc_len > self.max_input_len:
+                    raise RuntimeError(
+                        f"encoder_input_features[{i}] sequence length ({enc_len}) exceeds runtime "
+                        f"max_input_len ({self.max_input_len}). Use ModelRunnerCpp.from_dir(max_input_len=None) "
+                        f"to use the engine limit, or pass a larger max_input_len (<= engine max)."
+                    )
         if encoder_input_ids:
             decoder_max_length = max([len(x) for x in batch_input_ids])
             if decoder_max_length + max_new_tokens > self.max_seq_len:
@@ -471,8 +503,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
                     f"Decoder prefix tokens ({decoder_max_length}) + maximum new tokens ({max_new_tokens}) exceeds the engine or specified limit ({self.max_seq_len})"
                 )
         else:
-            if max_length + max_new_tokens > self.max_seq_len * len(
-                    self.model_config.vocab_sizes):
+            if max_length + max_new_tokens > self.max_seq_len * self._executor_num_vocabs():
                 raise RuntimeError(
                     f"Maximum input length ({max_length}) + maximum new tokens ({max_new_tokens}) exceeds the engine or specified limit ({self.max_seq_len})"
                 )
@@ -528,6 +559,30 @@ class ModelRunnerCpp(ModelRunnerMixin):
     @property
     def gather_generation_logits(self) -> bool:
         return self.model_config.compute_generation_logits
+
+    def _executor_num_vocabs(self) -> int:
+        """Joint-decoding stream count; must match ``ModelConfig::getNumVocabs()`` (C++).
+
+        Prefer the bound ``model_config.num_vocabs`` (C++ ``getNumVocabs()``), which applies the real
+        ``stacking_factor`` from ``config.json``. Do not recompute from ``len(vocab_sizes)`` first:
+        ``stacking_factor`` is not exposed on Python ``ModelConfig``, so a fallback default of 2
+        would disagree with the engine (e.g. 8 vocabs at stacking 1 becomes 4).
+        """
+        mc = self.model_config
+        if hasattr(mc, "num_vocabs"):
+            return max(1, int(mc.num_vocabs))
+        vs = getattr(mc, "vocab_sizes", None)
+        if vs:
+            raw = len(vs)
+            stacking = getattr(mc, "stacking_factor", None)
+            if stacking is None:
+                stacking = getattr(mc, "stackingFactor", None)
+            if stacking is None:
+                stacking = 2
+            if stacking <= 0:
+                stacking = 1
+            return max(1, raw // stacking)
+        return 1
 
     def generate(
             self,
@@ -694,8 +749,14 @@ class ModelRunnerCpp(ModelRunnerMixin):
         else:
             sampling_config = copy.deepcopy(sampling_config)
 
-        self._check_inputs(batch_input_ids_list, encoder_input_ids_list,
-                           sampling_config, max_new_tokens)
+        self._check_inputs(
+            batch_input_ids_list,
+            encoder_input_ids_list,
+            sampling_config,
+            max_new_tokens,
+            encoder_input_features=encoder_input_features,
+            decoder_context_features=decoder_context_features,
+        )
 
         output_config = trtllm.OutputConfig(
             return_context_logits=self.gather_context_logits,
@@ -789,9 +850,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
                 external_draft_tokens_config=external_draft_tokens_config,
                 skip_cross_attn_blocks=skip_cross_attn_blocks,
                 language_adapter_uid=language_adapter_uid,
-                num_vocabs=len(self.model_config.vocab_sizes) if
-                (hasattr(self.model_config, 'vocab_sizes')
-                 and self.model_config.vocab_sizes) else 1,
+                num_vocabs=self._executor_num_vocabs(),
             ) for i,
             (input_ids, stop_words, bad_words, prompt_tuning_config,
              mrope_config, lora_config, logits_post_processor_name,
@@ -1093,8 +1152,7 @@ class ModelRunnerCpp(ModelRunnerMixin):
 
             input_lengths = torch.tensor([x.size(0) for x in batch_input_ids],
                                          dtype=torch.int32,
-                                         device=cuda_device) // len(
-                                             self.model_config.vocab_sizes)
+                                         device=cuda_device) // self._executor_num_vocabs()
 
             if output_sequence_lengths:
                 outputs['sequence_lengths'] = torch.tensor(sequence_lengths,

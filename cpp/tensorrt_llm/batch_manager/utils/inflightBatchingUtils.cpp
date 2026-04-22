@@ -286,7 +286,24 @@ void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReq, S
     {
         peftCacheManager->markRequestDone(llmReq, pause);
     }
+    llmReq.mSeqSlots.clear();
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
+}
+
+void refreshSequenceSlotActivityForActiveRequests(
+    SequenceSlotManager& seqSlotManager, RequestList const& activeRequests)
+{
+    for (auto const& llmReq : activeRequests)
+    {
+        if (llmReq->isGenerationCompleteState())
+        {
+            continue;
+        }
+        for (int i = 0; i < llmReq->getNumSequences(); ++i)
+        {
+            seqSlotManager.touchSequenceActivity(llmReq->getSeqSlotId(i));
+        }
+    }
 }
 
 std::vector<SizeType32> getRequestBeamWidths(

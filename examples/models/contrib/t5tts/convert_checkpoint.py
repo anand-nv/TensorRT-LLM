@@ -100,7 +100,7 @@ def parse_model_config(args, ):
     config["decoder"]["num_heads"] = "12"
     config["decoder"]['d_model'] = "768"  #hidden_size
     config["decoder"]['d_ffn'] = "3072"  #ffn_hidden_size
-    config["decoder"]['vocab_size'] = "32384"  # 8 * 2024
+    config["decoder"]['vocab_size'] = "16512"  # 16 * 1032
     config["decoder"]['n_positions'] = "2048"
     config["decoder"]['has_position_embedding'] = "true"
     config["decoder"]['layernorm_position'] = "pre_layernorm"
@@ -284,7 +284,12 @@ def convert_t5tts_decoder(
     weights['embedding.position_embedding.weight'] = model_dict[
         f'{prefix}.position_embeddings.weight'].contiguous()
 
-    embs = [model_dict[f'audio_embeddings.{i}.weight'] for i in range(len(config.vocab_sizes))]
+    def _get_emb(key):
+        if key in model_dict:
+            return model_dict[key]
+        alt = f"decoder.{key}"
+        return model_dict[alt] if alt in model_dict else model_dict[key]
+    embs = [_get_emb(f'audio_embeddings.{i}.weight') for i in range(len(config.vocab_sizes))]
     embs.append(torch.zeros(1, 768, dtype=embs[0].dtype, device=embs[0].device))
     # embeddings have shape (2024 x 768) * 8, pad them adding extra entry in vocab which expands to zeros
     # we dont change the config, instead we change usage of the embedding dim in the model definition
@@ -336,6 +341,30 @@ def get_obj_dict(obj):
     return obj.__dict__
 
 
+def infer_decoder_vocab_from_checkpoint(model_state_dict):
+    """Infer decoder vocab_sizes and vocab_size from checkpoint audio_embeddings.
+    Returns (vocab_size, vocab_sizes) so config matches actual embedding weight shape.
+    Tries multiple key patterns (with/without decoder prefix, nested, etc.).
+    """
+    import re
+    # Find all keys like *audio_embeddings.N.weight* and collect (index, key)
+    pattern = re.compile(r"audio_embeddings\.(\d+)\.weight")
+    index_to_key = {}
+    for key in model_state_dict:
+        m = pattern.search(key)
+        if m is not None:
+            idx = int(m.group(1))
+            index_to_key[idx] = key
+    if not index_to_key:
+        return None, None
+    indices = sorted(index_to_key.keys())
+    vocab_sizes = [model_state_dict[index_to_key[i]].shape[0] for i in indices]
+    # Config vocab_size = sum only. T5TTSDecoderModel uses (config.vocab_size + 1) for embedding;
+    # we add the +1 row in convert_t5tts_decoder when saving weights, so config must not include it.
+    vocab_size = sum(vocab_sizes)
+    return vocab_size, vocab_sizes
+
+
 def convert_checkpoint(args, model):
 
     saved_dir = Path(args.output_dir)
@@ -352,6 +381,17 @@ def convert_checkpoint(args, model):
     quant_algo = None
 
     encoder_config, decoder_config = parse_model_config(args, )
+
+    # Override decoder vocab from checkpoint so config matches actual embedding shapes
+    inferred_vocab_size, inferred_vocab_sizes = infer_decoder_vocab_from_checkpoint(model)
+    if inferred_vocab_size is not None and inferred_vocab_sizes is not None:
+        decoder_config.vocab_size = inferred_vocab_size
+        decoder_config.vocab_sizes = inferred_vocab_sizes
+        LOGGER.info(
+            "Decoder vocab inferred from checkpoint: vocab_size=%s, vocab_sizes=%s",
+            inferred_vocab_size,
+            inferred_vocab_sizes,
+        )
 
     additional_settings = ["gated_act"]
 
@@ -460,6 +500,8 @@ def convert_checkpoint(args, model):
         'bos_token_id': decoder_config.bos_token_id,
         'pad_token_id': decoder_config.pad_token_id,
         'cross_attention': True,  #  this has to be provided explicitely
+        'stacking_factor': 1,
+        'localtransformer_path': getattr(args, 'localtransformer_path', None),
     }
     for additional_setting in additional_settings:
         if hasattr(decoder_config, additional_setting):
@@ -600,6 +642,12 @@ if __name__ == "__main__":
         help=
         'Compute relative attention bias on the fly instead of pre-compute a relative attention bias table.'
     )
+    parser.add_argument(
+        '--localtransformer_path',
+        type=str,
+        default=None,
+        help='Path to the local transformer TRT engine plan file.'
+    )
     args = parser.parse_args()
     log_format = "%(asctime)s %(name)s [%(levelname)s] %(message)s"
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -613,10 +661,13 @@ if __name__ == "__main__":
 
     model_metadata = {}
     model_state_dict = torch.load(args.model_path,
-                                  weights_only=False)['state_dict']
-    for k in model_state_dict:
-        model_state_dict[k] = model_state_dict[k].to(
-            dtype=TORCH_DTYPES[args.dtype])
+                                  weights_only=False)
+    # Handle NeMo .ckpt format: extract state_dict from the top-level dict
+    if isinstance(model_state_dict, dict) and 'state_dict' in model_state_dict:
+        model_state_dict = model_state_dict['state_dict']
+    model_state_dict = {k: v.to(dtype=TORCH_DTYPES[args.dtype])
+                        for k, v in model_state_dict.items()
+                        if isinstance(v, torch.Tensor)}
     convert_checkpoint(args, model_state_dict)
 
     stop_time = datetime.now()

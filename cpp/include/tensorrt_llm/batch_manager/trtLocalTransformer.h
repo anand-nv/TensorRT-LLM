@@ -66,8 +66,7 @@ public:
         SizeType32 maxNumSequences,
         SizeType32 maxSequenceLen,
         SizeType32 numMicroBatches,
-        SizeType32 maxBatchSize
-    );
+        SizeType32 maxBatchSize);
     
     ~TrtLocalTransformer();
 
@@ -114,6 +113,7 @@ private:
     int hiddenSize;
     int numTokens;
     int vocabSize;
+    int mstackingFactor;
 
     TensorPtr inHiddenStates;  // [batch x dim]
     TensorPtr inHiddenStatesHost;  // [batch x dim]

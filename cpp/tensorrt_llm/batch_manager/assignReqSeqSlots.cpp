@@ -44,9 +44,18 @@ void tensorrt_llm::batch_manager::AssignReqSeqSlots::operator()(SequenceSlotMana
 
             for (int i = 0; i < llmReq->getNumSequences(); i++)
             {
-                auto const reqSeqSlot = seqSlotManager.getSequenceSlot(isReqNew, llmReq->getSeqSlotId(i));
-                TLLM_CHECK_WITH_INFO(
-                    reqSeqSlot, "Unable to get batch slot for request ID %lu", llmReq->getSeqSlotId(i));
+                auto const seqId = llmReq->getSeqSlotId(i);
+                auto reqSeqSlot = seqSlotManager.getSequenceSlot(isReqNew, seqId);
+                // Manager released the slot (e.g. idle reclaim or early free) but the request still has no local
+                // batch indices — treat as a new allocation during context (safe); generation without a mapping is
+                // inconsistent and must not silently re-bind.
+                if (!reqSeqSlot && !isReqNew && llmReq->isContextInitState() && llmReq->mSeqSlots.empty())
+                {
+                    TLLM_LOG_WARNING(
+                        "Re-binding sequence slot for request ID %lu: mapping was missing during context scheduling",
+                        seqId);
+                    reqSeqSlot = seqSlotManager.getSequenceSlot(true, seqId);
+                }
                 if ((int) llmReq->mSeqSlots.size() >= i + 1)
                 {
                     llmReq->mSeqSlots[i] = reqSeqSlot.value();

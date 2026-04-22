@@ -99,6 +99,19 @@ if(ENABLE_CUFILE)
   target_link_libraries(${BATCH_MANAGER_STATIC_TARGET} PUBLIC ${CUFILE_LIBRARY})
 endif()
 
+find_library(CATEGORICAL_SAMPLING_PLUGIN
+  categorical_sampling_plugin
+  HINTS /code/tensorrt_llm/build
+        ${CMAKE_BINARY_DIR}
+        $ENV{CATEGORICAL_SAMPLING_PLUGIN_DIR})
+
+if(CATEGORICAL_SAMPLING_PLUGIN)
+  target_link_libraries(${BATCH_MANAGER_STATIC_TARGET} PUBLIC ${CATEGORICAL_SAMPLING_PLUGIN})
+  message(STATUS "Linking categorical_sampling_plugin: ${CATEGORICAL_SAMPLING_PLUGIN}")
+else()
+  message(WARNING "categorical_sampling_plugin not found, will need runtime dlopen")
+endif()
+
 if(ENABLE_UCX)
   find_package(ucx REQUIRED)
   find_package(ucxx REQUIRED)

@@ -114,6 +114,8 @@ public:
 
     SizeType32 getNumResponsesReady(std::optional<IdType> const& optId = std::nullopt) const;
 
+    [[nodiscard]] SizeType32 getNumVocabs() const;
+
     void cancelRequest(IdType requestId);
 
     void shutdown();

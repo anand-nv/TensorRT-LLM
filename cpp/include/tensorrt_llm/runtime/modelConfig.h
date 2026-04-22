@@ -24,6 +24,7 @@
 
 #include <NvInferRuntime.h>
 #include <array>
+#include <cstddef>
 
 namespace tensorrt_llm::runtime
 {
@@ -101,7 +102,7 @@ public:
 
     explicit ModelConfig(SizeType32 vocabSize, SizeType32 nbLayers, SizeType32 nbAttentionLayers,
         SizeType32 nbRnnLayers, SizeType32 nbHeads, SizeType32 hiddenSize, nvinfer1::DataType dtype,
-        std::optional<std::vector<SizeType32>> vocabSizes = std::nullopt)
+        std::optional<std::vector<SizeType32>> vocabSizes = std::nullopt, std::optional<SizeType32> stackingFactor = 1)
         : mVocabSize(vocabSize)
         , mNbLayers(nbLayers)
         , mNbAttentionLayers(nbAttentionLayers)
@@ -142,7 +143,8 @@ public:
         , mManageWeightsType(ManageWeightsType::kDisabled)
         , mSkipCrossAttnBlocks(false)
         , mNumLanguages(0)
-        , mVocabSizes{vocabSizes}
+        , mVocabSizes{std::move(vocabSizes)}
+        , mStackingFactor(stackingFactor.value_or(1))
         , mUseAttentionPrior(false)
         , mUseContextEmbeddings(false)
         , mUseLocalTransformer(true)
@@ -157,7 +159,6 @@ public:
             TLLM_CHECK_WITH_INFO(
                 sizesSum == vocabSize, "Sum of all vocab sizes (%d) must equal to vocabSize (%d)", sizesSum, vocabSize);
         }
-
         setNbKvHeads(mNbHeads);
     }
 
@@ -173,7 +174,19 @@ public:
 
     [[nodiscard]] SizeType32 getNumVocabs() const
     {
-        return mVocabSizes ? mVocabSizes.value().size() : 1;
+        if (!mVocabSizes)
+        {
+            return 1;
+        }
+        auto const stackingDivisor
+            = static_cast<std::size_t>(mStackingFactor > 0 ? mStackingFactor : 1);
+        auto const nVocabs = mVocabSizes->size() / stackingDivisor;
+        return static_cast<SizeType32>(nVocabs);
+    }
+
+    [[nodiscard]] SizeType32 getStackingFactor() const noexcept
+    {
+        return mStackingFactor;
     }
 
     [[nodiscard]] std::vector<SizeType32> getVocabSizes() const
@@ -1065,6 +1078,7 @@ private:
 
     // Size of each vocab if there are multiple vocabs
     std::optional<std::vector<SizeType32>> mVocabSizes;
+    SizeType32 mStackingFactor;
     // parameters of attention prior
     bool mUseAttentionPrior;
     bool mUseContextEmbeddings;

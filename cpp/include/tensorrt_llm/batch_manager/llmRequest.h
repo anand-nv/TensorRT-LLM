@@ -818,7 +818,6 @@ public:
     /// @brief Erases all previous generated tokens, only leaving the prompt.
     void clearGeneratedTokens()
     {
-        TLLM_LOG_DEBUG("Clearing generated tokens for request %ld with promptlen %d", mRequestId, mPromptLen);
         for (auto& beam : mTokens)
         {
             beam.resize(mPromptLen);
@@ -1327,6 +1326,31 @@ public:
     void setEncoderOutput(TensorPtr encoderOutput)
     {
         mEncoderOutput = std::move(encoderOutput);
+    }
+
+    /// When the encoder is skipped and only input features are provided (no encoder token IDs),
+    /// cross-KV block reuse still needs per-position unique tokens. Synthesize them using the
+    /// request id in tokenExtraId so cache keys do not collide across concurrent requests.
+    void ensureEncoderUniqueTokensForFeatureEncoder()
+    {
+        if (mEncoderUniqueTokens.has_value())
+        {
+            return;
+        }
+        SizeType32 const inputLen = getEncoderOutputLen();
+        if (inputLen <= 0)
+        {
+            return;
+        }
+        SizeType32 const numVocabs = getNumVocabs();
+        SizeType32 const minVec = std::max(inputLen, (inputLen - 1) * numVocabs);
+        auto encoderUniqueTokens = std::make_shared<VecUniqueTokens>(minVec);
+        auto const rid = static_cast<TokenExtraIdType>(mRequestId);
+        for (SizeType32 i = 0; i < minVec; ++i)
+        {
+            (*encoderUniqueTokens)[i] = UniqueToken{static_cast<TokenIdType>(i), rid};
+        }
+        mEncoderUniqueTokens = encoderUniqueTokens;
     }
 
     void allocEncoderOutputHost(SizeType32 encoderHiddenSize, nvinfer1::DataType dataType)

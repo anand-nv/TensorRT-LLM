@@ -195,7 +195,14 @@ ModelConfig createModelConfig(Json const& json, bool engineVersionNone, SizeType
     auto const sizePerHead = parseJsonFieldOr(config, "head_size", hiddenSize / numHeads);
     // Read vocab sizes if available, otherwise use single vocab size
     auto vocabSizes = parseJsonFieldOptional<std::vector<SizeType32>>(config, "vocab_sizes");
-
+    // Default 1: each vocab_sizes entry is one stream (numVocabs = len(vocab_sizes)). Default 2 incorrectly yields
+    // numVocabs = len/2 (e.g. 8 -> 4) when the key is omitted.
+    auto stackingFactor = parseJsonFieldOr(config, "stacking_factor", static_cast<SizeType32>(1));
+    if (stackingFactor <= 0)
+    {
+        stackingFactor = 1;
+    }
+    auto const ltPath = parseJsonFieldOptional<std::string>(config, "localtransformer_path");
     // Logits datatype
     auto const logitsDtypeStr = parseJsonFieldOr(config, "logits_dtype", std::string("float32"));
 
@@ -214,7 +221,8 @@ ModelConfig createModelConfig(Json const& json, bool engineVersionNone, SizeType
     auto numKvHeadsPerCrossAttentionLayer = parseJsonFieldOr<std::vector<SizeType32>>(
         config, "num_kv_heads_per_cross_attn_layer", std::vector<SizeType32>());
     auto modelConfig = ModelConfig{
-        vocabSize, numLayers, numAttentionLayers, numRnnLayers, numHeads, hiddenSize, dataType, vocabSizes};
+        vocabSize, numLayers, numAttentionLayers, numRnnLayers, numHeads, hiddenSize, dataType, vocabSizes,
+        std::optional<SizeType32>{stackingFactor}};
 
     if (!numKvHeadsPerAttentionLayer.empty())
     {
@@ -229,6 +237,11 @@ ModelConfig createModelConfig(Json const& json, bool engineVersionNone, SizeType
     else
     {
         modelConfig.setNbKvHeads(numKvHeads);
+    }
+
+    if (ltPath.has_value())
+    {
+        modelConfig.setLtPath(ltPath.value());
     }
 
     auto const useAttentionPrior = parseJsonFieldOr(config, "use_attention_prior", false);

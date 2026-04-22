@@ -677,6 +677,7 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
 
         auto const promptLen = llmReq->getPromptLen();
         auto const numVocabs = modelConfig.getNumVocabs();
+        auto const stackingFactor = modelConfig.getStackingFactor();
 
         SizeType32 numDecodingEngineTokens{1};
         if (modelConfig.getSpeculativeDecodingMode().isDraftTokensExternal())
@@ -710,6 +711,13 @@ CreateNewDecoderRequests::createDecoderRequests(RequestVector const& finishedCon
         initializeLogProbs(dJointOutput, batchSlot, samplingConfig, decoderBufferManager);
 
         auto const& reqTokens = llmReq->getTokens(0);
+        auto const reqNumVocabs = llmReq->getNumVocabs();
+        TLLM_CHECK_WITH_INFO(reqNumVocabs == numVocabs,
+            tc::fmtstr(
+                "Executor Request.num_vocabs (%d) must match engine num vocabs (%d). For joint / multi-codebook "
+                "decoders set Request.num_vocabs to len(vocab_sizes) in decoder config.json; input_token_ids must "
+                "have length prompt_positions * num_vocabs (reqTokens.size=%lu, promptLen=%d).",
+                reqNumVocabs, numVocabs, static_cast<unsigned long>(reqTokens.size()), promptLen));
         TLLM_CHECK(reqTokens.size() == static_cast<decltype(reqTokens.size())>(promptLen * numVocabs));
         TensorPtr requestIds = ITensor::slice(inputIds, inputOffset, promptLen);
         // Copy to pinned host memory (don't care about stream of bufferManager)

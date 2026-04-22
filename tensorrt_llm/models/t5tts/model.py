@@ -50,6 +50,34 @@ mlp_map = {
     MLPType.FusedGatedMLP: FusedGatedMLP,
 }
 
+
+def _runtime_decoder_num_vocabs(config: PretrainedConfig) -> int:
+    """Packed decoder stream count; must match ``ModelConfig::getNumVocabs()`` (C++).
+
+    C++ uses ``len(vocab_sizes) / stacking_factor`` with default ``stacking_factor`` of 2 when
+    loading ``config.json``. The embedding view/mean must use the same divisor as the runtime
+    flat ``input_ids`` layout (``num_tokens * getNumVocabs()``).
+    """
+    vs = getattr(config, "vocab_sizes", None)
+    if not vs:
+        return 1
+    raw = len(vs)
+    stacking = getattr(config, "stacking_factor", None)
+    if stacking is None:
+        stacking = getattr(config, "stackingFactor", None)
+    if stacking is None:
+        stacking = 1
+    if stacking <= 0:
+        stacking = 1
+    if raw % stacking != 0:
+        raise ValueError(
+            f"len(vocab_sizes)={raw} must be divisible by stacking_factor={stacking} "
+            "(align with TensorRT-LLM ModelConfig::getNumVocabs / executor input layout). "
+            "Use stacking_factor=1 when each vocab_sizes entry is one interleaved stream.")
+    print(f"stacking: {stacking}")
+    n = raw // stacking
+    return n if n > 0 else 1
+
 COMPUTE_SCORES_FROM_LAYERS = [4, 6, 10]
 APPLY_PRIOR_TO_LAYERS = [4, 5, 6, 7, 8, 9, 10]
 
@@ -1326,7 +1354,7 @@ class T5TTSDecoderModel(PretrainedModel):
         super().__init__(config)
 
         self.mapping = self.config.mapping
-        self.num_vocabs = len(self.config.vocab_sizes)
+        self.num_vocabs = _runtime_decoder_num_vocabs(self.config)
         self.use_context_embeddings = self.config.use_context_embeddings
 
         self.has_position_embedding = self.config.has_position_embedding
@@ -1502,6 +1530,8 @@ class T5TTSDecoderModel(PretrainedModel):
         config.set_if_not_exist('residual_scaling', 1.0)
         config.set_if_not_exist('use_local_transformer', True)
         config.set_if_not_exist('lt_path', None)
+        # Default matches cpp/tensorrt_llm/runtime/modelConfig.h ModelConfig stacking default.
+        config.set_if_not_exist('stacking_factor', 2)
 
     def forward(self,
                 decoder_input_ids: Tensor,

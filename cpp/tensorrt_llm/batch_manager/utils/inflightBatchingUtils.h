@@ -66,6 +66,11 @@ void terminateRequest(SequenceSlotManager& seqSlotManager, LlmRequest& llmReques
     OptionalRef<kv_cache_manager::BaseKVCacheManager> crossKvCacheManager = std::nullopt,
     OptionalRef<BasePeftCacheManager> peftCacheManager = std::nullopt, bool pause = false);
 
+/// Refresh sequence-slot activity for all sequences owned by active requests so idle reclaim does not drop slots
+/// for requests that were skipped by the micro-batch scheduler (e.g. while marked in-flight).
+void refreshSequenceSlotActivityForActiveRequests(
+    SequenceSlotManager& seqSlotManager, RequestList const& activeRequests);
+
 std::vector<SizeType32> getRequestBeamWidths(
     RequestVector const& contextRequests, RequestVector const& generationRequests);
 

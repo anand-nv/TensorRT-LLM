@@ -55,7 +55,14 @@ prefillWithChunkedContextsAlreadyExecuting(RequestList const& activeRequests,
             }
             if (crossKvCacheManager && crossKvCacheManager->isEnableBlockReuse())
             {
-                auto uniqueTokens = *(req->getEncoderUniqueTokens().value());
+                auto const& encOpt = req->getEncoderUniqueTokens();
+                if (!encOpt.has_value() || !encOpt.value())
+                {
+                    TLLM_THROW(
+                        "Cross KV block reuse requires encoder unique tokens (encoder token IDs or "
+                        "ensureEncoderUniqueTokensForFeatureEncoder for feature-only encoder).");
+                }
+                auto uniqueTokens = *encOpt.value();
                 auto newContextBlockOpt = crossKvCacheManager->findNewContextBlock(uniqueTokens, *req);
                 if (newContextBlockOpt.has_value())
                 {
@@ -112,7 +119,14 @@ bool beneficialToSkip(std::shared_ptr<tensorrt_llm::batch_manager::LlmRequest> c
         }
         if (crossKvCacheManager && crossKvCacheManager->isEnableBlockReuse())
         {
-            auto uniqueTokens = *(req->getEncoderUniqueTokens().value());
+            auto const& encOpt = req->getEncoderUniqueTokens();
+            if (!encOpt.has_value() || !encOpt.value())
+            {
+                TLLM_THROW(
+                    "Cross KV block reuse requires encoder unique tokens (encoder token IDs or "
+                    "ensureEncoderUniqueTokensForFeatureEncoder for feature-only encoder).");
+            }
+            auto uniqueTokens = *encOpt.value();
             if (oneManagerBeneficialToSkip(*crossKvCacheManager, uniqueTokens, req, newlyContributedCrossContextBlocks))
             {
                 return true;
