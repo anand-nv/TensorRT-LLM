@@ -2233,8 +2233,15 @@ runtime::CudaEvent TrtGptModelInflightBatching::decoderStepAsync(ScheduledReques
         copyCacheIndirectionFromOutputsToInputs(scheduledRequests, fusedBufferId, vocabId);
     }
     TLLM_LOG_DEBUG("Running local transformer");
+    // buf->logits is allocated with vocabSizePadded width for capacity, but the engine
+    // wrote {numLogits, hiddenSize} data (lm_head removed). Create a view with the
+    // actual data layout so the local transformer reads the right strides.
+    auto const ltHiddenSize = mModelConfig.getHiddenSize();
+    auto const numLogitRows = buf->logits->getShape().d[0];
+    TensorPtr logitsForLT(ITensor::view(buf->logits));
+    logitsForLT->reshape(ITensor::makeShape({numLogitRows, ltHiddenSize}));
     mLocalTransformer->run(
-        buf->logits,
+        logitsForLT,
         scheduledRequests.contextRequests,
         buf->numContextLogits,
         scheduledRequests.generationRequests,

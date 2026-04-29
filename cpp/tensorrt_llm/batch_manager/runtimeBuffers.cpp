@@ -322,32 +322,28 @@ void RuntimeBuffers::reshape(TllmRuntime const& runtime, ModelConfig const& mode
     if (worldConfig.isLastPipelineParallelRank())
     {
         auto const vocabSizePadded = modelConfig.getVocabSizePadded(worldConfig.getSize());
-        auto const hiddenSize = modelConfig.getHiddenSize();
 
+        // Use vocabSizePadded for capacity so the TensorView created in fillIOMaps
+        // has enough room for whatever the engine's shape inference returns.
+        // When the engine is built without lm_head (T5-TTS), the engine infers
+        // {N, hiddenSize} and the extra capacity is unused.  When the engine is
+        // built with lm_head, the full {N, vocabSizePadded} is needed.
         if (modelConfig.computeContextLogits() && (numContextRequests > 0))
         {
-            // Only when need to return context logits, and there are new requests will execute context phase,
-            // logits buffer need to be re-allocated with size of [numContextTokens + numGenSequences, vocabSizePadded]
             auto const& engine = runtime.getEngine();
             auto const& manager = runtime.getBufferManager();
             auto const logitsType = engine.getTensorDataType(kLogitsTensorName);
-            //logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, vocabSizePadded}), logitsType);
-            logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, hiddenSize}), logitsType);
+            logits = manager.gpu(ITensor::makeShape({numContextTokens + numGenSequences, vocabSizePadded}), logitsType);
         }
         else if (gatherGenerationLogits && modelConfig.getSpeculativeDecodingMode().isNone())
         {
-            // If need to return generation logits, re-point the logit buffer to avoid overwrite,
-            // so we could write back GenerationLogitsCache::kCACHE_LENGTH steps' logits together
-            // logits shape: [1, maxBatchSize * maxBeamWidth, vocabSizePadded]
-            // which is large enough to cover both numContextRequests and numGenSequences
             logits = ITensor::slice(generationLogitsCache.logits, generationLogitsCache.offset, 1);
             generationLogitsCache.offset = (generationLogitsCache.offset + 1) % GenerationLogitsCache::kCACHE_LENGTH;
             logits->squeeze(0);
         }
         else
         {
-            //logits->reshape(ITensor::makeShape({numLogits, vocabSizePadded}));
-            logits->reshape(ITensor::makeShape({numLogits, hiddenSize}));
+            logits->reshape(ITensor::makeShape({numLogits, vocabSizePadded}));
         }
     }
 
