@@ -178,9 +178,9 @@ public:
         {
             return 1;
         }
-        auto const stackingDivisor
-            = static_cast<std::size_t>(mStackingFactor > 0 ? mStackingFactor : 1);
-        auto const nVocabs = mVocabSizes->size() / stackingDivisor;
+        //auto const stackingDivisor
+        //    = static_cast<std::size_t>(mStackingFactor > 0 ? mStackingFactor : 1);
+        auto const nVocabs = mVocabSizes->size(); // / stackingDivisor;
         return static_cast<SizeType32>(nVocabs);
     }
 

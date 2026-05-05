@@ -262,16 +262,57 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
         batchIndex += generationRequests.size() * cfgMult;
         frameIndex += generationRequests.size() * cfgMult;
     }
-    //TLLM_LOG_INFO("Clearing input/output map");
-    // create a buffer for the tokens, 0th token reserved for hidden states
-    //inTokens = manager.gpu(ITensor::makeShape({numTokens + 1, batchSize / cfgMult}), nvinfer1::DataType::kINT32);
-    //inTokensSliceHost = manager.cpu(ITensor::makeShape({batchSize / cfgMult}), nvinfer1::DataType::kINT32);
-    // TODO: set intokens[0] to special token which is expanded to 0 with emb of local transformer
-    // for CFG, model folds the tensor in two
+    // The NeMo/TRT engine (IntLT.forward) splits the input at mid-batch:
+    //   cond_logits = output[:B], uncond_logits = output[B:]
+    // So it expects NON-INTERLEAVED layout:
+    //   rows 0..N-1:   conditional   (req0, req1, ..., req(N-1))
+    //   rows N..2N-1:  unconditional (req0, req1, ..., req(N-1))
+    //
+    // runtimeBuffers fills INTERLEAVED per request:
+    //   rows 0,1 = req0_cond, req0_uncond; rows 2,3 = req1_cond, req1_uncond …
+    //
+    // Reorder to non-interleaved so the engine computes correct CFG pairs.
+    if (cfgMult == 2) {
+        TensorPtr reorderedStates = manager.gpu(ITensor::makeShape({batchSize, hiddenSize}), statesType);
+        for (SizeType32 i = 0; i < numRequests; i++) {
+            // Even rows (2i)   → conditional half (rows 0..N-1)
+            manager.copy(*ITensor::slice(inHiddenStates, 2 * i, 1),
+                         *ITensor::slice(reorderedStates, i, 1));
+            // Odd rows (2i+1) → unconditional half (rows N..2N-1)
+            manager.copy(*ITensor::slice(inHiddenStates, 2 * i + 1, 1),
+                         *ITensor::slice(reorderedStates, numRequests + i, 1));
+        }
+        inHiddenStates = reorderedStates;
+    }
 
     sync_check_cuda_error(mRuntime->getStream().get());
-    //#ifdef TLLM_DEBUG_MODE
-    //#endif
+
+    // Dump inHiddenStates to /tmp for comparison with NeMo dec_output.
+    // Only save the first 3 calls (context + first 2 gen steps) to avoid filling disk.
+    // Format: raw float16 (half) elements, shape (batchSize, hiddenSize).
+    {
+        static int sDumpCount = 0;
+        if (sDumpCount < 3) {
+            auto hostDump = manager.cpu(inHiddenStates->getShape(), statesType);
+            manager.copy(*inHiddenStates, *hostDump);
+            mRuntime->getStream().synchronize();
+            // element size in bytes: fp16=2, fp32=4
+            size_t const elemBytes = (statesType == nvinfer1::DataType::kFLOAT) ? 4u : 2u;
+            char path[256];
+            snprintf(path, sizeof(path),
+                "/tmp/lt_hidden_states_%d_nreq%d_bs%d_h%d_fp%zu.bin",
+                sDumpCount, numRequests, batchSize, hiddenSize, elemBytes * 8);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fwrite(hostDump->data(), hostDump->getSize() * elemBytes, 1, f);
+                fclose(f);
+                printf("Dumped inHiddenStates[%d] shape=(%d,%d) dtype=fp%zu to %s\n",
+                    sDumpCount, batchSize, hiddenSize, elemBytes * 8, path);
+            }
+            sDumpCount++;
+        }
+    }
+
     inputMap.clear();
     outputMap.clear();
     // always needs the hidden states as input
@@ -323,7 +364,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
 
     auto size_tokens = outLogitsHost->getSize();
     auto data_tokens = static_cast<int32_t*>(outLogitsHost->data());
-    #ifndef NDEBUG
+    //#ifndef NDEBUG
         printf("outLogitsHost data: ");
         for (size_t i = 0; i < size_tokens; i++) {
             TLLM_LOG_DEBUG("outLogits data: %d", data_tokens[i]);
@@ -331,7 +372,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
         }
         printf("\n");
         TLLM_LOG_INFO("outLogitsHost shape: %s", ITensor::toString(outLogitsHost->getShape()).c_str());
-    #endif
+    //#endif
 }
 
 TrtLocalTransformer::TensorPtr TrtLocalTransformer::getOutLogitsHost()
@@ -444,10 +485,20 @@ void TrtLocalTransformer::updateDecoderStateAfterGeneration(
             // Check finish conditions (EOS on first codebook column; extend if EOS is on another book)
             bool shouldFinish = false;
             SizeType32 const generatedToken = tokensData[static_cast<size_t>(batchIndex) * rowStride];
-            
+
+            // Suppress EOS for the first min_generated_frames codec frames.
+            // completedSteps = getNumTokens(0) - mPromptLen = n_steps * stacking_factor (in frames).
+            // Each step adds stacking_factor positions, so completedSteps already counts frames.
+            // Do NOT multiply by kStackingFactor again — that would double-count.
+            static constexpr SizeType32 kMinGeneratedFrames = 4;
+            SizeType32 const completedSteps = isContextRequest
+                ? 0
+                : (llmReq->getNumTokens(0) - llmReq->mPromptLen);
+            bool const tooEarlyForEos = completedSteps < kMinGeneratedFrames;
+
             // Check if EOS token
             auto const endId = llmReq->mEndId.value();
-            if (generatedToken == endId)
+            if (!tooEarlyForEos && generatedToken == endId)
             {
                 shouldFinish = true;
                 TLLM_LOG_DEBUG("Request %lu hit EOS token", llmReq->mRequestId);

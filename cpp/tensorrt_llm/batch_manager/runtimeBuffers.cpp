@@ -700,14 +700,22 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                     TLLM_CHECK_WITH_INFO(reqFeaturesShape.nbDims >= 2,
                         "Decoder context features must have at least 2 dimensions, but got %d dimensions for request %lu",
                         reqFeaturesShape.nbDims, llmReq->mRequestId);
-                    TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= reqFeaturesShape.d[0],
-                        "Decoder context features [%d, %d], but request is at position %d and chunk size %d",
+                    // If caller provides numSequences * contextChunkSize rows, copy features for every
+                    // CFG sequence (cond + uncond). Otherwise fall back to copying only the first
+                    // (conditional) chunk and leave the rest zero-masked (old behaviour).
+                    auto const numSeqs = llmReq->getNumSequences();
+                    auto const totalChunk = contextChunkSize * numSeqs;
+                    bool const hasPerSeqFeatures =
+                        (reqFeaturesShape.d[0] >= contextPosition + totalChunk);
+                    auto const featuresToCopy = hasPerSeqFeatures ? totalChunk : contextChunkSize;
+                    TLLM_CHECK_WITH_INFO(contextPosition + featuresToCopy <= reqFeaturesShape.d[0],
+                        "Decoder context features [%d, %d], but request is at position %d and chunk size %d (numSeqs=%d)",
                         (int) reqFeaturesShape.d[0], (int) reqFeaturesShape.d[1], contextPosition,
-                        contextChunkSize);
+                        contextChunkSize, numSeqs);
                     // specifying offset and size across 0th dimension
-                    manager.copy(*ITensor::slice(reqFeatures, contextPosition, contextChunkSize),
-                        *ITensor::slice(decoderContextFeatures, tokenIdx, contextChunkSize));
-                    manager.setMem(*ITensor::slice(decoderContextFeaturesMask, tokenIdx, contextChunkSize), 1);
+                    manager.copy(*ITensor::slice(reqFeatures, contextPosition, featuresToCopy),
+                        *ITensor::slice(decoderContextFeatures, tokenIdx, featuresToCopy));
+                    manager.setMem(*ITensor::slice(decoderContextFeaturesMask, tokenIdx, featuresToCopy), 1);
                 }
                 tokenIdx += llmReq->getNumSequences() * contextChunkSize;
             }

@@ -2394,14 +2394,21 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
     auto const* const finishReasonsHostData
         = bufferCast<kernels::FinishedState>(*mLocalTransformer->getFinishReasonsHost());
 
-    // Update only requests that ran through the decoder
+    // Update only requests that ran through the decoder.
+    // outLogitsHost rows are ordered: context requests first, then generation requests,
+    // matching the order used in TrtLocalTransformer::run(). Start gen index after context rows.
+    SizeType32 genBatchIdx = static_cast<SizeType32>(scheduledRequests.contextRequests.size());
     for (auto const& llmReq : scheduledRequests.generationRequests)
     {
+        // Always advance genBatchIdx to keep it in sync with outLogitsHost rows,
+        // even when we skip a request below.
+        SizeType32 const batch_idx = genBatchIdx++;
+
         if (llmReq->isGenerationCompleteState())
         {
             continue;
         }
-        
+
         // Skip requests that just transitioned from context to generation
         // Their decoder output buffers haven't been populated yet
         auto const currentNumOfTokens = llmReq->getMaxBeamNumTokens();
@@ -2410,7 +2417,7 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             //TLLM_LOG_DEBUG("Skipping request %lu in updateRequests - just started generation", llmReq->mRequestId);
             //continue;
         //}
-        
+
         auto const reqBeamWidth = llmReq->getBeamWidthByIter(true);
         auto const seqSlot = llmReq->mSeqSlots.at(0);
 
@@ -2436,8 +2443,6 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
         // Some tokens might be dropped due to end token or rejected draft tokens.
         auto const numGeneratedTokens = llmReq->getNumDraftTokens() + 1;
 
-        auto batch_size = scheduledRequests.generationRequests.size() + scheduledRequests.contextRequests.size();
-        int batch_idx = 0;
         int numTokens = mLocalTransformer->getNumTokens();
 
         for (SizeType32 beam = 0; beam < reqBeamWidth; ++beam)
@@ -2446,40 +2451,41 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             auto const seqLen = sequenceLengthsHostData[seqSlot * mOperatingBeamWidth + beam];
             // Actual number of tokens that should be added to the request.
             auto const numNewOutputTokens = seqLen - llmReq->getNumTokens(beam);
-            if (reqBeamWidth == 1)
-            {
-                //TLLM_CHECK_WITH_INFO(numGeneratedTokens >= numNewOutputTokens,
-                //    "numNewOutputTokens must not be greater than numGeneratedTokens: "
-                //    "numGeneratedTokens %d < numNewOutputTokens %d",
-                //    numGeneratedTokens, numNewOutputTokens);
-            }
-            //numNewTokens[beam] = std::min(numGeneratedTokens, numNewOutputTokens);
-            //numDroppedTokens[beam] = numGeneratedTokens - numNewTokens[beam];
-            //TLLM_LOG_INFO("numNewTokens[beam]: %d", numNewTokens[beam]);
-            //TLLM_LOG_INFO("numGeneratedTokens: %d", numGeneratedTokens);
-            //TLLM_LOG_INFO("numDroppedTokens[beam]: %d", numDroppedTokens[beam]);
-            //TLLM_LOG_INFO("numTokens: %d", numTokens);
-            //TLLM_LOG_INFO("batch_idx: %d", batch_idx);
-            //TLLM_LOG_INFO("seqSlot: %d", seqSlot);
-            //TLLM_LOG_INFO("beam: %d", beam);
-            //TLLM_LOG_INFO("reqBeamWidth: %d", reqBeamWidth);
+            // Write back local transformer output tokens: each decoder step emits
+            // getStackingFactor() stacking frames, each with numVocabsPerFrame codebooks.
+            // Tokens are stored with cumulative vocabOffset so the EOS token (endId) is
+            // identifiable only for the first codebook of the first frame (offset=0).
+            // We therefore scan all raw tokens for endId before adding the offset.
+            auto const endId = llmReq->mEndId.value();
+            bool anyCodebookEos = false;
             for (SizeType32 step = 0; step < 1; ++step)
             {
-                #ifndef NDEBUG
-                TLLM_LOG_DEBUG("Adding numVocabs: %d, beam: %d, stackingFactor: %d", getNumVocabs(), beam, mModelConfig.getStackingFactor());
-                #endif
                 auto outLogitsHost = mLocalTransformer->getOutLogitsHost();
                 auto const numLogitCols = outLogitsHost->getShape().d[1];
-                SizeType32 vocabOffset = 0;
-                for (SizeType32 vid = 0; vid < getNumVocabs(); ++vid)
+                auto const numVocabsPerFrame = getNumVocabs() / mModelConfig.getStackingFactor();
+                for (SizeType32 stacking = 0; stacking < mModelConfig.getStackingFactor(); ++stacking)
                 {
-                    auto const newTokenIdx = tc::flat_index2(batch_idx, vid, static_cast<long int>(numLogitCols));
-                    auto newToken = bufferCast<TokenIdType const>(*outLogitsHost)[newTokenIdx];
-                    llmReq->addNewToken(newToken + vocabOffset, beam);
-                    vocabOffset += mModelConfig.getVocabSizes()[vid];
+                    SizeType32 vocabOffset = 0;
+                    for (SizeType32 prevVid = 0; prevVid < stacking * numVocabsPerFrame; ++prevVid)
+                        vocabOffset += mModelConfig.getVocabSizes()[prevVid];
+                    for (SizeType32 vid = 0; vid < numVocabsPerFrame; ++vid)
+                    {
+                        auto const newTokenIdx = tc::flat_index2(
+                            batch_idx, vid + stacking * numVocabsPerFrame, static_cast<long int>(numLogitCols));
+                        auto newToken = bufferCast<TokenIdType const>(*outLogitsHost)[newTokenIdx];
+                        if (newToken == endId)
+                            anyCodebookEos = true;
+                        llmReq->addNewToken(newToken + vocabOffset, beam);
+                        vocabOffset += mModelConfig.getVocabSizes()[stacking * numVocabsPerFrame + vid];
+                    }
                 }
+                llmReq->updateNumTokensPerIteration(llmReq->getMaxBeamNumTokens() - currentNumOfTokens, mModelConfig);
             }
-            auto const finishReason = finishReasonsHostData[seqSlot * mOperatingBeamWidth + beam];
+            auto finishReason = finishReasonsHostData[seqSlot * mOperatingBeamWidth + beam];
+            // Match NeMo's eos_detection_method='argmax_or_multinomial_any': stop when any
+            // codebook generates endId, not just the first one whose offset happens to be zero.
+            if (anyCodebookEos && !finishReason.isFinished())
+                finishReason = kernels::FinishedState::finished();
             llmReq->setFinishedReason(finishReason.toFinishReason(), beam);
 
             TLLM_LOG_DEBUG("[RANK %d] decoderSync: request ID %lu beam %d tokens %s finished %d",
@@ -2487,8 +2493,6 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
                 static_cast<int>(finishReason.toFinishReason()));
         }
 
-        // Set number of tokens predicted per runtime iteration. Will be > 1 for speculative decoding.
-        llmReq->updateNumTokensPerIteration(llmReq->getMaxBeamNumTokens() - currentNumOfTokens, mModelConfig);
 
         // Fill new draft tokens for the next step
         if (decoderFinishedSumPtr[seqSlot] != reqBeamWidth
