@@ -14,10 +14,19 @@ __global__ void categoricalSamplingKernel(half const* probs, int* output, int ba
         return;
     }
 
-    // Initialize random state for this thread using clock for unique seed
-    // This provides non-reproducible randomness which is sufficient for sampling
+    // Reproducible per-call seed: hash the first 16 input probability bits so different
+    // codebooks/steps (which have different distributions) get different seeds, while
+    // identical inputs across runs produce the same seed. Avoids the clock64()
+    // non-determinism that biased some runs into degenerate basins.
+    half const* prob_row = probs + batch_idx * vocab_size;
+    unsigned long long seed = 12345ULL + static_cast<unsigned long long>(batch_idx);
+    int const hash_bits = vocab_size < 16 ? vocab_size : 16;
+    for (int i = 0; i < hash_bits; ++i)
+    {
+        unsigned short bits = __half_as_ushort(prob_row[i]);
+        seed = seed * 6364136223846793005ULL + static_cast<unsigned long long>(bits);
+    }
     curandState localState;
-    unsigned long long seed = clock64() + batch_idx;
     curand_init(seed, 0, 0, &localState);
 
     // Generate uniform random number [0, 1)
@@ -25,7 +34,6 @@ __global__ void categoricalSamplingKernel(half const* probs, int* output, int ba
 
     // Compute sum of probabilities for normalization (convert to float for accuracy)
     // Also check for negative values which indicate logits were passed instead of probabilities
-    half const* prob_row = probs + batch_idx * vocab_size;
     float sum = 0.0f;
     bool has_negative = false;
     float min_val = 1e6f;

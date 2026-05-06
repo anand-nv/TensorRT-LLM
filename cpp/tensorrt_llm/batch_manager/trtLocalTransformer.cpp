@@ -290,28 +290,28 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     // Dump inHiddenStates to /tmp for comparison with NeMo dec_output.
     // Only save the first 3 calls (context + first 2 gen steps) to avoid filling disk.
     // Format: raw float16 (half) elements, shape (batchSize, hiddenSize).
-    {
-        static int sDumpCount = 0;
-        if (sDumpCount < 3) {
-            auto hostDump = manager.cpu(inHiddenStates->getShape(), statesType);
-            manager.copy(*inHiddenStates, *hostDump);
-            mRuntime->getStream().synchronize();
-            // element size in bytes: fp16=2, fp32=4
-            size_t const elemBytes = (statesType == nvinfer1::DataType::kFLOAT) ? 4u : 2u;
-            char path[256];
-            snprintf(path, sizeof(path),
-                "/tmp/lt_hidden_states_%d_nreq%d_bs%d_h%d_fp%zu.bin",
-                sDumpCount, numRequests, batchSize, hiddenSize, elemBytes * 8);
-            FILE* f = fopen(path, "wb");
-            if (f) {
-                fwrite(hostDump->data(), hostDump->getSize() * elemBytes, 1, f);
-                fclose(f);
-                printf("Dumped inHiddenStates[%d] shape=(%d,%d) dtype=fp%zu to %s\n",
-                    sDumpCount, batchSize, hiddenSize, elemBytes * 8, path);
-            }
-            sDumpCount++;
-        }
-    }
+    //{
+    //    static int sDumpCount = 0;
+    //    if (sDumpCount < 3) {
+    //        auto hostDump = manager.cpu(inHiddenStates->getShape(), statesType);
+    //        manager.copy(*inHiddenStates, *hostDump);
+    //        mRuntime->getStream().synchronize();
+    //        // element size in bytes: fp16=2, fp32=4
+    //        size_t const elemBytes = (statesType == nvinfer1::DataType::kFLOAT) ? 4u : 2u;
+    //        char path[256];
+    //        snprintf(path, sizeof(path),
+    //            "/tmp/lt_hidden_states_%d_nreq%d_bs%d_h%d_fp%zu.bin",
+    //            sDumpCount, numRequests, batchSize, hiddenSize, elemBytes * 8);
+    //        FILE* f = fopen(path, "wb");
+    //        if (f) {
+    //            fwrite(hostDump->data(), hostDump->getSize() * elemBytes, 1, f);
+    //            fclose(f);
+    //            printf("Dumped inHiddenStates[%d] shape=(%d,%d) dtype=fp%zu to %s\n",
+    //                sDumpCount, batchSize, hiddenSize, elemBytes * 8, path);
+    //        }
+    //        sDumpCount++;
+    //    }
+    //}
 
     inputMap.clear();
     outputMap.clear();
@@ -362,9 +362,9 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     #endif
     manager.copy(*outLogitsSlice, *outLogitsHost);
 
-    auto size_tokens = outLogitsHost->getSize();
-    auto data_tokens = static_cast<int32_t*>(outLogitsHost->data());
-    //#ifndef NDEBUG
+    #ifndef NDEBUG
+        auto size_tokens = outLogitsHost->getSize();
+        auto data_tokens = static_cast<int32_t*>(outLogitsHost->data());
         printf("outLogitsHost data: ");
         for (size_t i = 0; i < size_tokens; i++) {
             TLLM_LOG_DEBUG("outLogits data: %d", data_tokens[i]);
@@ -372,7 +372,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
         }
         printf("\n");
         TLLM_LOG_INFO("outLogitsHost shape: %s", ITensor::toString(outLogitsHost->getShape()).c_str());
-    //#endif
+    #endif
 }
 
 TrtLocalTransformer::TensorPtr TrtLocalTransformer::getOutLogitsHost()

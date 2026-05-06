@@ -52,31 +52,24 @@ mlp_map = {
 
 
 def _runtime_decoder_num_vocabs(config: PretrainedConfig) -> int:
-    """Packed decoder stream count; must match ``ModelConfig::getNumVocabs()`` (C++).
+    """Packed decoder stream count used for the embedding view/mean in the main decoder.
 
-    C++ uses ``len(vocab_sizes) / stacking_factor`` with default ``stacking_factor`` of 2 when
-    loading ``config.json``. The embedding view/mean must use the same divisor as the runtime
-    flat ``input_ids`` layout (``num_tokens * getNumVocabs()``).
+    NeMo's embed_audio_tokens sums ALL (num_codebooks * stacking_factor) embeddings into ONE
+    decoder position and divides by that count. To match this, num_vocabs must equal the total
+    number of embedding slots (num_codebooks * stacking_factor = len(vocab_sizes)), NOT the
+    per-frame codebook count (len(vocab_sizes) / stacking_factor).
+
+    With num_vocabs=len(vocab_sizes)=16: each step's 16 tokens (8 codebooks * 2 frames) form
+    one averaged position — exactly matching NeMo's (sum of 16 embeddings) / 16.
+
+    NOTE: The C++ ModelConfig::getNumVocabs() returns len(vocab_sizes)/stacking_factor=8 and
+    is used for LT codebook sizing. The engine's internal num_vocabs (this value=16) controls
+    embedding grouping and is independent of the C++ LT codebook count.
     """
     vs = getattr(config, "vocab_sizes", None)
     if not vs:
         return 1
-    raw = len(vs)
-    stacking = getattr(config, "stacking_factor", None)
-    if stacking is None:
-        stacking = getattr(config, "stackingFactor", None)
-    if stacking is None:
-        stacking = 1
-    if stacking <= 0:
-        stacking = 1
-    if raw % stacking != 0:
-        raise ValueError(
-            f"len(vocab_sizes)={raw} must be divisible by stacking_factor={stacking} "
-            "(align with TensorRT-LLM ModelConfig::getNumVocabs / executor input layout). "
-            "Use stacking_factor=1 when each vocab_sizes entry is one interleaved stream.")
-    print(f"stacking: {stacking}")
-    n = raw // stacking
-    return n if n > 0 else 1
+    return len(vs)  # 16 total (8 codebooks * 2 stacking frames)
 
 COMPUTE_SCORES_FROM_LAYERS = [4, 6, 10]
 APPLY_PRIOR_TO_LAYERS = [4, 5, 6, 7, 8, 9, 10]
