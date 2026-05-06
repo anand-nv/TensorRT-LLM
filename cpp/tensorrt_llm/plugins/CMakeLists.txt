@@ -80,7 +80,8 @@ set(PLUGIN_LISTS
     lowLatencyGemmSwigluPlugin
     qserveGemmPlugin
     cudaStreamPlugin
-    gemmAllReducePlugin)
+    gemmAllReducePlugin
+    categoricalSamplingPlugin)
 
 foreach(PLUGIN_ITER ${PLUGIN_LISTS})
   include_directories(${PLUGIN_ITER})
@@ -91,6 +92,9 @@ if(ENABLE_MULTI_DEVICE)
   include_directories(ncclPlugin)
   add_subdirectory(ncclPlugin)
 endif()
+
+# Categorical sampling plugin: kernel headers live one level deeper
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/categoricalSamplingPlugin/cuda_kernel/include)
 include_directories(common)
 add_subdirectory(common)
 
