@@ -6,7 +6,9 @@
 // Accepts unnormalized probabilities and normalizes them on-the-fly
 // Uses clock() for non-reproducible random seeding
 // FP16 version for memory efficiency
-__global__ void categoricalSamplingKernel(half const* probs, int* output, int batch_size, int vocab_size)
+__global__ void categoricalSamplingKernel(
+    half const* probs, int* output, int batch_size, int vocab_size,
+    unsigned long long host_seed)
 {
     int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (batch_idx >= batch_size*blockDim.x-1)
@@ -14,18 +16,11 @@ __global__ void categoricalSamplingKernel(half const* probs, int* output, int ba
         return;
     }
 
-    // Reproducible per-call seed: hash the first 16 input probability bits so different
-    // codebooks/steps (which have different distributions) get different seeds, while
-    // identical inputs across runs produce the same seed. Avoids the clock64()
-    // non-determinism that biased some runs into degenerate basins.
+    // host_seed is fresh entropy generated in enqueue() via std::random_device so
+    // every call produces a different random sequence even for identical inputs.
+    // Per-thread offset uses a large prime so threads don't correlate.
     half const* prob_row = probs + batch_idx * vocab_size;
-    unsigned long long seed = 12345ULL + static_cast<unsigned long long>(batch_idx);
-    int const hash_bits = vocab_size < 16 ? vocab_size : 16;
-    for (int i = 0; i < hash_bits; ++i)
-    {
-        unsigned short bits = __half_as_ushort(prob_row[i]);
-        seed = seed * 6364136223846793005ULL + static_cast<unsigned long long>(bits);
-    }
+    unsigned long long seed = host_seed + (unsigned long long)batch_idx * 6364136223846793005ULL;
     curandState localState;
     curand_init(seed, 0, 0, &localState);
 
@@ -89,10 +84,12 @@ __global__ void categoricalSamplingKernel(half const* probs, int* output, int ba
 }
 
 // Host function implementation
-void categoricalSampling(half const* probs, int* output, int batch_size, int vocab_size, cudaStream_t stream)
+void categoricalSampling(half const* probs, int* output, int batch_size, int vocab_size,
+    cudaStream_t stream, unsigned long long host_seed)
 {
     int const threads_per_block = vocab_size;
     int const num_blocks = (batch_size + threads_per_block - 1) / threads_per_block;
 
-    categoricalSamplingKernel<<<num_blocks, threads_per_block, 0, stream>>>(probs, output, batch_size, vocab_size);
+    categoricalSamplingKernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        probs, output, batch_size, vocab_size, host_seed);
 }

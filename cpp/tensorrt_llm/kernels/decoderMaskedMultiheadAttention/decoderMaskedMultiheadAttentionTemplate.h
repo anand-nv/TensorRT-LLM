@@ -1529,11 +1529,18 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     float const kv_scale_quant_orig_f = (ENABLE_8BITS_KV_CACHE ? params.kv_scale_quant_orig[0] : 1.0f);
     convert_from_float(&k_scale_quant_orig, k_scale_quant_orig_f);
     convert_from_float(&kv_scale_orig_quant, (ENABLE_8BITS_KV_CACHE ? params.kv_scale_orig_quant[0] : 1.0f));
-    // parameters related to attention prior
-    int focus;
+    // parameters related to attention prior.
+    // Negative encoding sentinel: focus_raw < 0 means "this is the request's first generation
+    // step — do NOT apply the prior mask, but still write scores at [decoded_focus, decoded_focus+L)
+    // so the host can seed focus from the model's natural (unmasked) attention".
+    // decoded_focus = -(focus_raw + 1).
+    int focus = 0;
+    bool apply_prior_mask = false;
     if (params.attention_prior_focus != nullptr)
     {
-        focus = params.attention_prior_focus[batch_beam_idx];
+        int const focus_raw = params.attention_prior_focus[batch_beam_idx];
+        apply_prior_mask = (focus_raw >= 0);
+        focus = apply_prior_mask ? focus_raw : -(focus_raw + 1);
     }
     bool const store_scores = params.attention_prior_scores != nullptr;
     float* scores_ptr = nullptr;
@@ -2296,13 +2303,18 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             float prob = qk_smem[ti] * inv_sum;
             if (DO_CROSS_ATTENTION && params.attention_prior_focus != nullptr)
             {
-                // do the masking to the prob
-                if (ti < (focus - params.attention_prior_window_left)
-                    || ti > (focus + params.attention_prior_window_right))
+                // Apply the prior mask only when apply_prior_mask is true.
+                // When false (negative-sentinel encoding for a request's first generation step),
+                // we still go through this branch so the second loop runs and writes scores,
+                // but we skip the *= 0.1f attenuation. Because no positions are attenuated,
+                // sum_rescale ≈ 1 and the second-loop renormalization is effectively a no-op,
+                // leaving logits_smem and scores at the unmasked-softmax values.
+                if (apply_prior_mask
+                    && (ti < (focus - params.attention_prior_window_left)
+                        || ti > (focus + params.attention_prior_window_right)))
                 {
                     prob *= 0.1f;
                 }
-                //printf("first loop ti: %d, prob: %f, qk_smem[ti]: %f, inv_sum: %f\n", ti, prob, qk_smem[ti], inv_sum);
 
                 // store back
                 qk_smem[ti] = prob;
@@ -2341,6 +2353,10 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
         for (int ti = tidx; ti <= kv_loop_length; ti += THREADS_PER_BLOCK)
         {
             float prob = qk_smem[ti] * inv_sum_rescale;
+            // On the sentinel (first) step apply_prior_mask=false and focus=0.
+            // Write scores starting from 0 so processAttentionPriorScores can
+            // find the model's natural attention peak across the first lookahead
+            // positions — matching NeMo's unconstrained step-0 attention capture.
             if (store_scores && ti >= focus && ti < focus + params.attention_prior_lookahead)
             {
                 scores_ptr[ti - focus] = prob;

@@ -16,6 +16,7 @@
 
 #include "tensorrt_llm/runtime/decoderState.h"
 #include "tensorrt_llm/batch_manager/llmRequest.h"
+#include "tensorrt_llm/common/logger.h"
 #include "tensorrt_llm/kernels/decodingCommon.h"
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 
@@ -534,7 +535,7 @@ TensorPtr DecoderState::getLogProbs(SizeType32 batchIdx) const
 TensorPtr DecoderState::getSequenceLengths() const
 {
     TLLM_LOG_TRACE("%s start", __PRETTY_FUNCTION__);
-    TLLM_LOG_INFO("mJointDecodingOutput->lengths: %d", mJointDecodingOutput->lengths);
+    TLLM_LOG_DEBUG("mJointDecodingOutput->lengths: %d", mJointDecodingOutput->lengths);
     return mJointDecodingOutput->lengths;
 }
 

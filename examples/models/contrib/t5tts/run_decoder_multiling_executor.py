@@ -1,12 +1,10 @@
-# Same workspace / PyTorch ABI bootstrap as run_decoder_multiling.py
 import os
 import sys
 import subprocess
+import datetime
+from pathlib import Path
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-#_workspace_root = os.path.abspath(os.path.join(_script_dir, os.pardir, os.pardir, os.pardir, os.pardir))
-#if os.path.isdir(os.path.join(_workspace_root, "tensorrt_llm")):
-#    sys.path.insert(0, _workspace_root)
 
 
 def _ensure_c10_shim():
@@ -18,24 +16,12 @@ def _ensure_c10_shim():
                 import torch as _torch
                 _torch_lib = os.path.join(os.path.dirname(_torch.__file__), "lib")
                 subprocess.run(
-                    [
-                        "g++",
-                        "-shared",
-                        "-fPIC",
-                        "-o",
-                        _shim_so,
-                        _src,
-                        "-L" + _torch_lib,
-                        "-lc10_cuda",
-                        "-Wl,-rpath," + _torch_lib,
-                    ],
-                    check=True,
-                    timeout=60,
-                    cwd=_script_dir,
+                    ["g++", "-shared", "-fPIC", "-o", _shim_so, _src,
+                     "-L" + _torch_lib, "-lc10_cuda", "-Wl,-rpath," + _torch_lib],
+                    check=True, timeout=60, cwd=_script_dir,
                 )
             except Exception:
                 return
-    print("Shim so: ", _shim_so)
     if os.path.isfile(_shim_so):
         import ctypes
         try:
@@ -47,13 +33,32 @@ def _ensure_c10_shim():
 import torch  # noqa: E402
 _ensure_c10_shim()
 
-
-import datetime
-from pathlib import Path
-
 import numpy as np
+import soundfile as sf
 from tensorrt_llm.bindings import GptJsonConfig
 from tensorrt_llm.bindings import executor as trtllm
+
+
+def load_codec(codec_path):
+    from nemo.collections.tts.models import AudioCodecModel
+    cfg = AudioCodecModel.restore_from(codec_path, return_config=True)
+    if hasattr(cfg, "use_scl_loss"):
+        cfg.use_scl_loss = False
+    codec = AudioCodecModel.restore_from(codec_path, strict=False, override_config_path=cfg)
+    return codec.cuda().eval()
+
+
+def codes_to_audio(codec, codes_np):
+    C, T = codes_np.shape
+    if T == 0:
+        return np.zeros(0, dtype=np.float32), int(codec.output_sample_rate)
+    codes_t = torch.tensor(codes_np, dtype=torch.long, device="cuda").unsqueeze(0)
+    codes_len = torch.tensor([T], dtype=torch.long, device="cuda")
+    with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.float32):
+        audio, audio_len = codec.decode(tokens=codes_t, tokens_len=codes_len)
+    return audio[0, : audio_len[0].item()].float().cpu().numpy(), int(codec.output_sample_rate)
+# CategoricalSamplingPlugin is now compiled into nvinfer_plugin_tensorrt_llm.so
+# and registered automatically when initTrtLlmPlugins() is called during executor init.
 
 
 def build_executor(
@@ -153,6 +158,8 @@ def run_generate(
                 encoder_input_features=encoder_input_features[i].contiguous(),
                 decoder_context_features=decoder_context_features[i].contiguous(),
                 num_vocabs=num_vocabs,
+                # Hallucination guardrail (default 16; tuning didn't help, see WER experiments):
+                max_end_attend_count=8,
             )
         )
         
@@ -212,6 +219,15 @@ def run_generate(
     #        token_ids.extend([end_id] * (max_seq_len - len(token_ids)))
     for i in range(len(output_ids[0])):
         print(output_ids[0][i])
+
+    # Pad ragged sequences to the same length so torch.tensor gets a rectangular array.
+    max_len = max(len(seq) for seq in output_ids)
+    for seq in output_ids:
+        pad_count = max_len - len(seq)
+        if pad_count > 0:
+            chunk_size = len(seq[0]) if seq else 8
+            seq.extend([[end_id] * chunk_size] * pad_count)
+
     return torch.tensor(output_ids, dtype=torch.int32, device=cuda_device)
 
 
@@ -220,7 +236,8 @@ def main():
 
     engine_dir = os.environ.get(
         "T5TTS_DECODER_ENGINE_DIR",
-        "/data/models/magpie_tts-Magpie-Multilingual/1",
+        #"/home/siddhartht/nemo_models/magpie_may26/final_ckpt/models/magpie_tts-Magpie-Multilingual/1/",
+        "/data/models_r/magpie_tts-Magpie-Multilingual/1/",
     )
     if not os.path.isdir(engine_dir):
         raise FileNotFoundError(
@@ -235,23 +252,48 @@ def main():
     if not executor.can_enqueue_requests():
         raise RuntimeError("This rank cannot enqueue requests (expected rank 0 for single-GPU).")
 
-    num_vocabs = 8 #executor.get_num_vocabs()
+    num_vocabs = 16  # must match engine's num_vocabs so mPromptLen = ctx_positions*num_codebooks*stacking / 16 = 218
 
     batch = torch.load("/home/siddhartht/tts/speechLM/NeMo_2503/batch_prepared.pt")
     encoder_encodings = batch["text_encoder_out"].to(torch.float16).squeeze(0)[:200, :]
+    encoder_encodings = torch.load("/home/siddhartht/tts/speechLM/NeMo_main/text_encoder_out.pt")[0].to(torch.float16)
     print(encoder_encodings.shape)
 
     books_num = 8
-    decoder_encodings = torch.load("/home/siddhartht/nemo_models/spectral_codec/combined_embed.pt")[0][0].to(
-        torch.float16
-    )
+
+    # Load context with BOS appended (218 positions = 217 context + 1 BOS).
+    # The BOS token embedding was pre-computed by compare_executor_vs_nemo.py / embed_audio_tokens.
+    # Provide stacked [cond_features, uncond_features] so runtimeBuffers copies features for
+    # BOTH CFG sequences (conditional uses real context, unconditional uses zeros — both share BOS).
+    bos_context_path = "/home/siddhartht/tts/speechLM/NeMo_main/additional_decoder_input.pt"
+    if not os.path.exists(bos_context_path):
+        raise FileNotFoundError(
+            f"{bos_context_path} not found. Run compare_executor_vs_nemo.py once first to generate it.")
+    cond_features = torch.load(bos_context_path)[0].to(torch.float16)  # (218, 768)
+    #uncond_features = torch.zeros_like(cond_features)
+    #uncond_features[-1] = cond_features[-1]  # Share BOS embedding at last position
+    ## Shape (436, 768): runtimeBuffers copies cond[0:218] and uncond[218:436]
+    #decoder_encodings = torch.cat([cond_features, uncond_features], dim=0)
+    decoder_encodings = cond_features
 
     print(f"Context embeddings: {decoder_encodings.shape} {encoder_encodings.shape}")
-    dummy_context_tokens = torch.tensor([0] * decoder_encodings.shape[0] * books_num, dtype=torch.int64)
+    ctx_positions = cond_features.shape[0]  # 218
+    stacking_factor = 2  # num codec frames per decoder step (must match engine's num_vocabs=16=books_num*stacking_factor)
+    # Engine built with num_vocabs=16 expects ctx_positions*16 flat tokens so the embedding
+    # view/mean groups them as ctx_positions positions of 16 tokens each (matching NeMo's embed_audio_tokens).
+    dummy_context_tokens = torch.tensor([0] * ctx_positions * books_num * stacking_factor, dtype=torch.int64)
     print(f"Dummy context tokens: {dummy_context_tokens.shape} {dummy_context_tokens.dtype}")
     book_size = 2024
 
-    bs = 1
+    codec_path = os.environ.get(
+        "T5TTS_CODEC_PATH",
+        "/home/siddhartht/tts/speechLM/NeMo_2503/models/causal_codec/21fps_causal_codecmodel.nemo",
+    )
+    codec = load_codec(codec_path) if os.path.isfile(codec_path) else None
+    if codec is None:
+        print(f"[warn] codec not found at {codec_path}; skipping wav output")
+
+    bs = 1  # CFG reorder is active in trtLocalTransformer.cpp (lines 275-285); bs>1 works correctly.
     for run_idx in range(1):
         with torch.no_grad():
             outputs = run_generate(
@@ -275,12 +317,17 @@ def main():
         print(f"Output tokens {output_ids.shape}", flush=True)
 
         prefix_len = dummy_context_tokens.shape[0]
+        stacking_factor = 2  # num codec frames per decoder step
         for bi in range(output_ids.shape[0]):
             batch_output_ids = output_ids[bi]
             batch_output_ids = batch_output_ids.reshape(-1, books_num)
             #print(f"Final output tokens shape in batch {bi}: {batch_output_ids.shape}", flush=True)
-            for i in range(books_num):
-                batch_output_ids[:, i] -= book_size * i
+            # Each decoder step emits stacking_factor rows (one per codec frame).
+            # Frame f uses audio_embeddings[f*books_num .. (f+1)*books_num-1], so
+            # codebook i of frame f has vocab offset (i + f*books_num) * book_size.
+            for f in range(stacking_factor):
+                for i in range(books_num):
+                    batch_output_ids[f::stacking_factor, i] -= book_size * (i + f * books_num)
 
             eos_token = 2017
             print("batch_output_ids: ", batch_output_ids, output_ids.shape)
@@ -291,7 +338,14 @@ def main():
                     break
 
             print(f"Final output tokens shape after removing EOS in batch {bi}: {batch_output_ids.shape}", flush=True)
-            np.save(f"output_ids_{run_idx}_{bi}.npy", batch_output_ids.T)
+            codes = batch_output_ids.T  # (books_num, T)
+            np.save(f"output_ids_{run_idx}_{bi}.npy", codes)
+
+            if codec is not None:
+                audio, sr = codes_to_audio(codec, codes)
+                wav_path = f"output_ids_{run_idx}_{bi}.wav"
+                sf.write(wav_path, audio, sr)
+                print(f"  wrote {wav_path}  ({len(audio)/sr:.2f}s @ {sr} Hz)", flush=True)
 
     executor.shutdown()
 

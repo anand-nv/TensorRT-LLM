@@ -6,7 +6,9 @@
 // Accepts unnormalized probabilities and normalizes them on-the-fly
 // Uses clock() for non-reproducible random seeding
 // FP16 version for memory efficiency
-__global__ void categoricalSamplingKernel(half const* probs, int* output, int batch_size, int vocab_size)
+__global__ void categoricalSamplingKernel(
+    half const* probs, int* output, int batch_size, int vocab_size,
+    unsigned long long host_seed)
 {
     int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (batch_idx >= batch_size*blockDim.x-1)
@@ -14,10 +16,10 @@ __global__ void categoricalSamplingKernel(half const* probs, int* output, int ba
         return;
     }
 
-    // Initialize random state for this thread using clock for unique seed
-    // This provides non-reproducible randomness which is sufficient for sampling
+    // Use host-supplied entropy so each enqueue() call gets a different seed.
+    // Per-thread offset uses a large prime multiplier so threads don't correlate.
     curandState localState;
-    unsigned long long seed = clock64() + batch_idx;
+    unsigned long long seed = host_seed + (unsigned long long)batch_idx * 6364136223846793005ULL;
     curand_init(seed, 0, 0, &localState);
 
     // Generate uniform random number [0, 1)
@@ -81,10 +83,12 @@ __global__ void categoricalSamplingKernel(half const* probs, int* output, int ba
 }
 
 // Host function implementation
-void categoricalSampling(half const* probs, int* output, int batch_size, int vocab_size, cudaStream_t stream)
+void categoricalSampling(half const* probs, int* output, int batch_size, int vocab_size,
+    cudaStream_t stream, unsigned long long host_seed)
 {
     int const threads_per_block = vocab_size;
     int const num_blocks = (batch_size + threads_per_block - 1) / threads_per_block;
 
-    categoricalSamplingKernel<<<num_blocks, threads_per_block, 0, stream>>>(probs, output, batch_size, vocab_size);
+    categoricalSamplingKernel<<<num_blocks, threads_per_block, 0, stream>>>(
+        probs, output, batch_size, vocab_size, host_seed);
 }

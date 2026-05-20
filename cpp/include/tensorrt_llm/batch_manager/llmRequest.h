@@ -1318,6 +1318,15 @@ public:
         return mAttentionPriorIdx.value();
     }
 
+    // Non-mutating check: has setAttentionPriorIdx been called yet?
+    // Used by runtimeBuffers to detect a request's first generation step (no prior scores yet),
+    // so the kernel can be told to skip masking on that step while still computing scores
+    // to seed the focus index from the model's natural attention.
+    [[nodiscard]] bool hasAttentionPriorIdx() const
+    {
+        return mAttentionPriorIdx.has_value();
+    }
+
     void setEncoderOutputHost(TensorPtr encoderOutputHost)
     {
         mEncoderOutputHost = std::move(encoderOutputHost);

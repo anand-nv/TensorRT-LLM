@@ -41,6 +41,7 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
+#include <unordered_map>
 #include <vector>
 
 using namespace tensorrt_llm::runtime;
@@ -874,13 +875,22 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
         {
             // set to zero attention prior scores, so scores from different layers can be accumulated
             manager.setMem(*attentionPriorScores, 0);
-            // copy focus indices from llm requests to a buffer
+            // copy focus indices from llm requests to a buffer.
+            // Encoding: a non-negative value F means "apply mask centered at F, store scores at [F, F+lookahead)".
+            // A negative value -(F+1) means "no mask on this step, but still store scores at [F, F+lookahead)" —
+            // used for a request's very first generation step so the model's natural cross-attention
+            // (un-distorted by the prior) is captured to seed the focus index from step 2 onwards.
+            // This matches NeMo's behaviour where attn_prior=None on the first decoder step.
+            constexpr int kInitialFocus = 1;
             std::vector<int> focus_lst(numContextRequests, 0);
             for (auto const& llmReq : genRequests)
             {
+                bool const firstGenStep = !llmReq->hasAttentionPriorIdx();
+                int const encoded = firstGenStep ? -(kInitialFocus + 1)
+                                                 : static_cast<int>(llmReq->getAttentionPriorIdx(modelConfig));
                 for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++)
                 {
-                    focus_lst.push_back(llmReq->getAttentionPriorIdx(modelConfig));
+                    focus_lst.push_back(encoded);
                 }
             }
             manager.copy(focus_lst.data(), *attentionPriorFocus, runtime::MemoryType::kCPU);
@@ -1071,9 +1081,21 @@ void RuntimeBuffers::processAttentionPriorScores(
     // for each generation request, analyze scores and set the attention prior idx
     size_t scoresOffset = numContextRequests * attentionPriorLookahead;
     auto* scoresHostPtr = bufferCast<float>(*scoresHost);
+
+    // Per-request stuck-focus counter: tracks consecutive steps where focus did not advance.
+    // Mirrors NeMo's attended_timestep_counter penalisation (penalise if attended >=10 times).
+    // Keyed by request ID; freed when the request is no longer in genRequests.
+    static thread_local std::unordered_map<uint64_t, int> stuckCounters;
+    constexpr int kMaxStuckSteps = 10; // force +1 advance after this many no-advance steps
+
     for (auto const& llmReq : genRequests)
     {
-        size_t prevPriorIdx = llmReq->getAttentionPriorIdx(modelConfig);
+        // First-gen-step seeding: if no focus was set yet, the kernel ran without masking
+        // (sentinel = -(initial+1)) and wrote scores at [initial, initial+lookahead).
+        // Use the argmax of those scores to seed focus, exactly the way subsequent steps work.
+        constexpr int kInitialFocus = 1;
+        size_t prevPriorIdx
+            = llmReq->hasAttentionPriorIdx() ? llmReq->getAttentionPriorIdx(modelConfig) : kInitialFocus;
         float maxScore = scoresHostPtr[scoresOffset];
         int idxShift = 0;
         for (int i = 1; i < attentionPriorLookahead; i++)
@@ -1083,8 +1105,24 @@ void RuntimeBuffers::processAttentionPriorScores(
                 maxScore = scoresHostPtr[scoresOffset + i];
                 idxShift = i;
             }
-            TLLM_LOG_INFO("prevPriorIdx: %d, idxShift: %d, maxScore: %f, scoresHostPtr[scoresOffset + i]: %f",
-                prevPriorIdx, idxShift, maxScore, scoresHostPtr[scoresOffset + idxShift]);
+        }
+
+        // Stuck-focus detection: if the argmax keeps returning 0 (focus not advancing),
+        // force a +1 step after kMaxStuckSteps consecutive no-advance iterations.
+        // This matches NeMo's penalisation of positions attended >= 10 times.
+        uint64_t const reqId = static_cast<uint64_t>(llmReq->mRequestId);
+        if (idxShift == 0)
+        {
+            stuckCounters[reqId]++;
+            if (stuckCounters[reqId] >= kMaxStuckSteps)
+            {
+                idxShift = 1;
+                stuckCounters[reqId] = 0;
+            }
+        }
+        else
+        {
+            stuckCounters.erase(reqId);
         }
 
         llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);

@@ -16,6 +16,9 @@
  */
 
 #include <algorithm>
+#include <chrono>
+#include <cstring>
+#include <random>
 
 #include "tensorrt_llm/batch_manager/trtLocalTransformer.h"
 
@@ -65,9 +68,10 @@ TrtLocalTransformer::TrtLocalTransformer(
     mstackingFactor = modelConfig.getStackingFactor();
     mRuntime->addContext(contextId);
     auto& manager = getBufferManager();
-    auto const statesType = mRuntime->getEngine().getTensorDataType(kInHiddenStatesTensorName);
-    inHiddenStates = manager.emptyTensor(MemoryType::kGPU, statesType);
-    inHiddenStatesHost = manager.emptyTensor(MemoryType::kCPU, statesType);
+    // Cache static engine descriptors at construction — they don't change per step.
+    mHiddenStatesType = mRuntime->getEngine().getTensorDataType(kInHiddenStatesTensorName);
+    inHiddenStates = manager.emptyTensor(MemoryType::kGPU, mHiddenStatesType);
+    inHiddenStatesHost = manager.emptyTensor(MemoryType::kCPU, mHiddenStatesType);
     outLogits = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     outLogitsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
@@ -123,8 +127,20 @@ TrtLocalTransformer::TrtLocalTransformer(
     manager.setZero(*mFinishReasonsHost);
     manager.setZero(*mFinishedSumHost);
     
-    TLLM_LOG_INFO("TrtLocalTransformer constructor completed successfully. Created %zu decoder buffers, %zu slot decoder buffers", 
+    TLLM_LOG_INFO("TrtLocalTransformer constructor completed successfully. Created %zu decoder buffers, %zu slot decoder buffers",
         mDecoderBuffers.size(), mSlotDecoderBuffers.size());
+
+    // Pre-allocate GPU/CPU buffers at max batch size (CFG doubles batch, so *2).
+    // Avoids one GPU/CPU malloc per run() call on the hot path; stable addresses also
+    // enable CUDA-graph capture of the enqueueV3 + D2H copy below.
+    mMaxBatchSize = maxBatchSize;
+    auto const maxBufBatch = maxBatchSize * 2;
+    mInHiddenStatesBuf  = manager.gpu(ITensor::makeShape({maxBufBatch, hiddenSize}), mHiddenStatesType);
+    mOutLogitsBuf       = manager.gpu(ITensor::makeShape({maxBufBatch, numTokens * mstackingFactor}),
+                                      nvinfer1::DataType::kINT32);
+    mOutLogitsHostBuf   = manager.cpu(ITensor::makeShape({maxBufBatch, numTokens * mstackingFactor}),
+                                      nvinfer1::DataType::kINT32);  // pre-alloc avoids per-step CPU malloc
+    mReorderedStatesBuf = manager.gpu(ITensor::makeShape({maxBufBatch, hiddenSize}), mHiddenStatesType);
 }
 
 TrtLocalTransformer::~TrtLocalTransformer()
@@ -135,8 +151,6 @@ void TrtLocalTransformer::HandleLogits(
     RequestVector const& contextRequests,
     RequestVector const& generationRequests) {
     // forward the logits to the decoder buffers
-    TLLM_LOG_INFO("numContextRequests: %d", contextRequests.size());
-    TLLM_LOG_INFO("numGenerationRequests: %d", generationRequests.size());
     auto numFrames = 1;
     for (auto const& requests : {contextRequests, generationRequests})
     {
@@ -149,15 +163,10 @@ void TrtLocalTransformer::HandleLogits(
 
 
                 TensorPtr logitsView = ITensor::slice(outLogits, tensor_offset, numFrames);
-                TLLM_LOG_INFO("logitsView shape: %s", ITensor::toString(logitsView->getShape()).c_str());
                 auto decoderLogits = ITensor::view(logitsView, ITensor::makeShape({1, 1}));
-                TLLM_LOG_INFO("decoderLogits shape: %s", ITensor::toString(decoderLogits->getShape()).c_str());
-
-
 
                 auto& decodingOutput = mDecoderBuffers.at(seqSlot)->getJointDecodingOutput();
                 auto tokensDest = ITensor::slice(decodingOutput.newTokensSteps, tensor_offset, numFrames);
-                TLLM_LOG_INFO("decoderBuffer->newTokensSteps shape: %s", ITensor::toString(tokensDest->getShape()).c_str());
                 mRuntime->getBufferManager().copy(*decoderLogits, *tokensDest);
                 batchIndex += numFrames;
             }
@@ -199,12 +208,9 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     auto const numRequests = (int)(contextRequests.size() + generationRequests.size());
 
     auto& manager = getBufferManager();
-    auto const statesType = mRuntime->getEngine().getTensorDataType(kInHiddenStatesTensorName);
-    inHiddenStates = manager.gpu(ITensor::makeShape({batchSize, hiddenSize}), statesType);
-
-    // Output buffer batch dim must match hidden states (CFG doubles batch). Second dim is an upper bound;
-    // setOutputTensors reshapes logits to the engine-inferred width (may be numTokens without stacking).
-    outLogits = manager.gpu(ITensor::makeShape({batchSize, numTokens * mstackingFactor}), nvinfer1::DataType::kINT32);
+    // Re-use pre-allocated GPU buffers — slice to actual batch size to avoid per-step malloc.
+    inHiddenStates = ITensor::slice(mInHiddenStatesBuf, 0, batchSize);
+    outLogits      = ITensor::slice(mOutLogitsBuf,      0, batchSize);
 
     // for context requests, copy the hidden states into the input buffer
     SizeType32 batchIndex{0};
@@ -273,7 +279,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     //
     // Reorder to non-interleaved so the engine computes correct CFG pairs.
     if (cfgMult == 2) {
-        TensorPtr reorderedStates = manager.gpu(ITensor::makeShape({batchSize, hiddenSize}), statesType);
+        TensorPtr reorderedStates = ITensor::slice(mReorderedStatesBuf, 0, batchSize);
         for (SizeType32 i = 0; i < numRequests; i++) {
             // Even rows (2i)   → conditional half (rows 0..N-1)
             manager.copy(*ITensor::slice(inHiddenStates, 2 * i, 1),
@@ -287,36 +293,11 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
 
     sync_check_cuda_error(mRuntime->getStream().get());
 
-    // Dump inHiddenStates to /tmp for comparison with NeMo dec_output.
-    // Only save the first 3 calls (context + first 2 gen steps) to avoid filling disk.
-    // Format: raw float16 (half) elements, shape (batchSize, hiddenSize).
-    //{
-    //    static int sDumpCount = 0;
-    //    if (sDumpCount < 3) {
-    //        auto hostDump = manager.cpu(inHiddenStates->getShape(), statesType);
-    //        manager.copy(*inHiddenStates, *hostDump);
-    //        mRuntime->getStream().synchronize();
-    //        // element size in bytes: fp16=2, fp32=4
-    //        size_t const elemBytes = (statesType == nvinfer1::DataType::kFLOAT) ? 4u : 2u;
-    //        char path[256];
-    //        snprintf(path, sizeof(path),
-    //            "/tmp/lt_hidden_states_%d_nreq%d_bs%d_h%d_fp%zu.bin",
-    //            sDumpCount, numRequests, batchSize, hiddenSize, elemBytes * 8);
-    //        FILE* f = fopen(path, "wb");
-    //        if (f) {
-    //            fwrite(hostDump->data(), hostDump->getSize() * elemBytes, 1, f);
-    //            fclose(f);
-    //            printf("Dumped inHiddenStates[%d] shape=(%d,%d) dtype=fp%zu to %s\n",
-    //                sDumpCount, batchSize, hiddenSize, elemBytes * 8, path);
-    //        }
-    //        sDumpCount++;
-    //    }
-    //}
-
     inputMap.clear();
     outputMap.clear();
     // always needs the hidden states as input
     inputMap.insert_or_assign(kInHiddenStatesTensorName, inHiddenStates);
+
     // puts logits into the same buffer
     outputMap.insert_or_assign(kOutLogitsTensorName, outLogits);
     // provide additional input - previously generated tokens
@@ -331,48 +312,27 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     mRuntime->setInputTensors(contextId, inputMap);
     mRuntime->setOutputTensors(contextId, outputMap);
 
-    // Host logits must match the reshaped GPU tensor (engine last dim can differ from numTokens*mstackingFactor).
+    // Check actual logits width after setOutputTensors.
     auto const& logitsShape = outLogits->getShape();
     TLLM_CHECK_WITH_INFO(logitsShape.nbDims >= 2 && logitsShape.d[1] > 0,
         "Unexpected local transformer logits shape: %s", ITensor::toString(logitsShape).c_str());
-    outLogitsHost = manager.cpu(ITensor::makeShape({numRequests, logitsShape.d[1]}), nvinfer1::DataType::kINT32);
+    auto const logitsWidth = static_cast<SizeType32>(logitsShape.d[1]);
 
-    auto enqueueSuccessful = mRuntime->executeContext(contextId);
-    if (!enqueueSuccessful)
+    // Use pre-allocated host buffer when width matches; fall back to dynamic alloc otherwise.
+    if (logitsWidth == numTokens * mstackingFactor)
     {
-        throw std::runtime_error("Executing local transformer engine failed!");
+        outLogitsHost = ITensor::slice(mOutLogitsHostBuf, 0, numRequests);
     }
-    #ifndef NDEBUG
-        TLLM_LOG_INFO("Enqueue successful");
-        TLLM_LOG_DEBUG("Finished Enqueue");
-        sync_check_cuda_error(mRuntime->getStream().get());
-        TLLM_LOG_DEBUG("Ran Decoder Syncing cuda error");
-        TLLM_LOG_DEBUG("local transformer engine executed");
-        
-        
-        // Copy outLogits to outLogitsHost: first numRequests rows (conditional branch), full inferred width.
-        TLLM_LOG_DEBUG("outLogitsHost shape: %s", ITensor::toString(outLogitsHost->getShape()).c_str());
-        TLLM_LOG_DEBUG("outLogits shape: %s", ITensor::toString(outLogits->getShape()).c_str());
-        TLLM_LOG_DEBUG("Copying outLogits to outLogitsHost (copying first %d rows out of %d, cfgMult=%d)", numRequests, batchSize, cfgMult);
-    #endif
-    auto outLogitsSlice = ITensor::slice(outLogits, 0, numRequests);
-    #ifndef NDEBUG
-    TLLM_LOG_DEBUG("outLogitsSlice shape: %s", ITensor::toString(outLogitsSlice->getShape()).c_str());
-    TLLM_LOG_DEBUG("Copying outLogits to decoder");
-    #endif
-    manager.copy(*outLogitsSlice, *outLogitsHost);
+    else
+    {
+        outLogitsHost = manager.cpu(ITensor::makeShape({numRequests, logitsWidth}), nvinfer1::DataType::kINT32);
+    }
 
-    #ifndef NDEBUG
-        auto size_tokens = outLogitsHost->getSize();
-        auto data_tokens = static_cast<int32_t*>(outLogitsHost->data());
-        printf("outLogitsHost data: ");
-        for (size_t i = 0; i < size_tokens; i++) {
-            TLLM_LOG_DEBUG("outLogits data: %d", data_tokens[i]);
-            printf("%d ", data_tokens[i]);
-        }
-        printf("\n");
-        TLLM_LOG_INFO("outLogitsHost shape: %s", ITensor::toString(outLogitsHost->getShape()).c_str());
-    #endif
+    auto outLogitsSlice = ITensor::slice(outLogits, 0, numRequests);
+
+    if (!mRuntime->executeContext(contextId))
+        throw std::runtime_error("Executing local transformer engine failed!");
+    manager.copy(*outLogitsSlice, *outLogitsHost);
 }
 
 TrtLocalTransformer::TensorPtr TrtLocalTransformer::getOutLogitsHost()
@@ -392,7 +352,7 @@ DecoderInputBuffers& TrtLocalTransformer::getDecoderInputBuffers(SizeType32 micr
 
 std::shared_ptr<runtime::decoder::DecoderState>& TrtLocalTransformer::getDecoderBuffers(SizeType32 vocabId)
 {
-    TLLM_LOG_INFO("Getting decoder buffers for vocabId %d", vocabId);
+    TLLM_LOG_DEBUG("Getting decoder buffers for vocabId %d", vocabId);
     TLLM_CHECK_WITH_INFO(!mDecoderBuffers.empty(), 
         "mDecoderBuffers is empty! This means the constructor did not properly initialize decoder buffers. numTokens=%d", numTokens);
     TLLM_CHECK_WITH_INFO(vocabId < static_cast<SizeType32>(mDecoderBuffers.size()),

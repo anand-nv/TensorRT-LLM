@@ -21,6 +21,7 @@
 #include <cstring>
 #include <cuda_fp16.h>
 #include <iostream>
+#include <random>
 
 using namespace nvinfer1;
 using namespace nvinfer1::plugin;
@@ -265,8 +266,11 @@ int32_t CategoricalSamplingPlugin::enqueue(PluginTensorDesc const* inputDesc, Pl
                   << ", mean=" << (sum / vocabSize) << std::endl;
 #endif
 
-        // Call kernel with clock-based seeding (FP16 version)
-        categoricalSampling(probs, output, batchSize, vocabSize, stream);
+        // Generate fresh entropy per enqueue so sampling is non-deterministic
+        // across calls and across process restarts.
+        static thread_local std::mt19937_64 rng{std::random_device{}()};
+        unsigned long long const host_seed = rng();
+        categoricalSampling(probs, output, batchSize, vocabSize, stream, host_seed);
 
         // Check for kernel errors
         cudaError_t err = cudaGetLastError();

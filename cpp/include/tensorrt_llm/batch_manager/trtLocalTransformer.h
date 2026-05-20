@@ -124,6 +124,17 @@ private:
     TensorMap inputMap;
     TensorMap outputMap;
 
+    // Static engine descriptors cached at construction to avoid per-step engine queries.
+    nvinfer1::DataType mHiddenStatesType{nvinfer1::DataType::kFLOAT};
+
+    // Pre-allocated GPU/CPU buffers at max-batch size to avoid per-step allocations in run().
+    // Sized for maxBatchSize*2 rows (CFG doubles the batch).
+    TensorPtr mInHiddenStatesBuf;
+    TensorPtr mOutLogitsBuf;
+    TensorPtr mOutLogitsHostBuf;
+    TensorPtr mReorderedStatesBuf;
+    SizeType32 mMaxBatchSize{0};
+
     // decoder (sampler) and buffers
     SizeType32 mMaxNumSequences;
     std::shared_ptr<runtime::GptDecoderBatched> mDecoder;
