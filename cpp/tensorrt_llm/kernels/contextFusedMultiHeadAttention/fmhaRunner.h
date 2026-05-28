@@ -20,6 +20,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <tuple>
 #include <vector>
 
@@ -99,6 +100,8 @@ private:
     size_t mTotalDeviceMemory;
     // The class that stores all the kernels.
     FusedMultiHeadAttentionXMMAKernelV2 const* xmmaKernel;
+    // setupLaunchParams/setupKernelParams write member scratch structs used for the launch.
+    std::mutex mRunMutex;
 };
 
 } // namespace kernels

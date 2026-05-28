@@ -20,6 +20,7 @@
 #include "tensorrt_llm/runtime/tllmLogger.h"
 
 #include "tensorrt_llm/plugins/bertAttentionPlugin/bertAttentionPlugin.h"
+#include "tensorrt_llm/plugins/categoricalSamplingPlugin/CategoricalSamplingPlugin.h"
 #include "tensorrt_llm/plugins/doraPlugin/doraPlugin.h"
 #include "tensorrt_llm/plugins/fp8RowwiseGemmPlugin/fp8RowwiseGemmPlugin.h"
 #include "tensorrt_llm/plugins/fusedLayernormPlugin/fusedLayernormPlugin.h"
@@ -299,13 +300,15 @@ extern "C"
 #endif // ENABLE_MULTI_DEVICE
 
         static tensorrt_llm::plugins::DoraPluginCreator doraPluginCreator;
+        static nvinfer1::plugin::CategoricalSamplingPluginCreator categoricalSamplingPluginCreator;
 
         static std::array creators
             = { creatorInterfacePtr(eaglePrepareDrafterInputsPluginCreator),
 #if ENABLE_MULTI_DEVICE
                   creatorInterfacePtr(cpSplitPluginCreator),
 #endif // ENABLE_MULTI_DEVICE
-                  creatorInterfacePtr(doraPluginCreator) };
+                  creatorInterfacePtr(doraPluginCreator),
+                  creatorInterfacePtr(categoricalSamplingPluginCreator) };
 
         nbCreators = creators.size();
         return creators.data();

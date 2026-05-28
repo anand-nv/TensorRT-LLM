@@ -1383,8 +1383,11 @@ __global__ void updateKVCacheForCrossAttention(QKVPreprocessingParams<T, KVCache
     // THe maximum sequence length of encoder and decoder.
     int const max_seq_len = max(decoder_seq_len, encoder_seq_len);
 
-    // Only the first chunk needs to store encoder kv input to the kv cache.
-    bool const store_encoder_kv_cache = (decoder_seq_len == decoder_cache_seq_len);
+    // Cross KV cache reuse is disabled, while self KV may still prepopulate part of the decoder prompt.
+    // In that case the first executed context chunk can start at a nonzero decoder position, so
+    // decoder_seq_len != decoder_cache_seq_len even though the request's cross KV cache is still empty.
+    // Rewriting the encoder KV on each context chunk is idempotent and keeps prepopulated requests correct.
+    bool const store_encoder_kv_cache = !params.generation_phase;
 
     // Offsets and strides.
     int const head_dim_vec_idx = (threadIdx.x % VECS_PER_HEAD);

@@ -135,6 +135,12 @@ bool TrtGptModelInflightBatching::executorConfigIsValid(
         {
             return false;
         }
+        // Context embeddings are part of the effective decoder prompt state, but they are not represented in the
+        // token-based KV reuse key. Reusing such blocks can mix distinct embedded prompts that have identical token IDs.
+        if (modelConfig.useContextEmbeddings())
+        {
+            return false;
+        }
     }
     return true;
 }
@@ -158,6 +164,12 @@ executor::ExecutorConfig TrtGptModelInflightBatching::fixExecutorConfig(
         {
             TLLM_LOG_WARNING(
                 "Fixing executorConfig: KV cache reuse disabled because model was built to return context logits");
+            kvCacheConfig.setEnableBlockReuse(false);
+        }
+        if (modelConfig.useContextEmbeddings())
+        {
+            TLLM_LOG_WARNING(
+                "Fixing executorConfig: KV cache reuse disabled because model uses context embeddings");
             kvCacheConfig.setEnableBlockReuse(false);
         }
 
@@ -2394,15 +2406,18 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
     auto const* const finishReasonsHostData
         = bufferCast<kernels::FinishedState>(*mLocalTransformer->getFinishReasonsHost());
 
-    // Update only requests that ran through the decoder.
     // outLogitsHost rows are ordered: context requests first, then generation requests,
-    // matching the order used in TrtLocalTransformer::run(). Start gen index after context rows.
-    SizeType32 genBatchIdx = static_cast<SizeType32>(scheduledRequests.contextRequests.size());
-    for (auto const& llmReq : scheduledRequests.generationRequests)
+    // matching the order used in TrtLocalTransformer::run(). The local transformer emits
+    // the first codec step for context requests too; append those tokens here so the
+    // next generation iteration feeds the sampled audio token instead of the prompt tail.
+    SizeType32 batchIdx = 0;
+    for (auto const& requests : {scheduledRequests.contextRequests, scheduledRequests.generationRequests})
     {
-        // Always advance genBatchIdx to keep it in sync with outLogitsHost rows,
+        for (auto const& llmReq : requests)
+        {
+        // Always advance batchIdx to keep it in sync with outLogitsHost rows,
         // even when we skip a request below.
-        SizeType32 const batch_idx = genBatchIdx++;
+        SizeType32 const batch_idx = batchIdx++;
 
         if (llmReq->isGenerationCompleteState())
         {
@@ -2604,6 +2619,7 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             {
                 llmReq->setNumPreDecodedTokens(numNewTokens[beam], beam);
             }
+        }
         }
     }
 

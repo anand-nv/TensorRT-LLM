@@ -2359,7 +2359,9 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             // positions — matching NeMo's unconstrained step-0 attention capture.
             if (store_scores && ti >= focus && ti < focus + params.attention_prior_lookahead)
             {
-                scores_ptr[ti - focus] = prob;
+                // All cross-attention head CTAs for this sequence write the same prior-score bins.
+                // Accumulate instead of racing last-writer-wins; the host only needs the argmax.
+                atomicAdd(&scores_ptr[ti - focus], prob);
             }
             convert_from_float(&logits_smem[ti], prob);
         }
@@ -2651,6 +2653,11 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
 #ifdef ENABLE_MULTI_BLOCK_OPTION
     if (MULTI_BLOCK_FLAG)
     {
+        // Every CTA publishes partial_{out,max,sum} through a single per-(B,H)
+        // counter. Make all per-thread global writes visible before thread 0
+        // announces this CTA as complete.
+        __threadfence();
+        __syncthreads();
 
         cuda::atomic_ref<int, cuda::thread_scope_device> count_ref{params.block_counter[bhi]};
         bool last_block{false};
@@ -2813,10 +2820,13 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
             }
 
             // Reset qk_current_smem and block_counter for the next timestep
+            __syncthreads();
             if (tidx == 0)
             {
                 params.block_counter[bhi] = 0;
+                __threadfence();
             }
+            __syncthreads();
         }
     }
 #endif // ENABLE_MULTI_BLOCK_OPTION

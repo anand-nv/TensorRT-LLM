@@ -158,5 +158,3 @@ private:
 };
 
 } // namespace tensorrt_llm::batch_manager
-
-

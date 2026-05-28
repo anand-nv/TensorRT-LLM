@@ -29,6 +29,7 @@
 #include "tensorrt_llm/runtime/utils/debugUtils.h"
 #include "tensorrt_llm/runtime/utils/mpiUtils.h"
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <type_traits>
 
@@ -2686,8 +2687,11 @@ int AttentionOp::initialize() noexcept
         // bertAttentionPlugin input tensors, so that we can change mLaunchParams.force_fp32_acc value in runtime.
         fmhaParams.forceFp32Acc = false;
 
-        // setting attention mask type based on the mask type
-        fmhaParams.setAttentionMaskType(static_cast<std::int8_t>(mMaskType));
+        // Cross-attention context attends over the encoder sequence; using a causal mask here can fully mask query
+        // rows when q_len and kv_len differ.
+        auto const contextFmhaMaskType
+            = isCrossAttention() ? tensorrt_llm::kernels::AttentionMaskType::PADDING : mMaskType;
+        fmhaParams.setAttentionMaskType(static_cast<std::int8_t>(contextFmhaMaskType));
 
         if (isCrossAttention())
         {
@@ -2701,8 +2705,8 @@ int AttentionOp::initialize() noexcept
         }
         else
         {
-            fmhaParams.attentionInputLayout = (mPagedKVCache && mPagedContextFMHA) ? AttentionInputLayout::Q_PAGED_KV
-                                                                                   : AttentionInputLayout::PACKED_QKV;
+            fmhaParams.attentionInputLayout
+                = (mPagedKVCache && mPagedContextFMHA) ? AttentionInputLayout::Q_PAGED_KV : AttentionInputLayout::PACKED_QKV;
         }
         fmhaParams.isSPadded = !mRemovePadding;
         fmhaParams.numQHeads = mNumAttnHeads;

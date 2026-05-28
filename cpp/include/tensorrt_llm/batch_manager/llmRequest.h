@@ -1271,12 +1271,19 @@ public:
 
     void setAttentionPriorIdx(SizeType32 attentionPriorIdx, runtime::ModelConfig const& modelConfig)
     {
-        auto const lastIdx = getEncoderOutputLen() - modelConfig.getAttentionPriorWindowRight() - 1;
-        TLLM_CHECK_WITH_INFO(
-            lastIdx > getLeftOffset(), "Encoder output len should be larger than left offset+right attention window ");
-        if (attentionPriorIdx < getLeftOffset())
+        auto const encoderOutputLen = getEncoderOutputLen();
+        TLLM_CHECK_WITH_INFO(encoderOutputLen > 0, "Encoder output len should be positive for attention prior ");
+
+        auto const leftOffset = std::min(getLeftOffset(), encoderOutputLen - 1);
+        auto const rightWindow = modelConfig.getAttentionPriorWindowRight();
+        auto const lastIdx = encoderOutputLen > rightWindow + 1
+            ? std::max(leftOffset, encoderOutputLen - rightWindow - 1)
+            : leftOffset;
+
+        if (attentionPriorIdx < leftOffset)
         {
             skipTokens += 1;
+            attentionPriorIdx = leftOffset;
         }
         if (attentionPriorIdx > lastIdx)
         {

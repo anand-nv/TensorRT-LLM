@@ -668,6 +668,8 @@ void FusedMHARunnerV2::setTmaDescriptors(MHARunnerParams runnerParams)
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 void FusedMHARunnerV2::run(MHARunnerParams runnerParams)
 {
+    std::lock_guard<std::mutex> lock(mRunMutex);
+
     // Note that we must set the launch params first.
     // Set the launch params.
     setupLaunchParams(runnerParams);

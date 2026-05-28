@@ -19,7 +19,5 @@
  * @note This function uses clock64() for seeding, providing non-reproducible randomness.
  *       Each call will produce different results even with the same input.
  */
-// host_seed must be fresh entropy per call (e.g. from std::random_device) to ensure
-// non-deterministic sampling across process restarts and across calls.
 void categoricalSampling(half const* probs, int* output, int batch_size, int vocab_size,
     cudaStream_t stream, unsigned long long host_seed);

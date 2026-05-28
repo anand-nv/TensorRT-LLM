@@ -41,7 +41,6 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
-#include <unordered_map>
 #include <vector>
 
 using namespace tensorrt_llm::runtime;
@@ -701,22 +700,41 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                     TLLM_CHECK_WITH_INFO(reqFeaturesShape.nbDims >= 2,
                         "Decoder context features must have at least 2 dimensions, but got %d dimensions for request %lu",
                         reqFeaturesShape.nbDims, llmReq->mRequestId);
-                    // If caller provides numSequences * contextChunkSize rows, copy features for every
-                    // CFG sequence (cond + uncond). Otherwise fall back to copying only the first
-                    // (conditional) chunk and leave the rest zero-masked (old behaviour).
+                    // If caller provides per-sequence context features laid out as
+                    // [seq0_full][seq1_full]..., copy the active chunk for every CFG sequence.
+                    // A single contiguous slice is only correct when contextPosition == 0 and the
+                    // chunk spans the whole prompt; chunked context must stride by the per-sequence
+                    // feature length.
                     auto const numSeqs = llmReq->getNumSequences();
-                    auto const totalChunk = contextChunkSize * numSeqs;
-                    bool const hasPerSeqFeatures =
-                        (reqFeaturesShape.d[0] >= contextPosition + totalChunk);
-                    auto const featuresToCopy = hasPerSeqFeatures ? totalChunk : contextChunkSize;
-                    TLLM_CHECK_WITH_INFO(contextPosition + featuresToCopy <= reqFeaturesShape.d[0],
+                    auto const hasPerSeqFeatures = numSeqs > 1 && reqFeaturesShape.d[0] >= numSeqs * llmReq->mPromptLen;
+                    auto const featuresToCopy = hasPerSeqFeatures ? numSeqs * contextChunkSize : contextChunkSize;
+                    TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= reqFeaturesShape.d[0],
                         "Decoder context features [%d, %d], but request is at position %d and chunk size %d (numSeqs=%d)",
                         (int) reqFeaturesShape.d[0], (int) reqFeaturesShape.d[1], contextPosition,
                         contextChunkSize, numSeqs);
-                    // specifying offset and size across 0th dimension
-                    manager.copy(*ITensor::slice(reqFeatures, contextPosition, featuresToCopy),
-                        *ITensor::slice(decoderContextFeatures, tokenIdx, featuresToCopy));
-                    manager.setMem(*ITensor::slice(decoderContextFeaturesMask, tokenIdx, featuresToCopy), 1);
+                    if (hasPerSeqFeatures)
+                    {
+                        auto const perSeqFeatureLen = reqFeaturesShape.d[0] / numSeqs;
+                        TLLM_CHECK_WITH_INFO(contextPosition + contextChunkSize <= perSeqFeatureLen,
+                            "Decoder context features per sequence length %d is too short for position %d and chunk "
+                            "size %d",
+                            (int) perSeqFeatureLen, contextPosition, contextChunkSize);
+                        for (SizeType32 seqIdx = 0; seqIdx < numSeqs; ++seqIdx)
+                        {
+                            auto const srcOffset = seqIdx * perSeqFeatureLen + contextPosition;
+                            auto const dstOffset = tokenIdx + seqIdx * contextChunkSize;
+                            manager.copy(*ITensor::slice(reqFeatures, srcOffset, contextChunkSize),
+                                *ITensor::slice(decoderContextFeatures, dstOffset, contextChunkSize));
+                            manager.setMem(*ITensor::slice(decoderContextFeaturesMask, dstOffset, contextChunkSize), 1);
+                        }
+                    }
+                    else
+                    {
+                        // Old behaviour for callers that only provide the conditional context chunk.
+                        manager.copy(*ITensor::slice(reqFeatures, contextPosition, featuresToCopy),
+                            *ITensor::slice(decoderContextFeatures, tokenIdx, featuresToCopy));
+                        manager.setMem(*ITensor::slice(decoderContextFeaturesMask, tokenIdx, featuresToCopy), 1);
+                    }
                 }
                 tokenIdx += llmReq->getNumSequences() * contextChunkSize;
             }
@@ -882,15 +900,21 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             // (un-distorted by the prior) is captured to seed the focus index from step 2 onwards.
             // This matches NeMo's behaviour where attn_prior=None on the first decoder step.
             constexpr int kInitialFocus = 1;
-            std::vector<int> focus_lst(numContextRequests, 0);
+            // Context rows must not be prior-masked, especially in fused context+generation batches.
+            // Use the same negative sentinel as first generation step: store scores, but do not mask.
+            std::vector<int> focus_lst(numContextRequests, -(kInitialFocus + 1));
             for (auto const& llmReq : genRequests)
             {
                 bool const firstGenStep = !llmReq->hasAttentionPriorIdx();
-                int const encoded = firstGenStep ? -(kInitialFocus + 1)
-                                                 : static_cast<int>(llmReq->getAttentionPriorIdx(modelConfig));
+                int const initialFocus = std::max(kInitialFocus, static_cast<int>(llmReq->getLeftOffset()));
+                int const focus = firstGenStep ? initialFocus : static_cast<int>(llmReq->getAttentionPriorIdx(modelConfig));
+                int const encodedCond = firstGenStep ? -(focus + 1) : focus;
+                int const encodedUncond = -(focus + 1);
                 for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++)
                 {
-                    focus_lst.push_back(encoded);
+                    // Under CFG, NeMo applies the attention prior only to the conditional half.
+                    // The unconditional half receives an all-epsilon prior, which normalizes to no mask.
+                    focus_lst.push_back(llmReq->isCfg() && i == 1 ? encodedUncond : encodedCond);
                 }
             }
             manager.copy(focus_lst.data(), *attentionPriorFocus, runtime::MemoryType::kCPU);
@@ -1082,20 +1106,15 @@ void RuntimeBuffers::processAttentionPriorScores(
     size_t scoresOffset = numContextRequests * attentionPriorLookahead;
     auto* scoresHostPtr = bufferCast<float>(*scoresHost);
 
-    // Per-request stuck-focus counter: tracks consecutive steps where focus did not advance.
-    // Mirrors NeMo's attended_timestep_counter penalisation (penalise if attended >=10 times).
-    // Keyed by request ID; freed when the request is no longer in genRequests.
-    static thread_local std::unordered_map<uint64_t, int> stuckCounters;
-    constexpr int kMaxStuckSteps = 10; // force +1 advance after this many no-advance steps
-
     for (auto const& llmReq : genRequests)
     {
         // First-gen-step seeding: if no focus was set yet, the kernel ran without masking
         // (sentinel = -(initial+1)) and wrote scores at [initial, initial+lookahead).
         // Use the argmax of those scores to seed focus, exactly the way subsequent steps work.
         constexpr int kInitialFocus = 1;
-        size_t prevPriorIdx
-            = llmReq->hasAttentionPriorIdx() ? llmReq->getAttentionPriorIdx(modelConfig) : kInitialFocus;
+        bool const firstPriorStep = !llmReq->hasAttentionPriorIdx();
+        auto const initialFocus = static_cast<size_t>(std::max(kInitialFocus, static_cast<int>(llmReq->getLeftOffset())));
+        size_t prevPriorIdx = firstPriorStep ? initialFocus : llmReq->getAttentionPriorIdx(modelConfig);
         float maxScore = scoresHostPtr[scoresOffset];
         int idxShift = 0;
         for (int i = 1; i < attentionPriorLookahead; i++)
@@ -1107,24 +1126,8 @@ void RuntimeBuffers::processAttentionPriorScores(
             }
         }
 
-        // Stuck-focus detection: if the argmax keeps returning 0 (focus not advancing),
-        // force a +1 step after kMaxStuckSteps consecutive no-advance iterations.
-        // This matches NeMo's penalisation of positions attended >= 10 times.
-        uint64_t const reqId = static_cast<uint64_t>(llmReq->mRequestId);
-        if (idxShift == 0)
-        {
-            stuckCounters[reqId]++;
-            if (stuckCounters[reqId] >= kMaxStuckSteps)
-            {
-                idxShift = 1;
-                stuckCounters[reqId] = 0;
-            }
-        }
-        else
-        {
-            stuckCounters.erase(reqId);
-        }
-
+        // LlmRequest::setAttentionPriorIdx() owns the per-position attend counter and advances
+        // the focus when a position exceeds max_attend_count; avoid duplicate host-side state here.
         llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);
 
         // TODO: remove hardcode of lookahead size

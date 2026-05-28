@@ -1069,7 +1069,10 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             }
             else
             {
-                num_encoder_tokens = inputDesc[getIdx(IdxEntry::CROSS_KV)].dims.d[0];
+                // enqueueImpl splits mixed IFB batches into a context sub-batch and a generation sub-batch.
+                // The encoder output tensor still has rows for the whole scheduled batch, but context FMHA must
+                // only see the packed KV rows for this local context sub-batch.
+                num_encoder_tokens = request_batch_size * max_encoder_context_len;
             }
         }
 
@@ -1160,6 +1163,11 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
                 float* attention_prior_scores_out = static_cast<float*>(outputs[getNbOutputs() - 1]);
                 // advance the prior scores pointer, skipping the space reserved for context requests
                 attention_prior_scores_out += contextNbSeq * mAttentionPriorLookahead;
+                // The decoder cross-attention kernel accumulates head/block contributions with atomicAdd.
+                // TensorRT may allocate this plugin output as an internal tensor, so the runtime-level output
+                // memset is not sufficient to clear it before each enqueue.
+                TLLM_CUDA_CHECK(cudaMemsetAsync(attention_prior_scores_out, 0,
+                    static_cast<size_t>(localNbSeq) * mAttentionPriorLookahead * sizeof(float), stream));
                 enqueue_params.attention_prior_scores = attention_prior_scores_out;
             }
             else
@@ -1169,7 +1177,7 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             if (mApplyAttentionPrior || mComputeAttentionPrior)
             {
                 enqueue_params.attention_prior_focus
-                    = static_cast<int const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]);
+                    = static_cast<int const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]) + seqIdxBeg;
             }
             else
             {

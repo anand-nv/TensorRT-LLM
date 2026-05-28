@@ -261,7 +261,8 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     #ifndef NDEBUG
         TLLM_LOG_INFO("Copying hidden states to local transformer buffer");
     #endif
-    if (generationRequests.size() > 0) {
+    if (generationRequests.size() > 0)
+    {
         TensorPtr genStatesView = ITensor::slice(hiddenStates, frameIndex, generationRequests.size() * cfgMult);
         TensorPtr outGenStatesView = ITensor::slice(inHiddenStates, batchIndex, generationRequests.size() * cfgMult);
         manager.copy(*genStatesView, *outGenStatesView);
@@ -507,4 +508,3 @@ TrtLocalTransformer::TensorPtr TrtLocalTransformer::getFinishedSumHost() const
 }
 
 }// namespace tensorrt_llm::batch_manager
-

@@ -1,44 +1,34 @@
 #include "categorical_sampling.cuh"
+#include <cmath>
 #include <stdio.h>
 
-// Categorical sampling kernel that initializes random states internally using clock
-// Each thread handles one batch element
-// Accepts unnormalized probabilities and normalizes them on-the-fly
-// Uses clock() for non-reproducible random seeding
-// FP16 version for memory efficiency
+// Categorical sampling kernel. Each thread handles one batch element.
+// Accepts unnormalized probabilities and normalizes them on-the-fly.
+// FP16 version for memory efficiency.
 __global__ void categoricalSamplingKernel(
     half const* probs, int* output, int batch_size, int vocab_size,
     unsigned long long host_seed)
 {
     int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (batch_idx >= batch_size*blockDim.x-1)
+    if (batch_idx >= batch_size)
     {
         return;
     }
 
-    // host_seed is fresh entropy generated in enqueue() via std::random_device so
-    // every call produces a different random sequence even for identical inputs.
-    // Per-thread offset uses a large prime so threads don't correlate.
     half const* prob_row = probs + batch_idx * vocab_size;
-    unsigned long long seed = host_seed + (unsigned long long)batch_idx * 6364136223846793005ULL;
-    curandState localState;
-    curand_init(seed, 0, 0, &localState);
-
-    // Generate uniform random number [0, 1)
-    float random_val = curand_uniform(&localState);
 
     // Compute sum of probabilities for normalization (convert to float for accuracy)
     // Also check for negative values which indicate logits were passed instead of probabilities
     float sum = 0.0f;
-    bool has_negative = false;
+    bool has_invalid = false;
     float min_val = 1e6f;
 
     for (int i = 0; i < vocab_size; ++i)
     {
         float val = __half2float(prob_row[i]);
-        if (val < 0.0f)
+        if (!isfinite(val) || val < 0.0f)
         {
-            has_negative = true;
+            has_invalid = true;
         }
         if (val < min_val)
         {
@@ -48,7 +38,7 @@ __global__ void categoricalSamplingKernel(
     }
 
     // Error out if negative probabilities detected
-    if (has_negative)
+    if (has_invalid)
     {
         //printf("ERROR in categoricalSampling: Negative probability detected! min_value=%f, sum=%f\n", min_val, sum);
         //printf("This kernel expects PROBABILITIES (positive values), not LOGITS.\n");
@@ -57,8 +47,15 @@ __global__ void categoricalSamplingKernel(
         return;
     }
 
+    unsigned long long seed = host_seed + (unsigned long long) batch_idx * 6364136223846793005ULL;
+    curandState localState;
+    curand_init(seed, 0, 0, &localState);
+
+    // Generate uniform random number [0, 1)
+    float random_val = curand_uniform(&localState);
+
     // Check for invalid sum
-    if (sum < 0.0f)
+    if (!isfinite(sum) || sum <= 0.0f)
     {
         printf("ERROR in categoricalSampling: Invalid probability sum=%f for batch_idx=%d\n", sum, batch_idx);
         output[batch_idx] = -1;
@@ -87,7 +84,7 @@ __global__ void categoricalSamplingKernel(
 void categoricalSampling(half const* probs, int* output, int batch_size, int vocab_size,
     cudaStream_t stream, unsigned long long host_seed)
 {
-    int const threads_per_block = vocab_size;
+    int const threads_per_block = 256;
     int const num_blocks = (batch_size + threads_per_block - 1) / threads_per_block;
 
     categoricalSamplingKernel<<<num_blocks, threads_per_block, 0, stream>>>(
