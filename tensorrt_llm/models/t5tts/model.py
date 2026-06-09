@@ -1612,9 +1612,10 @@ class T5TTSDecoderModel(PretrainedModel):
             assert len(hidden_states) == 1
             hidden_states = hidden_states[0]
 
-        scores_stacked = stack(all_attention_prior_scores, 0)  # [layers x b*5]
-        mean_scores = mean(scores_stacked, 0)  # [b*5]
-        mean_scores.mark_output("attention_prior_scores")
+        if all_attention_prior_scores:
+            scores_stacked = stack(all_attention_prior_scores, 0)  # [layers x b*5]
+            mean_scores = mean(scores_stacked, 0)  # [b*5]
+            mean_scores.mark_output("attention_prior_scores")
 
         if self.mapping.is_last_pp_rank():
             if self.has_model_final_layernorm:
@@ -1871,7 +1872,7 @@ class T5TTSDecoderModel(PretrainedModel):
                 ]),
             )
         attention_prior_focus = None
-        if remove_input_padding and use_gpt_attention_plugin:
+        if self.config.use_attention_prior and remove_input_padding and use_gpt_attention_plugin:
             focus_dim_range = list(bb_range)
             focus_dim_range[0] = 0  # could be zero if not provided
             attention_prior_focus = Tensor(
