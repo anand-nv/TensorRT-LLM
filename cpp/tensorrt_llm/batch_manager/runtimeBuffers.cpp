@@ -37,6 +37,8 @@
 #include "tensorrt_llm/runtime/runtimeKernels.h"
 #include "tensorrt_llm/runtime/tllmRuntime.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <iterator>
 #include <memory>
@@ -1126,9 +1128,78 @@ void RuntimeBuffers::processAttentionPriorScores(
             }
         }
 
+        // Flat-region forced advance. When the lookahead distribution is too flat to trust
+        // (peak < minConf), the argmax is noise: a small/zero idxShift under-advances (or re-selects
+        // the current focus -> the decoder re-utters it). Force a minimal advance.
+        // NOTE: do NOT scale this by frame_stacking_factor. NeMo's reference advances the focus by
+        // argmax over the lookahead and only nudges +1 on attention sinks (get_most_attended); it
+        // never force-advances by the stacking factor. Default flatAdvance = 1 to match NeMo; the
+        // focus still keeps pace via the argmax-based advance + the per-position sink-advance.
+        // Tunables: TRT_ATTN_PRIOR_MIN_CONF (default 0.30; 0 disables),
+        //           TRT_ATTN_PRIOR_MIN_ADVANCE (default = 1; override to experiment).
+        static float const minConf = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_MIN_CONF");
+            return e != nullptr ? static_cast<float>(std::atof(e)) : 0.30f;
+        }();
+        int const minAdvance = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_MIN_ADVANCE");
+            return e != nullptr ? std::atoi(e) : -1;
+        }();
+        int const flatAdvance = minAdvance > 0 ? minAdvance : 1;
+        // Only force-move the focus when the prior is actually being applied. On the first/sentinel
+        // gen step the kernel runs WITHOUT the mask (apply_prior_mask=false) to capture the model's
+        // natural attention for seeding — forcing there would corrupt that seed. So gate on
+        // !firstPriorStep (prior is set/applied this step). (And processAttentionPriorScores already
+        // early-returns when useAttentionPrior is false, so this never runs in no-prior mode.)
+        bool forcedAdvance = false;
+        if (!firstPriorStep && minConf > 0.0f && maxScore < minConf && idxShift < flatAdvance)
+        {
+            idxShift = flatAdvance;
+            forcedAdvance = true;
+        }
+
+        // Anti-dwell: a CONFIDENT peak pinned on the current focus (idxShift==0 with maxScore>=minConf)
+        // is a stutter the gate above cannot catch — it only fires on LOW confidence. Attention-score
+        // analysis of Hindi/number dwells shows the argmax re-selecting the current position (lookahead
+        // index 0) for several steps at high maxScore (~0.4-0.8), re-uttering the same audio. If this
+        // position has already been held >= maxDwell steps, force-advance regardless of confidence.
+        // Env TRT_ATTN_PRIOR_MAX_DWELL (default 0 = disabled -> max_attend_count stays the only cap).
+        // Tune carefully: too small clips legitimately sustained phonemes (a held vowel spans several
+        // frame-stacked steps at the same focus). This is independent of, and fires earlier than, the
+        // max_attend_count sink-advance in LlmRequest::setAttentionPriorIdx.
+        static int const maxDwell = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_MAX_DWELL");
+            return e != nullptr ? std::atoi(e) : 0;
+        }();
+        int const dwellAtPrev = static_cast<int>(llmReq->getAttentionPriorAttendCount());
+        if (!firstPriorStep && !forcedAdvance && maxDwell > 0 && idxShift == 0 && dwellAtPrev >= maxDwell)
+        {
+            idxShift = flatAdvance;
+            forcedAdvance = true;
+        }
+
         // LlmRequest::setAttentionPriorIdx() owns the per-position attend counter and advances
         // the focus when a position exceeds max_attend_count; avoid duplicate host-side state here.
         llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);
+
+        // [ATTN_PRIOR] Per-step focus trajectory. Grep "[ATTN_PRIOR] step" and compare the
+        // newFocus column against NeMo's text_time_step_attended sequence (magpietts.py).
+        // requestedFocus = prevFocus + argmax(lookahead scores); newFocus may differ if
+        // setAttentionPriorIdx applied clamping or a max_attend_count sink-advance.
+        {
+            std::string scoreStr;
+            for (int i = 0; i < attentionPriorLookahead; i++)
+            {
+                scoreStr += (i ? "," : "") + std::to_string(scoresHostPtr[scoresOffset + i]);
+            }
+            TLLM_LOG_DEBUG(
+                "[ATTN_PRIOR] step reqId=%lu firstStep=%d prevFocus=%zu idxShift=%d forced=%d requestedFocus=%zu "
+                "newFocus=%d maxScore=%.4f encLen=%d leftOffset=%d maxAttend=%d dwell=%d lookahead=%d scores=[%s]",
+                llmReq->mRequestId, static_cast<int>(firstPriorStep), prevPriorIdx, idxShift,
+                static_cast<int>(forcedAdvance), prevPriorIdx + static_cast<size_t>(idxShift),
+                llmReq->getAttentionPriorIdx(modelConfig), maxScore, llmReq->getEncoderOutputLen(),
+                llmReq->getLeftOffset(), llmReq->getMaxAttendCount(), dwellAtPrev, attentionPriorLookahead, scoreStr.c_str());
+        }
 
         // TODO: remove hardcode of lookahead size
         scoresOffset += attentionPriorLookahead * llmReq->getNumSequences();

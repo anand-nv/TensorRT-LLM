@@ -2309,11 +2309,19 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 // but we skip the *= 0.1f attenuation. Because no positions are attenuated,
                 // sum_rescale ≈ 1 and the second-loop renormalization is effectively a no-op,
                 // leaving logits_smem and scores at the unmasked-softmax values.
-                if (apply_prior_mask
-                    && (ti < (focus - params.attention_prior_window_left)
-                        || ti > (focus + params.attention_prior_window_right)))
+                if (apply_prior_mask)
                 {
-                    prob *= 0.1f;
+                    // History BEHIND the focus window: suppress strongly (history_mult, default 0.01 =
+                    // NeMo eps²; set 0 for a hard mask) so the attention cannot snap back to the chunk
+                    // start and re-utter it. Far-FUTURE positions keep the soft 0.1 attenuation.
+                    if (ti < (focus - params.attention_prior_window_left))
+                    {
+                        prob *= params.attention_prior_history_mult;
+                    }
+                    else if (ti > (focus + params.attention_prior_window_right))
+                    {
+                        prob *= 0.1f;
+                    }
                 }
 
                 // store back

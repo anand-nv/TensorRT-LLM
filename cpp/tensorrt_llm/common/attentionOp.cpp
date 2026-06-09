@@ -122,6 +122,7 @@ struct FusedQKVMaskedAttentionDispatchParams
     int attention_prior_lookahead = 5;
     int attention_prior_window_left = 1;
     int attention_prior_window_right = 5;
+    float attention_prior_history_mult = 0.1f;
     int const* memory_length_per_sample = nullptr;
     int max_distance = 0;
     bool block_sparse_attention = false;
@@ -647,6 +648,7 @@ void fusedQKV_masked_attention_dispatch(Multihead_attention_params<T_MMHA, CROSS
         params.attention_prior_lookahead = input_params.attention_prior_lookahead;
         params.attention_prior_window_left = input_params.attention_prior_window_left;
         params.attention_prior_window_right = input_params.attention_prior_window_right;
+        params.attention_prior_history_mult = input_params.attention_prior_history_mult;
     }
 
     // Attention sinks.
@@ -2435,6 +2437,15 @@ int AttentionOp::enqueueGeneration(EnqueueGenerationParams<T> const& params, cud
     {
         dispatch_params.attention_prior_focus = params.attention_prior_focus;
         dispatch_params.apply_attention_prior = mApplyAttentionPrior;
+        // History-suppression multiplier for positions BEHIND the focus window. Matches NeMo's
+        // construct_multi_chunk_prior (eps²=0.01 / hard-0) which prevents the attention snapping back
+        // to the chunk start (the repeat). Legacy kernel value was 0.1 (too weak). Env-tunable:
+        // TRT_ATTN_PRIOR_HISTORY_MULT (default 0.01; 0.1 = legacy, 0.0 = hard mask).
+        static float const s_history_mult = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_HISTORY_MULT");
+            return e != nullptr ? static_cast<float>(std::atof(e)) : 0.01f;
+        }();
+        dispatch_params.attention_prior_history_mult = s_history_mult;
     }
     dispatch_params.memory_length_per_sample = params.encoder_input_lengths;
     dispatch_params.block_sparse_attention = mMaskType == AttentionMaskType::BLOCKSPARSE;

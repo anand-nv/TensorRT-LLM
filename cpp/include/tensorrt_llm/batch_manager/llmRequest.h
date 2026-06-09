@@ -1275,9 +1275,16 @@ public:
         TLLM_CHECK_WITH_INFO(encoderOutputLen > 0, "Encoder output len should be positive for attention prior ");
 
         auto const leftOffset = std::min(getLeftOffset(), encoderOutputLen - 1);
-        auto const rightWindow = modelConfig.getAttentionPriorWindowRight();
-        auto const lastIdx = encoderOutputLen > rightWindow + 1
-            ? std::max(leftOffset, encoderOutputLen - rightWindow - 1)
+        // Focus must reach the final tokens (the byt5 </s> + EOS anchor) so the decoder locks onto
+        // the end and emits a clean EOS, matching NeMo (focus -> encLen-1). The previous
+        // `encoderOutputLen - rightWindow - 1` stopped focus rightWindow(=5) tokens short of the end
+        // (e.g. 90 of 96), so the </s> anchor at ~encLen-2 was never the focus -> end-of-utterance
+        // dwell/repetition, worst for byte-tokenizer langs (vi/fr/it/ko). The kernel masking still
+        // uses attention_prior_window_right; only the focus end-stop is decoupled to a 1-token
+        // margin so focus can advance to the </s> (EOS is covered by the masking window).
+        auto const endMargin = 1;
+        auto const lastIdx = encoderOutputLen > endMargin + 1
+            ? std::max(leftOffset, encoderOutputLen - endMargin - 1)
             : leftOffset;
 
         if (attentionPriorIdx < leftOffset)
@@ -1305,6 +1312,12 @@ public:
         else if (mAttentionPriorCounters[attentionPriorIdx] >= getMaxAttendCount())
         {
             // increment to avoid getting stuck in the same encoder output
+            // [ATTN_PRIOR] dwell/sink-escape: focus held a position >= max_attend_count steps, force-advance.
+            // NeMo's analogue advances at counter>=8 and additionally epsilon-suppresses the prefix at >=10
+            // (construct_inference_prior); TRT only advances and never suppresses history -> compare grep.
+            TLLM_LOG_DEBUG("[ATTN_PRIOR] sink-advance reqId=%lu focus=%d count=%d >= maxAttend=%d -> focus=%d",
+                mRequestId, attentionPriorIdx, mAttentionPriorCounters[attentionPriorIdx], getMaxAttendCount(),
+                attentionPriorIdx + 1);
             setAttentionPriorIdx(attentionPriorIdx + 1, modelConfig);
         }
     }
@@ -1323,6 +1336,23 @@ public:
         // `setAttentionPriorIdx` takes care to avoid getting stuck in the same encoder output,
         // it is expected that `mAttentionPriorCounters[mAttentionPriorIdx]` is always < 8
         return mAttentionPriorIdx.value();
+    }
+
+    // Cumulative attend count for the CURRENT focus position (0 if not yet tracked). Read by the
+    // runtimeBuffers anti-dwell rule to force-advance a confident self-dwell (a stutter) that the
+    // maxScore<minConf forced-advance gate cannot catch. Const / non-mutating.
+    [[nodiscard]] SizeType32 getAttentionPriorAttendCount() const
+    {
+        if (!mAttentionPriorIdx.has_value() || mAttentionPriorCounters.empty())
+        {
+            return 0;
+        }
+        auto const idx = mAttentionPriorIdx.value();
+        if (idx < 0 || static_cast<size_t>(idx) >= mAttentionPriorCounters.size())
+        {
+            return 0;
+        }
+        return mAttentionPriorCounters[idx];
     }
 
     // Non-mutating check: has setAttentionPriorIdx been called yet?
