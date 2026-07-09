@@ -132,6 +132,8 @@ public:
         int32_t cross_kv_length = 0;
         int32_t num_encoder_tokens = 0;
         kernels::MlaParams<T>* mla_param = nullptr;
+        float* attention_prior_scores = nullptr;
+        int32_t const* attention_prior_focus = nullptr;
 
         // optional for separate QKV input, currently only used for context MLA
         T const* k_ptr = nullptr;

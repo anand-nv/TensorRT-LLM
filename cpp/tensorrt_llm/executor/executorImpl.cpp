@@ -1584,10 +1584,8 @@ std::tuple<Executor::Impl::RequestList, double> Executor::Impl::fetchNewRequests
 
                 if (!mEncoderModel && newReq->getEncoderInputFeatures())
                 {
-                    TLLM_LOG_INFO("Allocating buffers for encoder output");
-                    // gpu buffers for passing to the next phase
-                    newReq->allocEncoderOutput(mModel->getBufferManager(), mModel->getLogitDataType());
-                    newReq->allocEncoderHiddenStates(mModel->getBufferManager(), mModel->getLogitDataType());
+                    TLLM_LOG_DEBUG(
+                        "Skipping encoder output allocation; encoder input features will be used as encoder output");
                 }
 
                 // Create the context logits tensor
@@ -1719,9 +1717,28 @@ void Executor::Impl::prepRequestsForEncoderSkip(RequestList& activeRequests)
 
         if (req->isEncoderInitState() && req->getEncoderInputFeatures())
         {
-            TLLM_LOG_INFO("Changing state of request and setting encoder output to skip encoder run");
+            TLLM_LOG_DEBUG("Changing state of request and setting encoder output to skip encoder run");
+            auto encoderInputFeatures = req->getEncoderInputFeatures();
+            TLLM_CHECK_WITH_INFO(
+                encoderInputFeatures, "Encoder input features must be available before skipping encoder run");
+            auto const& shape = encoderInputFeatures->getShape();
+            TLLM_LOG_DEBUG("Using encoder input features directly as encoder output: shape=(%ld,%ld), dtype=%d",
+                shape.nbDims > 0 ? shape.d[0] : -1, shape.nbDims > 1 ? shape.d[1] : -1,
+                static_cast<int>(encoderInputFeatures->getDataType()));
+            TLLM_CHECK_WITH_INFO(encoderInputFeatures->getDataType() == mModel->getLogitDataType(),
+                "Encoder input feature dtype must match decoder engine logit dtype when skipping encoder run");
+            auto encoderOutput = mModel->getBufferManager().copyFrom(*encoderInputFeatures, runtime::MemoryType::kGPU);
+            auto const& encoderOutputShape = encoderOutput->getShape();
+            TLLM_LOG_DEBUG("Copied encoder input features into decoder-owned encoder output: shape=(%ld,%ld), dtype=%d",
+                encoderOutputShape.nbDims > 0 ? encoderOutputShape.d[0] : -1,
+                encoderOutputShape.nbDims > 1 ? encoderOutputShape.d[1] : -1,
+                static_cast<int>(encoderOutput->getDataType()));
+            req->setEncoderOutput(std::move(encoderOutput));
+            TLLM_LOG_DEBUG("Encoder output set for feature-only encoder request");
+            req->ensureEncoderUniqueTokensForFeatureEncoder();
+            TLLM_LOG_DEBUG("Encoder unique tokens ready for feature-only encoder request");
             req->setState(batch_manager::LlmRequestState::kCONTEXT_INIT);
-            req->setEncoderOutput(req->getEncoderInputFeatures());
+            TLLM_LOG_DEBUG("Feature-only encoder request moved to decoder context init state");
         }
     }
 }
@@ -1787,7 +1804,9 @@ void Executor::Impl::forwardAsync(RequestList& activeRequests)
             prepRequestsForEncoderSkip(activeRequests);
         }
 
+        TLLM_LOG_DEBUG("Calling decoder forwardAsync after encoder skip/prep");
         mModel->forwardAsync(activeRequests);
+        TLLM_LOG_DEBUG("decoder forwardAsync returned after encoder skip/prep");
     }
     catch (std::exception const& e)
     {

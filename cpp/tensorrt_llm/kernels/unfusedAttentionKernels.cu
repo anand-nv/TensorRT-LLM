@@ -675,6 +675,72 @@ template void invokeMaskedSoftmax(MaskedSoftmaxParam<float, float>& param, cudaS
 template void invokeMaskedSoftmax(MaskedSoftmaxParam<half, float>& param, cudaStream_t stream);
 template void invokeMaskedSoftmax(MaskedSoftmaxParam<half, half>& param, cudaStream_t stream);
 
+template <typename T>
+__global__ void store_context_attention_prior_scores_kernel(T const* attention_score, float* attention_prior_scores,
+    int const* attention_prior_focus, int const* context_lengths, int batch_size, int num_heads, int q_length,
+    int k_length, int attention_prior_lookahead)
+{
+    int const bi = blockIdx.x;
+    int const hi = blockIdx.y;
+    int const bin = blockIdx.z;
+    if (bi >= batch_size || hi >= num_heads || bin >= attention_prior_lookahead)
+    {
+        return;
+    }
+
+    int q_idx = q_length - 1;
+    if (context_lengths != nullptr)
+    {
+        q_idx = context_lengths[bi] - 1;
+        if (q_idx < 0)
+        {
+            q_idx = 0;
+        }
+        if (q_idx >= q_length)
+        {
+            q_idx = q_length - 1;
+        }
+    }
+
+    int focus = 1;
+    if (attention_prior_focus != nullptr)
+    {
+        int const focus_raw = attention_prior_focus[bi];
+        focus = focus_raw < 0 ? -(focus_raw + 1) : focus_raw;
+    }
+    int const key_idx = focus + bin;
+    if (key_idx < 0 || key_idx >= k_length)
+    {
+        return;
+    }
+
+    int64_t const score_idx = ((static_cast<int64_t>(bi) * num_heads + hi) * q_length + q_idx) * k_length + key_idx;
+    atomicAdd(&attention_prior_scores[bi * attention_prior_lookahead + bin],
+        cuda_cast<float>(attention_score[score_idx]));
+}
+
+template <typename T>
+void invokeStoreContextAttentionPriorScores(T const* attention_score, float* attention_prior_scores,
+    int const* attention_prior_focus, int const* context_lengths, int batch_size, int num_heads, int q_length,
+    int k_length, int attention_prior_lookahead, cudaStream_t stream)
+{
+    if (attention_score == nullptr || attention_prior_scores == nullptr || batch_size <= 0 || num_heads <= 0
+        || q_length <= 0 || k_length <= 0 || attention_prior_lookahead <= 0)
+    {
+        return;
+    }
+    dim3 grid(batch_size, num_heads, attention_prior_lookahead);
+    store_context_attention_prior_scores_kernel<T><<<grid, 1, 0, stream>>>(attention_score, attention_prior_scores,
+        attention_prior_focus, context_lengths, batch_size, num_heads, q_length, k_length, attention_prior_lookahead);
+}
+
+template void invokeStoreContextAttentionPriorScores<float>(float const* attention_score, float* attention_prior_scores,
+    int const* attention_prior_focus, int const* context_lengths, int batch_size, int num_heads, int q_length,
+    int k_length, int attention_prior_lookahead, cudaStream_t stream);
+template void invokeStoreContextAttentionPriorScores<half>(half const* attention_score, float* attention_prior_scores,
+    int const* attention_prior_focus, int const* context_lengths, int batch_size, int num_heads, int q_length,
+    int k_length, int attention_prior_lookahead, cudaStream_t stream);
+
 #ifdef ENABLE_BF16
 template <>
 void invokeMaskedSoftmax(MaskedSoftmaxParam<__nv_bfloat16, float>& param, cudaStream_t stream)
@@ -775,6 +841,10 @@ void invokeMaskedSoftmax(MaskedSoftmaxParam<__nv_bfloat16, __nv_bfloat16>& param
         LAUNCH_MASKED_SOFTMAX_(__nv_bfloat16, 1)
     }
 }
+
+template void invokeStoreContextAttentionPriorScores<__nv_bfloat16>(__nv_bfloat16 const* attention_score,
+    float* attention_prior_scores, int const* attention_prior_focus, int const* context_lengths, int batch_size,
+    int num_heads, int q_length, int k_length, int attention_prior_lookahead, cudaStream_t stream);
 
 #endif
 

@@ -332,8 +332,6 @@ def convert_t5tts_decoder(
     weights['final_layernorm.weight'] = model_dict[
         f'{prefix}.norm_out.weight'].contiguous()
 
-    component_save_dir = os.path.join(args.output_dir, "decoder")
-    os.makedirs(component_save_dir, exist_ok=True)
     return weights
 
 
@@ -455,9 +453,11 @@ def convert_checkpoint(args, model):
         'vocab_sizes': decoder_config.vocab_sizes,
         'use_context_embeddings': decoder_config.use_context_embeddings,
         'use_attention_prior': True,
-        # NOTE: these defaults overridden to match the deployed engine's prior config.
+        # [4,5,8,9] is the correct config. Verified: NeMo inference with
+        # estimate_alignment_from_layers=[4,5,8,9] AND [4,8,9,10] both give WER 0.016 on the vi
+        # long-form paragraph -> the alignment-layer set is NOT the cause of the TRT drift.
         'compute_attention_prior_from_layers': [4, 5, 8, 9],
-        'apply_attention_prior_to_layers': [3, 4, 5, 6, 7, 8, 9, 10],
+        'apply_attention_prior_to_layers': [2, 3, 4, 5, 6, 7, 8, 9, 10],
         'attention_prior_lookahead': 5,
         'attention_prior_window_left': 1,
         'attention_prior_window_right': 5,
@@ -501,8 +501,14 @@ def convert_checkpoint(args, model):
         'bos_token_id': decoder_config.bos_token_id,
         'pad_token_id': decoder_config.pad_token_id,
         'cross_attention': True,  #  this has to be provided explicitely
-        'stacking_factor': 1,
-        'localtransformer_path': getattr(args, 'localtransformer_path', None),
+        'stacking_factor': 2,
+        # Must be non-None or the C++ runtime aborts with "mLocalTransformer is null".
+        # Default to localtransformer.plan next to the decoder output; override with
+        # --localtransformer_path to point at the final deploy location.
+        'localtransformer_path': (
+            getattr(args, 'localtransformer_path', None)
+            or os.path.join(os.path.abspath(args.output_dir), 'decoder', 'localtransformer.plan')
+        ),
     }
     for additional_setting in additional_settings:
         if hasattr(decoder_config, additional_setting):
@@ -546,12 +552,12 @@ def convert_checkpoint(args, model):
         if component == "encoder":
 
             weights = convert_t5tts_encoder(encoder_config,
-                                            model_state_dict,
+                                            model,
                                             quant_algo=quant_algo)
         else:
             assert component == "decoder"
             weights = convert_t5tts_decoder(decoder_config,
-                                            model_state_dict,
+                                            model,
                                             quant_algo=quant_algo)
 
         safetensors.torch.save_file(
@@ -657,6 +663,14 @@ if __name__ == "__main__":
     for key in vars(args):
         LOGGER.info(f"{key}: {vars(args)[key]}")
     LOGGER.info("========================================")
+
+    if not args.localtransformer_path:
+        _default_lt = os.path.join(os.path.abspath(args.output_dir), 'decoder', 'localtransformer.plan')
+        LOGGER.warning(
+            "--localtransformer_path not set; defaulting localtransformer_path to %s. "
+            "Ensure localtransformer.plan exists at that path next to the deployed engine, "
+            "or pass --localtransformer_path with the final deploy location, "
+            "else the runtime aborts with 'mLocalTransformer is null'.", _default_lt)
 
     start_time = datetime.now()
 

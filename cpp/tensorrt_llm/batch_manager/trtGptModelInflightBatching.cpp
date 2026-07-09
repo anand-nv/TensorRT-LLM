@@ -1172,7 +1172,7 @@ void TrtGptModelInflightBatching::forwardAsync(RequestList const& activeRequests
             if (mModelConfig.useAttentionPrior())
             {
                 mBuffers[getFusedBufferId()]->processAttentionPriorScores(
-                    currRequests.generationRequests, *mRuntime, mModelConfig);
+                    currRequests.contextRequests, currRequests.generationRequests, *mRuntime, mModelConfig);
             }
 
             // Postpone decoder setup if model does not need to setup buffers for the context phase.
@@ -2499,8 +2499,13 @@ void TrtGptModelInflightBatching::updateRequests(ScheduledRequests const& schedu
             auto finishReason = finishReasonsHostData[seqSlot * mOperatingBeamWidth + beam];
             // Match NeMo's eos_detection_method='argmax_or_multinomial_any': stop when any
             // codebook generates endId, not just the first one whose offset happens to be zero.
-            if (anyCodebookEos && !finishReason.isFinished())
+            bool const eosAllowedByAttentionPrior = !mModelConfig.useAttentionPrior()
+                || llmReq->isAttentionPriorNearEnd() || llmReq->isAttentionPriorFinished();
+            if (anyCodebookEos && !finishReason.isFinished() && eosAllowedByAttentionPrior)
                 finishReason = kernels::FinishedState::finished();
+            else if (anyCodebookEos && !eosAllowedByAttentionPrior)
+                TLLM_LOG_DEBUG("Request %lu generated EOS before attention prior finished; suppressing any-codebook finish",
+                    llmReq->mRequestId);
             llmReq->setFinishedReason(finishReason.toFinishReason(), beam);
 
             TLLM_LOG_DEBUG("[RANK %d] decoderSync: request ID %lu beam %d tokens %s finished %d",

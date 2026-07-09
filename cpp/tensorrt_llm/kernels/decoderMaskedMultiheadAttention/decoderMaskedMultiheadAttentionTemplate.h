@@ -1534,13 +1534,27 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
     // step — do NOT apply the prior mask, but still write scores at [decoded_focus, decoded_focus+L)
     // so the host can seed focus from the model's natural (unmasked) attention".
     // decoded_focus = -(focus_raw + 1).
+    // Sink encoding: focus_raw >= kSinkPriorFocusOffset means NeMo-style sink suppression is active.
+    // The decoded focus is already the first non-suppressed token, so the keep window is
+    // [focus, focus+lookahead) instead of the normal [focus-left, focus+right].
+    constexpr int kSinkPriorFocusOffset = 1 << 29;
     int focus = 0;
     bool apply_prior_mask = false;
+    bool sink_prior_mask = false;
     if (params.attention_prior_focus != nullptr)
     {
         int const focus_raw = params.attention_prior_focus[batch_beam_idx];
-        apply_prior_mask = (focus_raw >= 0);
-        focus = apply_prior_mask ? focus_raw : -(focus_raw + 1);
+        if (focus_raw >= kSinkPriorFocusOffset)
+        {
+            apply_prior_mask = true;
+            sink_prior_mask = true;
+            focus = focus_raw - kSinkPriorFocusOffset;
+        }
+        else
+        {
+            apply_prior_mask = (focus_raw >= 0);
+            focus = apply_prior_mask ? focus_raw : -(focus_raw + 1);
+        }
     }
     bool const store_scores = params.attention_prior_scores != nullptr;
     float* scores_ptr = nullptr;
@@ -2306,21 +2320,30 @@ __global__ void __launch_bounds__(MAX_THEADS_PER_BLOCK, MIN_BLOCKS_PER_SM) maske
                 // Apply the prior mask only when apply_prior_mask is true.
                 // When false (negative-sentinel encoding for a request's first generation step),
                 // we still go through this branch so the second loop runs and writes scores,
-                // but we skip the *= 0.1f attenuation. Because no positions are attenuated,
+                // but we skip the prior attenuation. Because no positions are attenuated,
                 // sum_rescale ≈ 1 and the second-loop renormalization is effectively a no-op,
                 // leaving logits_smem and scores at the unmasked-softmax values.
                 if (apply_prior_mask)
                 {
-                    // History BEHIND the focus window: suppress strongly (history_mult, default 0.01 =
-                    // NeMo eps²; set 0 for a hard mask) so the attention cannot snap back to the chunk
-                    // start and re-utter it. Far-FUTURE positions keep the soft 0.1 attenuation.
-                    if (ti < (focus - params.attention_prior_window_left))
+                    // Match the patched NeMo prior_weights=(1,1,1,1,1,1,0.2,0.2):
+                    //   focus-1, focus..focus+4 => 1.0
+                    //   focus+5, focus+6        => 0.2
+                    //   earlier/later positions => eps^2 (default 0.01)
+                    // Sink prior suppresses every token through the stuck timestep, so the first
+                    // kept token is the decoded focus, but the future weights stay the same.
+                    int const window_left = sink_prior_mask ? 0 : params.attention_prior_window_left;
+                    int const window_right = params.attention_prior_window_right + 1;
+                    if (ti < (focus - window_left) || ti > (focus + window_right))
                     {
                         prob *= params.attention_prior_history_mult;
                     }
-                    else if (ti > (focus + params.attention_prior_window_right))
+                    else
                     {
-                        prob *= 0.1f;
+                        int const rel = ti - focus;
+                        if (rel >= 5)
+                        {
+                            prob *= 0.2f;
+                        }
                     }
                 }
 

@@ -1090,6 +1090,16 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             enqueue_params.cross_kv = static_cast<T const*>(inputs[getIdx(IdxEntry::CROSS_KV)]);
             enqueue_params.cross_kv_length = max_encoder_context_len;
             enqueue_params.num_encoder_tokens = num_encoder_tokens;
+            if (mComputeAttentionPrior)
+            {
+                float* attention_prior_scores_out = static_cast<float*>(outputs[getNbOutputs() - 1]);
+                attention_prior_scores_out += seqIdxBeg * mAttentionPriorLookahead;
+                TLLM_CUDA_CHECK(cudaMemsetAsync(attention_prior_scores_out, 0,
+                    static_cast<size_t>(localNbSeq) * mAttentionPriorLookahead * sizeof(float), stream));
+                enqueue_params.attention_prior_scores = attention_prior_scores_out;
+                enqueue_params.attention_prior_focus
+                    = static_cast<int const*>(inputs[getIdx(IdxEntry::ATTENTION_PRIOR_FOCUS)]) + seqIdxBeg;
+            }
         }
 
         enqueueContext<T, KVCacheBuffer>(enqueue_params, stream);
@@ -1161,8 +1171,9 @@ int GPTAttentionPlugin::enqueueSome(int32_t seqIdxBeg, int32_t localNbSeq, int32
             {
                 // the attention prior is always last
                 float* attention_prior_scores_out = static_cast<float*>(outputs[getNbOutputs() - 1]);
-                // advance the prior scores pointer, skipping the space reserved for context requests
-                attention_prior_scores_out += contextNbSeq * mAttentionPriorLookahead;
+                // The output tensor is indexed by the absolute scheduled sequence row. Keep the score rows aligned
+                // with ATTENTION_PRIOR_FOCUS, which is also offset by seqIdxBeg below.
+                attention_prior_scores_out += seqIdxBeg * mAttentionPriorLookahead;
                 // The decoder cross-attention kernel accumulates head/block contributions with atomicAdd.
                 // TensorRT may allocate this plugin output as an internal tensor, so the runtime-level output
                 // memset is not sufficient to clear it before each enqueue.

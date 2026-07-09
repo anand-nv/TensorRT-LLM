@@ -40,6 +40,7 @@
 #include <cstdlib>
 
 #include <algorithm>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <numeric>
@@ -593,8 +594,10 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
                 auto const contextChunkSize = llmReq->getContextChunkSize();
                 auto const beginCompute = llmReq->getContextCurrentPosition();
                 auto const endCompute = beginCompute + contextChunkSize;
-                inputHost.insert(inputHost.end(), reqTokens.begin() + beginCompute,
-                    reqTokens.begin() + beginCompute + contextChunkSize * llmReq->getNumVocabs());
+                auto const beginComputeFlat = beginCompute * llmReq->getNumVocabs();
+                auto const contextChunkSizeFlat = contextChunkSize * llmReq->getNumVocabs();
+                inputHost.insert(inputHost.end(), reqTokens.begin() + beginComputeFlat,
+                    reqTokens.begin() + beginComputeFlat + contextChunkSizeFlat);
 
                 logitsIdsHostPtr[totalNumLogits++] = contextChunkSize;
                 numContextLogits.at(batchIdx) = modelConfig.computeContextLogits() ? contextChunkSize : 1;
@@ -901,17 +904,62 @@ void RuntimeBuffers::setFromInputs(RequestVector const& contextRequests, Request
             // used for a request's very first generation step so the model's natural cross-attention
             // (un-distorted by the prior) is captured to seed the focus index from step 2 onwards.
             // This matches NeMo's behaviour where attn_prior=None on the first decoder step.
-            constexpr int kInitialFocus = 1;
+            // A value kSinkPriorFocusOffset + F means "apply a NeMo sink prior from F": suppress all history
+            // before F and keep only [F, F+lookahead). This is used after a token has been attended
+            // maxAttendCount times; NeMo sets attn_prior[:, :stuck_timestep+1] = epsilon in that case.
+            constexpr int kSinkPriorFocusOffset = 1 << 29;
+            auto const getInitialFocusAbs = [](int leftOffset, SizeType32 encoderOutputLen) {
+                auto const maxLocalFocus = std::max(0, static_cast<int>(encoderOutputLen) - 1);
+                if (leftOffset <= 0)
+                {
+                    constexpr int kDefaultFirstFocus = 4;
+                    return std::min(kDefaultFirstFocus, maxLocalFocus);
+                }
+                return leftOffset + std::min(5, maxLocalFocus);
+            };
+            auto const toLocalFocus = [](int focusAbs, int leftOffset, SizeType32 encoderOutputLen) {
+                auto const maxLocalFocus = std::max(0, static_cast<int>(encoderOutputLen) - 1);
+                return std::min(std::max(0, focusAbs - leftOffset), maxLocalFocus);
+            };
             // Context rows must not be prior-masked, especially in fused context+generation batches.
             // Use the same negative sentinel as first generation step: store scores, but do not mask.
-            std::vector<int> focus_lst(numContextRequests, -(kInitialFocus + 1));
+            // The focus buffer is sequence-indexed, not request-indexed; CFG context requests therefore
+            // need both conditional and unconditional entries.
+            std::vector<int> focus_lst;
+            focus_lst.reserve(getNumSequences());
+            for (auto const& llmReq : contextRequests)
+            {
+                int const leftOffset = static_cast<int>(llmReq->getLeftOffset());
+                int const initialFocusAbs = getInitialFocusAbs(leftOffset, llmReq->getEncoderOutputLen());
+                int const initialFocusLocal = toLocalFocus(initialFocusAbs, leftOffset, llmReq->getEncoderOutputLen());
+                int const encodedContext = -(initialFocusLocal + 1);
+                for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++)
+                {
+                    focus_lst.push_back(encodedContext);
+                }
+            }
             for (auto const& llmReq : genRequests)
             {
                 bool const firstGenStep = !llmReq->hasAttentionPriorIdx();
-                int const initialFocus = std::max(kInitialFocus, static_cast<int>(llmReq->getLeftOffset()));
-                int const focus = firstGenStep ? initialFocus : static_cast<int>(llmReq->getAttentionPriorIdx(modelConfig));
-                int const encodedCond = firstGenStep ? -(focus + 1) : focus;
-                int const encodedUncond = -(focus + 1);
+                int const leftOffset = static_cast<int>(llmReq->getLeftOffset());
+                int const initialFocusAbs = getInitialFocusAbs(leftOffset, llmReq->getEncoderOutputLen());
+                int focusAbs = firstGenStep ? initialFocusAbs : static_cast<int>(llmReq->getAttentionPriorIdx(modelConfig));
+                int const sinkAttendCount = std::max(1, llmReq->getMaxAttendCount());
+                bool const sinkPrior = !firstGenStep
+                    && static_cast<int>(llmReq->getAttentionPriorAttendCount()) >= sinkAttendCount
+                    && llmReq->getEncoderOutputLen() > 0
+                    && focusAbs < leftOffset + static_cast<int>(llmReq->getEncoderOutputLen()) - 1;
+                if (sinkPrior)
+                {
+                    // NeMo applies this suppression to the current forward after the previous
+                    // step increments the dwell count. The score window for this forward starts
+                    // at the first non-suppressed token.
+                    focusAbs += 1;
+                }
+                int const focusLocal = toLocalFocus(focusAbs, leftOffset, llmReq->getEncoderOutputLen());
+                int const encodedCond
+                    = firstGenStep ? -(focusLocal + 1) : (sinkPrior ? kSinkPriorFocusOffset + focusLocal : focusLocal);
+                int const encodedUncond = -(focusLocal + 1);
                 for (SizeType32 i = 0; i < llmReq->getNumSequences(); i++)
                 {
                     // Under CFG, NeMo applies the attention prior only to the conditional half.
@@ -1083,8 +1131,8 @@ void RuntimeBuffers::prepareEagleBuffers(RequestVector const& contextRequests, R
     TLLM_LOG_TRACE("%s stop", __PRETTY_FUNCTION__);
 }
 
-void RuntimeBuffers::processAttentionPriorScores(
-    RequestVector const& genRequests, TllmRuntime const& runtime, ModelConfig const& modelConfig)
+void RuntimeBuffers::processAttentionPriorScores(RequestVector const& contextRequests, RequestVector const& genRequests,
+    TllmRuntime const& runtime, ModelConfig const& modelConfig)
 {
     /**
      * is called after inference is done. processes the "scores" buffer and sets up
@@ -1104,42 +1152,235 @@ void RuntimeBuffers::processAttentionPriorScores(
     manager.copy(*attentionPriorScores, *scoresHost);
     stream.synchronize();
 
-    // for each generation request, analyze scores and set the attention prior idx
-    size_t scoresOffset = numContextRequests * attentionPriorLookahead;
     auto* scoresHostPtr = bufferCast<float>(*scoresHost);
 
+    ReqIdsSet contextSeededRequests;
+    size_t scoresOffset = 0;
+    auto rowHasSignal = [&](size_t rowOffset) {
+        for (int i = 0; i < attentionPriorLookahead; i++)
+        {
+            if (scoresHostPtr[rowOffset + i] != 0.0F)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto selectScoreRow = [&](size_t baseOffset, SizeType32 numSequences) {
+        size_t selectedOffset = baseOffset;
+        int selectedSequence = 0;
+        if (!rowHasSignal(baseOffset))
+        {
+            for (SizeType32 seqIdx = 1; seqIdx < numSequences; seqIdx++)
+            {
+                auto const rowOffset = baseOffset + static_cast<size_t>(seqIdx) * attentionPriorLookahead;
+                if (rowHasSignal(rowOffset))
+                {
+                    selectedOffset = rowOffset;
+                    selectedSequence = static_cast<int>(seqIdx);
+                    break;
+                }
+            }
+        }
+        return std::make_pair(selectedOffset, selectedSequence);
+    };
+
+    // Magpie's Riva path bakes the generated-audio BOS into decoder_context_features.
+    // That makes the context/prompt row equivalent to NeMo's first decoder step
+    // (attn_prior=None), so seed the prior from the context row.
+    for (auto const& llmReq : contextRequests)
+    {
+        if (!llmReq->hasAttentionPriorIdx())
+        {
+            auto const leftOffset = static_cast<size_t>(llmReq->getLeftOffset());
+            auto const encoderOutputLen = llmReq->getEncoderOutputLen();
+            auto const maxLocalFocus = encoderOutputLen > 0 ? static_cast<size_t>(encoderOutputLen - 1) : 0;
+            constexpr int kDefaultFirstFocus = 4;
+            auto const initialFocus = leftOffset > 0
+                ? leftOffset + std::min<size_t>(5, maxLocalFocus)
+                : std::min(static_cast<size_t>(kDefaultFirstFocus), maxLocalFocus);
+            size_t const prevPriorIdx = initialFocus;
+
+            int candidateLimit = attentionPriorLookahead;
+            bool terminalFallback = false;
+            if (encoderOutputLen > 5)
+            {
+                auto const terminalWindowStart = leftOffset + static_cast<size_t>(encoderOutputLen - 3);
+                if (prevPriorIdx >= terminalWindowStart)
+                {
+                    terminalFallback = true;
+                    candidateLimit = 0;
+                }
+                else
+                {
+                    candidateLimit = std::min<int>(
+                        attentionPriorLookahead, static_cast<int>(terminalWindowStart - prevPriorIdx));
+                }
+            }
+
+            auto const [selectedScoresOffset, selectedSequence]
+                = selectScoreRow(scoresOffset, llmReq->getNumSequences());
+            auto* selectedScores = scoresHostPtr + selectedScoresOffset;
+
+            float maxScore = selectedScores[0];
+            int idxShift = 0;
+            if (terminalFallback || candidateLimit <= 0)
+            {
+                auto const finalIdx = encoderOutputLen > 0
+                    ? leftOffset + static_cast<size_t>(encoderOutputLen - 1)
+                    : prevPriorIdx;
+                idxShift = finalIdx > prevPriorIdx ? static_cast<int>(finalIdx - prevPriorIdx) : 0;
+                auto const scoreIdx = std::min(idxShift, attentionPriorLookahead - 1);
+                maxScore = selectedScores[scoreIdx];
+            }
+            else
+            {
+                for (int i = 1; i < candidateLimit; i++)
+                {
+                    if (selectedScores[i] > maxScore)
+                    {
+                        maxScore = selectedScores[i];
+                        idxShift = i;
+                    }
+                }
+            }
+
+            constexpr float kContextMinConfidence = 0.01F;
+            bool hasContextSignal = false;
+            for (int i = 0; i < attentionPriorLookahead; i++)
+            {
+                hasContextSignal = hasContextSignal || selectedScores[i] != 0.0F;
+            }
+            if (selectedSequence != 0 && maxScore < kContextMinConfidence)
+            {
+                hasContextSignal = false;
+            }
+            if (hasContextSignal)
+            {
+                auto const newPriorIdx = prevPriorIdx + idxShift;
+                llmReq->setAttentionPriorIdx(newPriorIdx, modelConfig);
+                if (char const* tracePath = std::getenv("TRT_EOS_POLICY_TRACE");
+                    tracePath != nullptr && tracePath[0] != '\0')
+                {
+                    std::ofstream out(tracePath, std::ios::app);
+                    out << "attn_seed"
+                        << "\treq=" << llmReq->mRequestId
+                        << "\tseq=" << selectedSequence
+                        << "\tprev=" << prevPriorIdx
+                        << "\tshift=" << idxShift
+                        << "\tnew=" << newPriorIdx
+                        << "\tleft_offset=" << leftOffset
+                        << "\tenc_len=" << encoderOutputLen
+                        << "\tmax_score=" << maxScore
+                        << "\tcandidate_limit=" << candidateLimit
+                        << "\tterminal=" << (terminalFallback ? 1 : 0)
+                        << "\tnear_end=" << (llmReq->isAttentionPriorNearEnd() ? 1 : 0)
+                        << "\tfinished=" << (llmReq->isAttentionPriorFinished() ? 1 : 0)
+                        << "\tend_count=" << llmReq->getAttentionPriorEndAttendCount()
+                        << "\n";
+                }
+                contextSeededRequests.insert(llmReq->mRequestId);
+            }
+        }
+        scoresOffset += attentionPriorLookahead * llmReq->getNumSequences();
+    }
+
+    // for each generation request, analyze scores and set the attention prior idx
     for (auto const& llmReq : genRequests)
     {
+        if (contextSeededRequests.count(llmReq->mRequestId) != 0)
+        {
+            // The generation row in this same forward pass was computed before the context row
+            // seeded the request. Leave the context seed in place for the next iteration.
+            scoresOffset += attentionPriorLookahead * llmReq->getNumSequences();
+            continue;
+        }
+
         // First-gen-step seeding: if no focus was set yet, the kernel ran without masking
         // (sentinel = -(initial+1)) and wrote scores at [initial, initial+lookahead).
         // Use the argmax of those scores to seed focus, exactly the way subsequent steps work.
-        constexpr int kInitialFocus = 1;
         bool const firstPriorStep = !llmReq->hasAttentionPriorIdx();
-        auto const initialFocus = static_cast<size_t>(std::max(kInitialFocus, static_cast<int>(llmReq->getLeftOffset())));
+        auto const leftOffset = static_cast<size_t>(llmReq->getLeftOffset());
+        auto const encoderOutputLen = llmReq->getEncoderOutputLen();
+        auto const maxLocalFocus = encoderOutputLen > 0 ? static_cast<size_t>(encoderOutputLen - 1) : 0;
+        constexpr int kDefaultFirstFocus = 4;
+        auto const initialFocus = leftOffset > 0
+            ? leftOffset + std::min<size_t>(5, maxLocalFocus)
+            : std::min(static_cast<size_t>(kDefaultFirstFocus), maxLocalFocus);
         size_t prevPriorIdx = firstPriorStep ? initialFocus : llmReq->getAttentionPriorIdx(modelConfig);
-        float maxScore = scoresHostPtr[scoresOffset];
-        int idxShift = 0;
-        for (int i = 1; i < attentionPriorLookahead; i++)
+        int const dwellAtPrev = static_cast<int>(llmReq->getAttentionPriorAttendCount());
+        auto const selectedScoresOffset = selectScoreRow(scoresOffset, llmReq->getNumSequences()).first;
+        auto* selectedScores = scoresHostPtr + selectedScoresOffset;
+
+        // Match NeMo's get_most_attended_text_timestep ordering: first check whether the
+        // previously attended timestep has become a sink, then select the next attended
+        // timestep from the lookahead window. Do not advance again after incrementing
+        // the counter for the newly selected timestep.
+        int const sinkAttendCount = std::max(1, llmReq->getMaxAttendCount());
+        if (!firstPriorStep && dwellAtPrev >= sinkAttendCount && encoderOutputLen > 0
+            && prevPriorIdx < leftOffset + static_cast<size_t>(encoderOutputLen - 1))
         {
-            if (scoresHostPtr[scoresOffset + i] > maxScore)
+            prevPriorIdx += 1;
+        }
+
+        // Match NeMo's get_most_attended_text_timestep terminal-window rule:
+        // normal argmax searches [prevFocus, min(prevFocus + lookahead, text_len - 3)).
+        // Once that slice is empty, NeMo jumps to text_len - 1 and lets the
+        // finished-text counter hold the end before EOS. Without this exclusion,
+        // low-confidence tail probabilities can choose text_len - 2 / text_len - 1
+        // too early and skip the last phones of long utterances.
+        int candidateLimit = attentionPriorLookahead;
+        bool terminalFallback = false;
+        if (encoderOutputLen > 5)
+        {
+            auto const terminalWindowStart = leftOffset + static_cast<size_t>(encoderOutputLen - 3);
+            if (prevPriorIdx >= terminalWindowStart)
             {
-                maxScore = scoresHostPtr[scoresOffset + i];
-                idxShift = i;
+                terminalFallback = true;
+                candidateLimit = 0;
+            }
+            else
+            {
+                candidateLimit = std::min<int>(
+                    attentionPriorLookahead, static_cast<int>(terminalWindowStart - prevPriorIdx));
+            }
+        }
+
+        float maxScore = selectedScores[0];
+        int idxShift = 0;
+        if (terminalFallback || candidateLimit <= 0)
+        {
+            auto const finalIdx = encoderOutputLen > 0
+                ? leftOffset + static_cast<size_t>(encoderOutputLen - 1)
+                : prevPriorIdx;
+            idxShift = finalIdx > prevPriorIdx ? static_cast<int>(finalIdx - prevPriorIdx) : 0;
+            auto const scoreIdx = std::min(idxShift, attentionPriorLookahead - 1);
+            maxScore = selectedScores[scoreIdx];
+        }
+        else
+        {
+            for (int i = 1; i < candidateLimit; i++)
+            {
+                if (selectedScores[i] > maxScore)
+                {
+                    maxScore = selectedScores[i];
+                    idxShift = i;
+                }
             }
         }
 
         // Flat-region forced advance. When the lookahead distribution is too flat to trust
-        // (peak < minConf), the argmax is noise: a small/zero idxShift under-advances (or re-selects
-        // the current focus -> the decoder re-utters it). Force a minimal advance.
+        // (peak < minConf), the argmax is noise: a small/zero idxShift under-advances and can
+        // stall/repeat. Force only those under-advances up to a minimal movement.
         // NOTE: do NOT scale this by frame_stacking_factor. NeMo's reference advances the focus by
         // argmax over the lookahead and only nudges +1 on attention sinks (get_most_attended); it
         // never force-advances by the stacking factor. Default flatAdvance = 1 to match NeMo; the
         // focus still keeps pace via the argmax-based advance + the per-position sink-advance.
-        // Tunables: TRT_ATTN_PRIOR_MIN_CONF (default 0.30; 0 disables),
+        // Tunables: TRT_ATTN_PRIOR_MIN_CONF (default 0 = disabled, matching NeMo),
         //           TRT_ATTN_PRIOR_MIN_ADVANCE (default = 1; override to experiment).
         static float const minConf = []() {
             char const* e = std::getenv("TRT_ATTN_PRIOR_MIN_CONF");
-            return e != nullptr ? static_cast<float>(std::atof(e)) : 0.30f;
+            return e != nullptr ? static_cast<float>(std::atof(e)) : 0.0f;
         }();
         int const minAdvance = []() {
             char const* e = std::getenv("TRT_ATTN_PRIOR_MIN_ADVANCE");
@@ -1152,9 +1393,38 @@ void RuntimeBuffers::processAttentionPriorScores(
         // !firstPriorStep (prior is set/applied this step). (And processAttentionPriorScores already
         // early-returns when useAttentionPrior is false, so this never runs in no-prior mode.)
         bool forcedAdvance = false;
-        if (!firstPriorStep && minConf > 0.0f && maxScore < minConf && idxShift < flatAdvance)
+        if (!terminalFallback && !firstPriorStep && minConf > 0.0f && maxScore < minConf && idxShift < flatAdvance)
         {
             idxShift = flatAdvance;
+            forcedAdvance = true;
+        }
+
+        // Tail guard: near the end of long text, a low-confidence argmax several positions ahead
+        // can skip the last phonemes/words and sound like longform drift. Keep this opt-in while
+        // validating: it caps only large forward jumps in the final tail window.
+        static int const tailWindow = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_TAIL_MAX_ADVANCE_WINDOW");
+            return e != nullptr ? std::atoi(e) : 0;
+        }();
+        static float const tailConf = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_TAIL_MAX_ADVANCE_CONF");
+            return e != nullptr ? static_cast<float>(std::atof(e)) : 0.0f;
+        }();
+        static int const tailMaxAdvance = []() {
+            char const* e = std::getenv("TRT_ATTN_PRIOR_TAIL_MAX_ADVANCE");
+            return e != nullptr ? std::max(1, std::atoi(e)) : 1;
+        }();
+        auto const finalIdx = encoderOutputLen > 0
+            ? leftOffset + static_cast<size_t>(encoderOutputLen - 1)
+            : prevPriorIdx;
+        auto const remainingToEnd
+            = encoderOutputLen > 0 && prevPriorIdx <= finalIdx
+            ? static_cast<int>(finalIdx - prevPriorIdx)
+            : 0;
+        if (!terminalFallback && !firstPriorStep && !forcedAdvance && tailWindow > 0 && tailConf > 0.0f
+            && remainingToEnd <= tailWindow && maxScore < tailConf && idxShift > tailMaxAdvance)
+        {
+            idxShift = tailMaxAdvance;
             forcedAdvance = true;
         }
 
@@ -1166,39 +1436,43 @@ void RuntimeBuffers::processAttentionPriorScores(
         // Env TRT_ATTN_PRIOR_MAX_DWELL (default 0 = disabled -> max_attend_count stays the only cap).
         // Tune carefully: too small clips legitimately sustained phonemes (a held vowel spans several
         // frame-stacked steps at the same focus). This is independent of, and fires earlier than, the
-        // max_attend_count sink-advance in LlmRequest::setAttentionPriorIdx.
+        // max_attend_count sink-bump at the beginning of this function.
         static int const maxDwell = []() {
             char const* e = std::getenv("TRT_ATTN_PRIOR_MAX_DWELL");
             return e != nullptr ? std::atoi(e) : 0;
         }();
-        int const dwellAtPrev = static_cast<int>(llmReq->getAttentionPriorAttendCount());
-        if (!firstPriorStep && !forcedAdvance && maxDwell > 0 && idxShift == 0 && dwellAtPrev >= maxDwell)
+        if (!terminalFallback && !firstPriorStep && !forcedAdvance && maxDwell > 0 && idxShift == 0 && dwellAtPrev >= maxDwell)
         {
             idxShift = flatAdvance;
             forcedAdvance = true;
         }
 
-        // LlmRequest::setAttentionPriorIdx() owns the per-position attend counter and advances
-        // the focus when a position exceeds max_attend_count; avoid duplicate host-side state here.
-        llmReq->setAttentionPriorIdx(prevPriorIdx + idxShift, modelConfig);
-
-        // [ATTN_PRIOR] Per-step focus trajectory. Grep "[ATTN_PRIOR] step" and compare the
-        // newFocus column against NeMo's text_time_step_attended sequence (magpietts.py).
-        // requestedFocus = prevFocus + argmax(lookahead scores); newFocus may differ if
-        // setAttentionPriorIdx applied clamping or a max_attend_count sink-advance.
+        // LlmRequest::setAttentionPriorIdx() only records the selected attended position.
+        // The NeMo-style sink-bump happens before argmax above on the next decoder step.
+        auto const newPriorIdx = prevPriorIdx + idxShift;
+        llmReq->setAttentionPriorIdx(newPriorIdx, modelConfig);
+        if (char const* tracePath = std::getenv("TRT_EOS_POLICY_TRACE");
+            tracePath != nullptr && tracePath[0] != '\0')
         {
-            std::string scoreStr;
-            for (int i = 0; i < attentionPriorLookahead; i++)
-            {
-                scoreStr += (i ? "," : "") + std::to_string(scoresHostPtr[scoresOffset + i]);
-            }
-            TLLM_LOG_DEBUG(
-                "[ATTN_PRIOR] step reqId=%lu firstStep=%d prevFocus=%zu idxShift=%d forced=%d requestedFocus=%zu "
-                "newFocus=%d maxScore=%.4f encLen=%d leftOffset=%d maxAttend=%d dwell=%d lookahead=%d scores=[%s]",
-                llmReq->mRequestId, static_cast<int>(firstPriorStep), prevPriorIdx, idxShift,
-                static_cast<int>(forcedAdvance), prevPriorIdx + static_cast<size_t>(idxShift),
-                llmReq->getAttentionPriorIdx(modelConfig), maxScore, llmReq->getEncoderOutputLen(),
-                llmReq->getLeftOffset(), llmReq->getMaxAttendCount(), dwellAtPrev, attentionPriorLookahead, scoreStr.c_str());
+            std::ofstream out(tracePath, std::ios::app);
+            out << "attn_update"
+                << "\treq=" << llmReq->mRequestId
+                << "\tfirst=" << (firstPriorStep ? 1 : 0)
+                << "\tprev=" << prevPriorIdx
+                << "\tdwell_prev=" << dwellAtPrev
+                << "\tshift=" << idxShift
+                << "\tnew=" << newPriorIdx
+                << "\tleft_offset=" << leftOffset
+                << "\tenc_len=" << encoderOutputLen
+                << "\tmax_score=" << maxScore
+                << "\tcandidate_limit=" << candidateLimit
+                << "\tterminal=" << (terminalFallback ? 1 : 0)
+                << "\tforced=" << (forcedAdvance ? 1 : 0)
+                << "\tnear_end=" << (llmReq->isAttentionPriorNearEnd() ? 1 : 0)
+                << "\tfinished=" << (llmReq->isAttentionPriorFinished() ? 1 : 0)
+                << "\tend_count=" << llmReq->getAttentionPriorEndAttendCount()
+                << "\tmax_end=" << llmReq->getMaxEndAttendCount()
+                << "\n";
         }
 
         // TODO: remove hardcode of lookahead size

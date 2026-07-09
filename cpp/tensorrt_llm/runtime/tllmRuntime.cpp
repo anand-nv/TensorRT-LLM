@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -231,13 +232,43 @@ TllmRuntime::TllmRuntime(RawEngine const& rawEngine, nvinfer1::ILogger* logger, 
     mEngineInspector.reset(mEngine->createEngineInspector());
     assessLikelihoodOfRuntimeAllocation(*mEngine, *mEngineInspector);
     setWeightStreaming(getEngine(), gpuWeightsPercent);
-    auto const devMemorySize = mEngine->getDeviceMemorySizeV2();
-    mEngineBuffer = mBufferManager.gpu(devMemorySize);
-    // Print context memory size for CI/CD to track.
-    TLLM_LOG_INFO("[MemUsageChange] Allocated %.2f MiB for execution context memory.",
-        static_cast<double>(devMemorySize) / 1048576.0);
-
     cacheTensorNames();
+    auto const hasTensorName = [this](std::string const& name) {
+        return std::find(mInputTensorNames.begin(), mInputTensorNames.end(), name) != mInputTensorNames.end()
+            || std::find(mOutputTensorNames.begin(), mOutputTensorNames.end(), name) != mOutputTensorNames.end();
+    };
+    mUseRuntimeContextMemory
+        = hasTensorName("hidden_states") && hasTensorName("rand_uniform") && hasTensorName("logits");
+    if (auto const* forceRuntimeMemory = std::getenv("TLLM_USE_RUNTIME_CONTEXT_MEMORY"))
+    {
+        mUseRuntimeContextMemory = std::atoi(forceRuntimeMemory) != 0;
+    }
+
+    auto const devMemorySize = mEngine->getDeviceMemorySizeV2();
+    if (mUseRuntimeContextMemory)
+    {
+        TLLM_LOG_INFO(
+            "[MemUsageChange] Letting TensorRT allocate %.2f MiB execution context memory for this engine.",
+            static_cast<double>(devMemorySize) / 1048576.0);
+    }
+    else
+    {
+        mEngineBuffer = mBufferManager.gpu(devMemorySize);
+        // Print context memory size for CI/CD to track.
+        TLLM_LOG_INFO("[MemUsageChange] Allocated %.2f MiB for execution context memory.",
+            static_cast<double>(devMemorySize) / 1048576.0);
+    }
+}
+
+TllmRuntime::~TllmRuntime()
+{
+    // TensorRT contexts reference engine-owned metadata. Destroy contexts before
+    // the inspector/engine members regardless of declaration order.
+    clearContexts();
+    mEngineInspector.reset();
+    mEngineBuffer.reset();
+    mEngine.reset();
+    mRuntime.reset();
 }
 
 void TllmRuntime::cacheTensorNames()
@@ -259,7 +290,14 @@ void TllmRuntime::cacheTensorNames()
 nvinfer1::IExecutionContext& TllmRuntime::addContext(std::int32_t profileIndex)
 {
     TLLM_CHECK(0 <= profileIndex && profileIndex < mEngine->getNbOptimizationProfiles());
-    mContexts.emplace_back(mEngine->createExecutionContextWithoutDeviceMemory());
+    if (mUseRuntimeContextMemory)
+    {
+        mContexts.emplace_back(mEngine->createExecutionContext());
+    }
+    else
+    {
+        mContexts.emplace_back(mEngine->createExecutionContextWithoutDeviceMemory());
+    }
     if (!mContexts.back())
     {
         if (mEngine->getStreamableWeightsSize() > 0)
@@ -272,7 +310,10 @@ nvinfer1::IExecutionContext& TllmRuntime::addContext(std::int32_t profileIndex)
         }
     }
     auto& context = *mContexts.back();
-    context.setDeviceMemoryV2(mEngineBuffer->data(), static_cast<int64_t>(mEngineBuffer->getCapacity()));
+    if (!mUseRuntimeContextMemory)
+    {
+        context.setDeviceMemoryV2(mEngineBuffer->data(), static_cast<int64_t>(mEngineBuffer->getCapacity()));
+    }
 
     if (tensorrt_llm::common::Logger::getLogger()->isEnabled(tensorrt_llm::common::Logger::TRACE)
         && mContexts.size() == 1)

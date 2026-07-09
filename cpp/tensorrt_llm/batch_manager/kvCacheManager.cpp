@@ -1277,9 +1277,18 @@ void WindowBlockManager::addSequence(
     TLLM_CHECK(emplaceDone);
 
     auto constexpr beamIdx = 0;
-    auto const& uniqueTokens = (mCacheType == CacheType::kSELF || mCacheType == CacheType::kSELFKONLY)
+    VecUniqueTokens const& uniqueTokens = (mCacheType == CacheType::kSELF || mCacheType == CacheType::kSELFKONLY)
         ? llmRequest.getUniqueTokens(beamIdx)
-        : *(llmRequest.getEncoderUniqueTokens().value());
+        : [&llmRequest]() -> VecUniqueTokens const& {
+        auto const& encOpt = llmRequest.getEncoderUniqueTokens();
+        if (!encOpt.has_value() || !encOpt.value())
+        {
+            TLLM_THROW(
+                "Cross KV block reuse requires encoder unique tokens. Provide encoder token IDs, or use "
+                "encoder input features with ensureEncoderUniqueTokensForFeatureEncoder() after setEncoderOutput.");
+        }
+        return *encOpt.value();
+    }();
 
     // Ignore last token because it can't be recovered
     auto const numVocabs = llmRequest.getNumVocabs();

@@ -232,6 +232,7 @@ def build_executor(
     kv_cache_free_gpu_memory_fraction: float | None = 0.7,
     cross_kv_cache_fraction: float | None = 0.5,
     multi_block_mode: bool = True,
+    enable_context_fmha_fp32_acc: bool = False,
     request_stats_max_iterations: int = 1000,
 ) -> trtllm.Executor:
     engine_path = Path(engine_dir)
@@ -251,6 +252,7 @@ def build_executor(
 
     extended = trtllm.ExtendedRuntimePerfKnobConfig()
     extended.multi_block_mode = multi_block_mode
+    extended.enable_context_fmha_fp32_acc = enable_context_fmha_fp32_acc
 
     executor_config = trtllm.ExecutorConfig(
         max_batch_size=max_batch_size,
@@ -291,6 +293,7 @@ def run_generate(
     seed: int | None = None,
     max_attend_count: int = 8,
     max_end_attend_count: int = 1_000_000,
+    left_offset: int = 0,
     streaming: bool = False,
 ) -> torch.Tensor:
     """Enqueue one request per batch row; return padded int32 tensor (batch, 1, max_seq_len) on CUDA."""
@@ -334,6 +337,9 @@ def run_generate(
                 # termination opt-in via T5TTS_MAX_END_ATTEND_COUNT.
                 max_attend_count=max_attend_count,
                 max_end_attend_count=max_end_attend_count,
+                # Riva-style chunked longform: prepended-history token count for this chunk so the
+                # attention prior seeds focus at the current chunk's start (0 for single-shot).
+                left_offset=left_offset,
             )
         )
 
@@ -424,10 +430,22 @@ def main():
 
     multi_block_env = os.environ.get("T5TTS_MULTI_BLOCK_MODE", "1").lower()
     multi_block_mode = multi_block_env not in ("0", "false", "no", "off")
+    fp32_acc_env = os.environ.get("T5TTS_CONTEXT_FMHA_FP32_ACC", "0").lower()
+    enable_context_fmha_fp32_acc = fp32_acc_env in ("1", "true", "yes", "on")
     max_num_tokens_env = os.environ.get("T5TTS_MAX_NUM_TOKENS")
     max_num_tokens = int(max_num_tokens_env) if max_num_tokens_env else None
-    print(f"Executor multi_block_mode={multi_block_mode}", flush=True)
-    executor = build_executor(engine_dir, multi_block_mode=multi_block_mode, max_num_tokens=max_num_tokens)
+    print(
+        "Executor "
+        f"multi_block_mode={multi_block_mode} "
+        f"context_fmha_fp32_acc={enable_context_fmha_fp32_acc}",
+        flush=True,
+    )
+    executor = build_executor(
+        engine_dir,
+        multi_block_mode=multi_block_mode,
+        enable_context_fmha_fp32_acc=enable_context_fmha_fp32_acc,
+        max_num_tokens=max_num_tokens,
+    )
     if not executor.can_enqueue_requests():
         raise RuntimeError("This rank cannot enqueue requests (expected rank 0 for single-GPU).")
 
@@ -496,8 +514,8 @@ def main():
                 max_new_tokens=max_new_tokens,
                 end_id=2017,
                 pad_id=2017,
-                temperature=0.6,
-                top_k=80,
+                temperature=float(os.environ.get("T5TTS_TEMPERATURE", "0.6")),
+                top_k=int(os.environ.get("T5TTS_TOP_K", "80")),
                 cfg_scale=2.5,
                 max_seq_len=max_seq_len,
                 num_vocabs=num_vocabs,

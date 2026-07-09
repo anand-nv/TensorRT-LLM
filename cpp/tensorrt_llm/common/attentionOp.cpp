@@ -122,7 +122,7 @@ struct FusedQKVMaskedAttentionDispatchParams
     int attention_prior_lookahead = 5;
     int attention_prior_window_left = 1;
     int attention_prior_window_right = 5;
-    float attention_prior_history_mult = 0.1f;
+    float attention_prior_history_mult = 0.01f;
     int const* memory_length_per_sample = nullptr;
     int max_distance = 0;
     bool block_sparse_attention = false;
@@ -1389,12 +1389,24 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
 #endif
 
     size_t const kv_seq_length = (isCrossAttention() ? params.cross_kv_length : params.input_seq_length);
+    // Context FMHA does not expose the per-token softmax probabilities used to
+    // seed Magpie's attention prior from the prefill/BOS decoder step. The
+    // unfused context path is much less battle-tested for batched T5TTS
+    // cross-attention and has crashed in parallel request runs, so keep context
+    // FMHA on by default and make prefill score capture an explicit debug knob.
+    static bool const captureContextAttentionPriorScores = []() {
+        char const* e = std::getenv("TRT_ATTN_PRIOR_CONTEXT_PREFILL_SCORES");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    bool const wantsContextAttentionPriorScores
+        = isCrossAttention() && params.attention_prior_scores != nullptr && captureContextAttentionPriorScores;
+    bool const useContextFMHA = mEnableContextFMHA && !wantsContextAttentionPriorScores;
     size_t const attention_mask_size
-        = mEnableContextFMHA ? 0 : sizeof(T) * params.batch_size * params.input_seq_length * kv_seq_length;
+        = useContextFMHA ? 0 : sizeof(T) * params.batch_size * params.input_seq_length * kv_seq_length;
     size_t const cu_seqlens_size = sizeof(int) * (params.batch_size + 1);
     size_t const rotary_inv_freq_size = sizeof(float) * params.batch_size * mRotaryEmbeddingDim / 2;
     size_t q_buf_2_size = 0;
-    if (!mEnableContextFMHA)
+    if (!useContextFMHA)
     {
         // Unfused mha
         q_buf_2_size = sizeof(T) * params.batch_size * params.input_seq_length * local_hidden_units_qo;
@@ -1406,14 +1418,14 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
     }
 
     size_t const k_buf_2_size
-        = mEnableContextFMHA ? 0 : sizeof(T) * params.batch_size * kv_seq_length * local_hidden_units_kv;
+        = useContextFMHA ? 0 : sizeof(T) * params.batch_size * kv_seq_length * local_hidden_units_kv;
     size_t const v_buf_2_size
-        = mEnableContextFMHA ? 0 : sizeof(T) * params.batch_size * kv_seq_length * local_hidden_units_kv;
+        = useContextFMHA ? 0 : sizeof(T) * params.batch_size * kv_seq_length * local_hidden_units_kv;
     size_t const qk_buf_size
-        = mEnableContextFMHA ? 0 : sizeof(T) * params.batch_size * mNumHeads * params.input_seq_length * kv_seq_length;
+        = useContextFMHA ? 0 : sizeof(T) * params.batch_size * mNumHeads * params.input_seq_length * kv_seq_length;
     size_t const qkv_buf_2_size
-        = mEnableContextFMHA ? 0 : sizeof(T) * params.batch_size * params.input_seq_length * local_hidden_units_qo;
-    size_t const qk_buf_float_size = mEnableContextFMHA
+        = useContextFMHA ? 0 : sizeof(T) * params.batch_size * params.input_seq_length * local_hidden_units_qo;
+    size_t const qk_buf_float_size = useContextFMHA
         ? 0
         : sizeof(float) * params.batch_size * mNumHeads * params.input_seq_length * kv_seq_length;
     int const dim_q_per_head = (mMLAParams.qk_rope_head_dim + mMLAParams.qk_nope_head_dim);
@@ -1427,26 +1439,26 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
     int const total_v_dim_all_heads
         = mNumAttnHeads * dim_v_per_head; // Assuming effective num_kv_heads = head_num for layout
     // Packed fp8 qkv buffer size for normal fp8 context FMHA
-    size_t fp8_qkv_buffer_size = mEnableContextFMHA && mFP8ContextFMHA && !mFmhaDispatcher->isSeparateQAndKvInput()
+    size_t fp8_qkv_buffer_size = useContextFMHA && mFP8ContextFMHA && !mFmhaDispatcher->isSeparateQAndKvInput()
         ? params.num_tokens * (local_hidden_units_qo + 2 * local_hidden_units_kv)
         : 0;
     // Separate fp8 q/k/v buffer size for fp8 context MLA
     size_t fp8_q_buf_size = 0;
     size_t fp8_k_buf_size = 0;
     size_t fp8_v_buf_size = 0;
-    if (mEnableContextFMHA && mFP8ContextMLA && mFmhaDispatcher->isSeparateQAndKvInput())
+    if (useContextFMHA && mFP8ContextMLA && mFmhaDispatcher->isSeparateQAndKvInput())
     {
         fp8_q_buf_size = params.num_tokens * static_cast<size_t>(total_q_dim_all_heads);
         fp8_k_buf_size = params.total_kv_len * static_cast<size_t>(total_k_dim_all_heads);
         fp8_v_buf_size = params.total_kv_len * static_cast<size_t>(total_v_dim_all_heads);
     }
     size_t const padding_offset_size
-        = mEnableContextFMHA ? 0 : sizeof(int) * params.batch_size * params.input_seq_length;
+        = useContextFMHA ? 0 : sizeof(int) * params.batch_size * params.input_seq_length;
     size_t const encoder_padding_offset_size
-        = mEnableContextFMHA ? 0 : sizeof(int) * params.batch_size * params.cross_kv_length;
+        = useContextFMHA ? 0 : sizeof(int) * params.batch_size * params.cross_kv_length;
     // Each token holds (batch_idx, token_idx_in_seq) int2.
     size_t const tokens_info_size = sizeof(int2) * params.num_tokens;
-    size_t const fmha_scheduler_counter = mEnableContextFMHA ? sizeof(uint32_t) : 0;
+    size_t const fmha_scheduler_counter = useContextFMHA ? sizeof(uint32_t) : 0;
     size_t const fmha_bmm1_scale_size = (mFP8ContextFMHA || mFP8ContextMLA) ? sizeof(float) * 2 : 0;
     size_t const fmha_bmm2_scale_size = (mFP8ContextFMHA || mFP8ContextMLA) ? sizeof(float) : 0;
 
@@ -1481,10 +1493,10 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
         = reinterpret_cast<__nv_fp8_e4m3*>(nextWorkspacePtr(workspace_byte_ptr, offset, fp8_k_buf_size));
     __nv_fp8_e4m3* fp8_v_buf
         = reinterpret_cast<__nv_fp8_e4m3*>(nextWorkspacePtr(workspace_byte_ptr, offset, fp8_v_buf_size));
-    int* padding_offset = mEnableContextFMHA
+    int* padding_offset = useContextFMHA
         ? nullptr
         : reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, padding_offset_size));
-    int* encoder_padding_offset = (mEnableContextFMHA && !isCrossAttention())
+    int* encoder_padding_offset = (useContextFMHA && !isCrossAttention())
         ? nullptr
         : reinterpret_cast<int*>(nextWorkspacePtr(workspace_byte_ptr, offset, encoder_padding_offset_size));
     int2* tokens_info = reinterpret_cast<int2*>(nextWorkspacePtr(workspace_byte_ptr, offset, tokens_info_size));
@@ -1553,7 +1565,7 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
     // We reassign attention_mask to override what previous invokeBuildDecoderInfo() does
     // also, invokeBuildDecoderInfo can only handle square mask, not cross B x q_len x kv_len mask
     // TODO: put this logic in the kernel above. currently not much concern because q_len is mostly = 1
-    if (isUnfusedCrossAttention())
+    if (isCrossAttention() && !useContextFMHA)
     {
         {
             std::vector<T> h_attention_mask(params.batch_size * params.input_seq_length * params.cross_kv_length, 1.);
@@ -1619,7 +1631,7 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
     // 1. only apply to self attention. If want fused multi-head cross attention, FMHCA kernels and runner is needed
     // 2. doesn't apply to MHA with relative attention bias, i.e. softmax(QK + bias) * V
     // We update mEnableContextFMHA in constructor to check these conditions
-    if (mEnableContextFMHA)
+    if (useContextFMHA)
     {
         // do all-to-all for params.attention_input, need to split on kv head
         // [token_num // cp_size, kv_heads, head_size] -> [token_num, kv_heads // cp_size, head_size]
@@ -2061,6 +2073,13 @@ int AttentionOp::enqueueContext(EnqueueContextParams<T> const& params, cudaStrea
             invokeMaskedSoftmax(param, stream);
         }
 
+        if (wantsContextAttentionPriorScores)
+        {
+            invokeStoreContextAttentionPriorScores(qk_buf_, params.attention_prior_scores, params.attention_prior_focus,
+                params.context_lengths, params.batch_size, mNumHeads, attention_seq_len_1, attention_seq_len_2,
+                mAttentionPriorLookahead, stream);
+        }
+
         if (mNumKVHeads == 1)
         {
             // Attn_weight[b, h*s_q, s_k]
@@ -2324,8 +2343,16 @@ int AttentionOp::enqueueGeneration(EnqueueGenerationParams<T> const& params, cud
     // Runtime check to see the actual number of blocks per sequence we need.
     int32_t const max_num_seq_len_tiles = std::max(getMaxNumSeqLenTile(batch_beam), estimated_min_multi_block_count);
     int32_t const min_num_seq_len_tiles = std::max(1, estimated_min_multi_block_count);
-    bool const enable_multi_block
-        = (mMultiBlockMode && max_num_seq_len_tiles > 1) || estimated_min_multi_block_count > 1;
+    // The MMHA multi-block path does not currently apply the T5TTS attention prior or
+    // accumulate attention-prior scores. If it is enabled for long encoder inputs, the
+    // host sees an all-zero score buffer and blindly advances the focus, which causes
+    // longform drift/repetition. Keep prior-enabled cross-attention on the single-block
+    // path until the multi-block kernel implements the same prior logic.
+    bool const disable_multi_block_for_attention_prior
+        = isCrossAttention() && (ComputeAttentionPrior() || ApplyAttentionPrior())
+        && params.attention_prior_focus != nullptr;
+    bool const enable_multi_block = !disable_multi_block_for_attention_prior
+        && ((mMultiBlockMode && max_num_seq_len_tiles > 1) || estimated_min_multi_block_count > 1);
     size_t const partial_out_size
         = enable_multi_block ? sizeof(T) * batch_beam * mNumHeads * mHeadSize * max_num_seq_len_tiles : 0;
     size_t const partial_sum_size
@@ -2437,10 +2464,8 @@ int AttentionOp::enqueueGeneration(EnqueueGenerationParams<T> const& params, cud
     {
         dispatch_params.attention_prior_focus = params.attention_prior_focus;
         dispatch_params.apply_attention_prior = mApplyAttentionPrior;
-        // History-suppression multiplier for positions BEHIND the focus window. Matches NeMo's
-        // construct_multi_chunk_prior (eps²=0.01 / hard-0) which prevents the attention snapping back
-        // to the chunk start (the repeat). Legacy kernel value was 0.1 (too weak). Env-tunable:
-        // TRT_ATTN_PRIOR_HISTORY_MULT (default 0.01; 0.1 = legacy, 0.0 = hard mask).
+        // Strong suppression multiplier for history/far-future prior positions. Current
+        // Magpie/NeMo construct_inference_prior uses eps^2=0.01 outside the active window.
         static float const s_history_mult = []() {
             char const* e = std::getenv("TRT_ATTN_PRIOR_HISTORY_MULT");
             return e != nullptr ? static_cast<float>(std::atof(e)) : 0.01f;
@@ -2694,9 +2719,10 @@ int AttentionOp::initialize() noexcept
             fmhaParams.dataTypeKv = DATA_TYPE_E4M3;
             fmhaParams.dataTypeOut = DATA_TYPE_BF16;
         }
-        // TODO: remove forceFp32Acc from MHARunnerFixedParams after adding host_runtime_perf_knobs to
-        // bertAttentionPlugin input tensors, so that we can change mLaunchParams.force_fp32_acc value in runtime.
-        fmhaParams.forceFp32Acc = false;
+        // This flag is part of the FMHA kernel-selection hash. Set it at
+        // dispatcher construction time so FP16 engines built with
+        // ENABLED_WITH_FP32_ACC pick the fp16-input/fp32-accumulation kernels.
+        fmhaParams.forceFp32Acc = mFMHAForceFP32Acc;
 
         // Cross-attention context attends over the encoder sequence; using a causal mask here can fully mask query
         // rows when q_len and kv_len differ.

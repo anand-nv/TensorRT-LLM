@@ -16,9 +16,13 @@
  */
 
 #include <algorithm>
-#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <random>
+#include <vector>
+
+#include <cuda_fp16.h>
 
 #include "tensorrt_llm/batch_manager/trtLocalTransformer.h"
 
@@ -57,6 +61,7 @@ TrtLocalTransformer::TrtLocalTransformer(
     , vocabSize{1032}  // Actual vocabulary size for the decoder
     , mMaxNumSequences{maxNumSequences}
 {
+    numTokens = numVocabs;
     TLLM_LOG_INFO("TrtLocalTransformer constructor called with numVocabs=%d, maxNumSequences=%d, maxSequenceLen=%d, numMicroBatches=%d, maxBatchSize=%d", 
         numVocabs, maxNumSequences, maxSequenceLen, numMicroBatches, maxBatchSize);
     TLLM_LOG_INFO("TrtLocalTransformer: Creating %d decoder buffers (numTokens=%d). Note: vocabSize=%d is the vocabulary size, not the number of buffers.", 
@@ -64,14 +69,31 @@ TrtLocalTransformer::TrtLocalTransformer(
 
     mRuntime->clearContexts();
     auto const contextId = 0;
-    numTokens = numVocabs; 
-    mstackingFactor = modelConfig.getStackingFactor();
     mRuntime->addContext(contextId);
     auto& manager = getBufferManager();
     // Cache static engine descriptors at construction — they don't change per step.
     mHiddenStatesType = mRuntime->getEngine().getTensorDataType(kInHiddenStatesTensorName);
+    mRandUniformType = mRuntime->getEngine().getTensorDataType(kRandUniformTensorName);
+    for (std::int32_t i = 0; i < mRuntime->getEngine().getNbIOTensors(); ++i)
+    {
+        auto const* const name = mRuntime->getEngine().getIOTensorName(i);
+        if (std::strcmp(name, kEosPolicyTensorName) == 0
+            && mRuntime->getEngine().getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
+        {
+            mHasEosPolicyInput = true;
+            mEosPolicyType = mRuntime->getEngine().getTensorDataType(kEosPolicyTensorName);
+            break;
+        }
+    }
     inHiddenStates = manager.emptyTensor(MemoryType::kGPU, mHiddenStatesType);
     inHiddenStatesHost = manager.emptyTensor(MemoryType::kCPU, mHiddenStatesType);
+    inRandUniform = manager.emptyTensor(MemoryType::kGPU, mRandUniformType);
+    inRandUniformHost = manager.emptyTensor(MemoryType::kCPU, mRandUniformType);
+    if (mHasEosPolicyInput)
+    {
+        inEosPolicy = manager.emptyTensor(MemoryType::kGPU, mEosPolicyType);
+        inEosPolicyHost = manager.emptyTensor(MemoryType::kCPU, mEosPolicyType);
+    }
     outLogits = manager.emptyTensor(MemoryType::kGPU, nvinfer1::DataType::kINT32);
     outLogitsHost = manager.emptyTensor(MemoryType::kCPU, nvinfer1::DataType::kINT32);
 
@@ -136,9 +158,14 @@ TrtLocalTransformer::TrtLocalTransformer(
     mMaxBatchSize = maxBatchSize;
     auto const maxBufBatch = maxBatchSize * 2;
     mInHiddenStatesBuf  = manager.gpu(ITensor::makeShape({maxBufBatch, hiddenSize}), mHiddenStatesType);
-    mOutLogitsBuf       = manager.gpu(ITensor::makeShape({maxBufBatch, numTokens * mstackingFactor}),
+    if (mHasEosPolicyInput)
+    {
+        mInEosPolicyBuf = manager.gpu(ITensor::makeShape({maxBufBatch}), mEosPolicyType);
+        mInEosPolicyHostBuf = manager.cpu(ITensor::makeShape({maxBufBatch}), mEosPolicyType);
+    }
+    mOutLogitsBuf       = manager.gpu(ITensor::makeShape({maxBufBatch, numTokens}),
                                       nvinfer1::DataType::kINT32);
-    mOutLogitsHostBuf   = manager.cpu(ITensor::makeShape({maxBufBatch, numTokens * mstackingFactor}),
+    mOutLogitsHostBuf   = manager.cpu(ITensor::makeShape({maxBufBatch, numTokens}),
                                       nvinfer1::DataType::kINT32);  // pre-alloc avoids per-step CPU malloc
     mReorderedStatesBuf = manager.gpu(ITensor::makeShape({maxBufBatch, hiddenSize}), mHiddenStatesType);
 }
@@ -206,11 +233,21 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     auto const batchSize = (int)(contextRequests.size() + generationRequests.size()) * cfgMult;
     // actual number of requests (without CFG doubling)
     auto const numRequests = (int)(contextRequests.size() + generationRequests.size());
+    TLLM_CHECK_WITH_INFO(batchSize > 0, "Local transformer batch size must be positive");
+    auto const minProfileShape = mRuntime->getEngine().getProfileShape(
+        kInHiddenStatesTensorName, 0, nvinfer1::OptProfileSelector::kMIN);
+    auto const maxProfileShape = mRuntime->getEngine().getProfileShape(
+        kInHiddenStatesTensorName, 0, nvinfer1::OptProfileSelector::kMAX);
+    auto const minProfileBatch = static_cast<SizeType32>(minProfileShape.d[0]);
+    auto const maxProfileBatch = static_cast<SizeType32>(maxProfileShape.d[0]);
+    auto const effectiveBatchSize = std::max(batchSize, minProfileBatch);
+    TLLM_CHECK_WITH_INFO(effectiveBatchSize <= maxProfileBatch,
+        "Local transformer batch size %d exceeds max profile batch %d", effectiveBatchSize, maxProfileBatch);
 
     auto& manager = getBufferManager();
     // Re-use pre-allocated GPU buffers — slice to actual batch size to avoid per-step malloc.
-    inHiddenStates = ITensor::slice(mInHiddenStatesBuf, 0, batchSize);
-    outLogits      = ITensor::slice(mOutLogitsBuf,      0, batchSize);
+    inHiddenStates = ITensor::slice(mInHiddenStatesBuf, 0, effectiveBatchSize);
+    outLogits      = ITensor::slice(mOutLogitsBuf,      0, effectiveBatchSize);
 
     // for context requests, copy the hidden states into the input buffer
     SizeType32 batchIndex{0};
@@ -227,40 +264,14 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
         for (SizeType32 i = 0; i < cfgMult; i++) {
             frameIndex += contextFrames;
             auto const numFrames = 1;
-            #ifndef NDEBUG
-            auto n_dims = hiddenStates->getShape().nbDims;
-            for (int i_ = 0; i_ < n_dims; i_++) {
-                TLLM_LOG_INFO("hiddenStates %d: %d", i_, hiddenStates->getShape().d[i_]);
-            }
-            for (int i_ = 0; i_ < inHiddenStates->getShape().nbDims; i_++) {
-                TLLM_LOG_INFO("inHiddenStates %d: %d", i_, inHiddenStates->getShape().d[i_]);
-            }
-            TLLM_LOG_DEBUG("Copying hidden states for request %d %d", batchIndex, i);
-            TLLM_LOG_DEBUG("frameIndex1: %d %d", frameIndex, i);
-            TLLM_LOG_DEBUG("numFrames:1 %d %d", numFrames, i);
-            TLLM_LOG_DEBUG("batchIndex1: %d %d", batchIndex, i);
-            #endif
             TensorPtr statesView = ITensor::slice(hiddenStates, frameIndex-numFrames, numFrames);
             TensorPtr outStatesView = ITensor::slice(inHiddenStates, batchIndex, numFrames);
-            
-            #ifndef NDEBUG
-            TLLM_LOG_DEBUG("Checking if cpp only works1.");
-            for (int i_ = 0; i_ < statesView->getShape().nbDims; i_++) {
-                TLLM_LOG_DEBUG("statesView %d: %d", i_, statesView->getShape().d[i_]);
-            }
-            for (int i_ = 0; i_ < outStatesView->getShape().nbDims; i_++) {
-                TLLM_LOG_DEBUG("outStatesView %d: %d", i_, outStatesView->getShape().d[i_]);
-            }
-            #endif
             manager.copy(*statesView, *outStatesView);
             batchIndex += numFrames;
         }
     }
 
     // for generation requests, copy the rest of the runtime buffer to the local transformer buffer
-    #ifndef NDEBUG
-        TLLM_LOG_INFO("Copying hidden states to local transformer buffer");
-    #endif
     if (generationRequests.size() > 0)
     {
         TensorPtr genStatesView = ITensor::slice(hiddenStates, frameIndex, generationRequests.size() * cfgMult);
@@ -280,7 +291,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     //
     // Reorder to non-interleaved so the engine computes correct CFG pairs.
     if (cfgMult == 2) {
-        TensorPtr reorderedStates = ITensor::slice(mReorderedStatesBuf, 0, batchSize);
+        TensorPtr reorderedStates = ITensor::slice(mReorderedStatesBuf, 0, effectiveBatchSize);
         for (SizeType32 i = 0; i < numRequests; i++) {
             // Even rows (2i)   → conditional half (rows 0..N-1)
             manager.copy(*ITensor::slice(inHiddenStates, 2 * i, 1),
@@ -291,23 +302,204 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
         }
         inHiddenStates = reorderedStates;
     }
+    if (effectiveBatchSize > batchSize)
+    {
+        for (SizeType32 row = batchSize; row < effectiveBatchSize; ++row)
+        {
+            manager.copy(*ITensor::slice(inHiddenStates, batchSize - 1, 1),
+                         *ITensor::slice(inHiddenStates, row, 1));
+        }
+    }
 
     sync_check_cuda_error(mRuntime->getStream().get());
+
+    inRandUniformHost = manager.cpu(ITensor::makeShape({numTokens, effectiveBatchSize}), mRandUniformType);
+    inRandUniform = manager.gpu(ITensor::makeShape({numTokens, effectiveBatchSize}), mRandUniformType);
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    std::uniform_real_distribution<float> randUniformDist(0.0F, 1.0F);
+    auto const randCount = static_cast<std::size_t>(numTokens) * static_cast<std::size_t>(effectiveBatchSize);
+    if (mRandUniformType == nvinfer1::DataType::kFLOAT)
+    {
+        auto* randData = reinterpret_cast<float*>(inRandUniformHost->data());
+        for (std::size_t i = 0; i < randCount; ++i)
+        {
+            randData[i] = randUniformDist(rng);
+        }
+    }
+    else if (mRandUniformType == nvinfer1::DataType::kHALF)
+    {
+        auto* randData = reinterpret_cast<__half*>(inRandUniformHost->data());
+        for (std::size_t i = 0; i < randCount; ++i)
+        {
+            randData[i] = __float2half(randUniformDist(rng));
+        }
+    }
+    else
+    {
+        TLLM_THROW("Unsupported local transformer rand_uniform dtype");
+    }
+    manager.copy(*inRandUniformHost, *inRandUniform);
+
+    if (mHasEosPolicyInput)
+    {
+        inEosPolicy = ITensor::slice(mInEosPolicyBuf, 0, effectiveBatchSize);
+        inEosPolicyHost = ITensor::slice(mInEosPolicyHostBuf, 0, effectiveBatchSize);
+
+        auto setPolicy = [&](SizeType32 idx, float value)
+        {
+            if (mEosPolicyType == nvinfer1::DataType::kFLOAT)
+            {
+                reinterpret_cast<float*>(inEosPolicyHost->data())[idx] = value;
+            }
+            else if (mEosPolicyType == nvinfer1::DataType::kHALF)
+            {
+                reinterpret_cast<__half*>(inEosPolicyHost->data())[idx] = __float2half(value);
+            }
+            else
+            {
+                TLLM_THROW("Unsupported local transformer eos_policy dtype");
+            }
+        };
+
+        for (SizeType32 row = 0; row < effectiveBatchSize; ++row)
+        {
+            setPolicy(row, 0.0F);
+        }
+
+        auto const eosPolicyForRequest = [&](std::shared_ptr<LlmRequest> const& llmReq, bool isContextRequest)
+        {
+            static constexpr SizeType32 kMinGeneratedFrames = 4;
+            static bool const ignoreFinishedSentenceTracking = []() {
+                char const* env = std::getenv("TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING");
+                return env == nullptr || env[0] == '\0' || std::atoi(env) != 0;
+            }();
+            SizeType32 const completedSteps = isContextRequest
+                ? 0
+                : (llmReq->getNumTokens(0) - llmReq->mPromptLen);
+            bool const tooEarlyForEos = completedSteps < kMinGeneratedFrames;
+            if (tooEarlyForEos)
+            {
+                return -1.0F;
+            }
+            if (!mModelConfig.useAttentionPrior())
+            {
+                return 0.0F;
+            }
+            // NeMo's default inference sets ignore_finished_sentence_tracking=True.
+            // In that mode unfinished_items and finished_items are both empty, so
+            // audio EOS is not gated by text-focus tracking after the minimum frame
+            // guard. Keep the older prior-gated behavior available with
+            // TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING=0 for A/B validation.
+            if (ignoreFinishedSentenceTracking)
+            {
+                return 0.0F;
+            }
+            // Match NeMo's three EOS states:
+            //   unfinished text: forbid EOS,
+            //   near text end: allow the model to choose EOS naturally,
+            //   end counter expired: force EOS.
+            if (llmReq->isAttentionPriorFinished())
+            {
+                return 1.0F;
+            }
+            return llmReq->isAttentionPriorNearEnd() ? 0.0F : -1.0F;
+        };
+
+        auto tracePolicy = [&](std::shared_ptr<LlmRequest> const& llmReq, bool isContextRequest,
+                               SizeType32 row, float value)
+        {
+            char const* tracePath = std::getenv("TRT_EOS_POLICY_TRACE");
+            if (tracePath == nullptr || tracePath[0] == '\0')
+            {
+                return;
+            }
+            static constexpr SizeType32 kMinGeneratedFrames = 4;
+            static bool const ignoreFinishedSentenceTracking = []() {
+                char const* env = std::getenv("TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING");
+                return env == nullptr || env[0] == '\0' || std::atoi(env) != 0;
+            }();
+            SizeType32 const completedSteps = isContextRequest
+                ? 0
+                : (llmReq->getNumTokens(0) - llmReq->mPromptLen);
+            bool const hasFocus = llmReq->hasAttentionPriorIdx();
+            auto const focus = hasFocus ? llmReq->getAttentionPriorIdx(mModelConfig) : -1;
+            std::ofstream out(tracePath, std::ios::app);
+            out << "eos_policy"
+                << "\treq=" << llmReq->mRequestId
+                << "\trow=" << row
+                << "\tcontext=" << (isContextRequest ? 1 : 0)
+                << "\tvalue=" << value
+                << "\tsteps=" << completedSteps
+                << "\ttoo_early=" << (completedSteps < kMinGeneratedFrames ? 1 : 0)
+                << "\tfocus=" << focus
+                << "\tenc_len=" << llmReq->getEncoderOutputLen()
+                << "\tnear_end=" << (llmReq->isAttentionPriorNearEnd() ? 1 : 0)
+                << "\tfinished=" << (llmReq->isAttentionPriorFinished() ? 1 : 0)
+                << "\tignore_fst=" << (ignoreFinishedSentenceTracking ? 1 : 0)
+                << "\tend_count=" << llmReq->getAttentionPriorEndAttendCount()
+                << "\tmax_end=" << llmReq->getMaxEndAttendCount()
+                << "\n";
+        };
+
+        // After CFG reordering, rows [0, numRequests) are the conditional rows used by
+        // IntLT for sampling. Rows [numRequests, 2*numRequests) are unconditional and ignored.
+        SizeType32 policyRow = 0;
+        for (auto const& llmReq : contextRequests)
+        {
+            auto const value = eosPolicyForRequest(llmReq, true);
+            setPolicy(policyRow, value);
+            tracePolicy(llmReq, true, policyRow, value);
+            policyRow++;
+        }
+        for (auto const& llmReq : generationRequests)
+        {
+            auto const value = eosPolicyForRequest(llmReq, false);
+            setPolicy(policyRow, value);
+            tracePolicy(llmReq, false, policyRow, value);
+            policyRow++;
+        }
+
+        manager.copy(*inEosPolicyHost, *inEosPolicy);
+    }
 
     inputMap.clear();
     outputMap.clear();
     // always needs the hidden states as input
     inputMap.insert_or_assign(kInHiddenStatesTensorName, inHiddenStates);
+    inputMap.insert_or_assign(kRandUniformTensorName, inRandUniform);
+    if (mHasEosPolicyInput)
+    {
+        inputMap.insert_or_assign(kEosPolicyTensorName, inEosPolicy);
+    }
 
     // puts logits into the same buffer
     outputMap.insert_or_assign(kOutLogitsTensorName, outLogits);
+    // Bind any optional non-logits outputs so engines with marked intermediate
+    // tensors remain executable. The runtime consumes only logits.
+    std::vector<TensorPtr> extraOutputTensors;
+    for (std::int32_t tensorIdx = 0; tensorIdx < mRuntime->getEngine().getNbIOTensors(); ++tensorIdx)
+    {
+        auto const* const outputName = mRuntime->getEngine().getIOTensorName(tensorIdx);
+        if (std::strcmp(outputName, kOutLogitsTensorName) == 0
+            || mRuntime->getEngine().getTensorIOMode(outputName) != nvinfer1::TensorIOMode::kOUTPUT)
+        {
+            continue;
+        }
+
+        auto outputShape = mRuntime->getEngine().getTensorShape(outputName);
+        for (int dimIdx = 0; dimIdx < outputShape.nbDims; ++dimIdx)
+        {
+            if (outputShape.d[dimIdx] < 0)
+            {
+                outputShape.d[dimIdx] = effectiveBatchSize;
+            }
+        }
+        TensorPtr extraOutput = manager.gpu(outputShape, mRuntime->getEngine().getTensorDataType(outputName));
+        outputMap.insert_or_assign(outputName, extraOutput);
+        extraOutputTensors.emplace_back(std::move(extraOutput));
+    }
     // provide additional input - previously generated tokens
 
-    #ifndef NDEBUG
-        TLLM_LOG_INFO("Cleared input/output map");
-        // Call TrT engine.
-        TLLM_LOG_DEBUG("Running Enqueue");
-    #endif
     auto const contextId = 0;
     // Set input and output tensors on the context before executing
     mRuntime->setInputTensors(contextId, inputMap);
@@ -320,7 +512,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
     auto const logitsWidth = static_cast<SizeType32>(logitsShape.d[1]);
 
     // Use pre-allocated host buffer when width matches; fall back to dynamic alloc otherwise.
-    if (logitsWidth == numTokens * mstackingFactor)
+    if (logitsWidth == numTokens)
     {
         outLogitsHost = ITensor::slice(mOutLogitsHostBuf, 0, numRequests);
     }
@@ -408,8 +600,7 @@ void TrtLocalTransformer::updateDecoderStateAfterGeneration(
     auto finishData = reinterpret_cast<tensorrt_llm::kernels::FinishedState::UnderlyingType*>(mFinishReasonsHost->data());
     auto finishedSumData = reinterpret_cast<SizeType32*>(mFinishedSumHost->data());
     
-    // Get generated tokens on host (should already be on host). Row width is numVocabs * stackingFactor
-    // (see TrtLocalTransformer::run outLogitsHost shape), not numTokens alone.
+    // Get generated tokens on host. The local transformer emits one token per vocab channel.
     auto tokensData = reinterpret_cast<SizeType32*>(generatedTokens->data());
     auto const rowStride = static_cast<SizeType32>(generatedTokens->getShape().d[1]);
     TLLM_CHECK_WITH_INFO(rowStride > 0, "generatedTokens row width must be positive");
@@ -443,9 +634,10 @@ void TrtLocalTransformer::updateDecoderStateAfterGeneration(
             seqLengthsData[seqSlot] = currentLength;
             TLLM_LOG_DEBUG("Updated sequence length for slot %d to %d", seqSlot, currentLength);
             
-            // Check finish conditions (EOS on first codebook column; extend if EOS is on another book)
+            // Check finish conditions. NeMo's default detector stops when either
+            // multinomial or argmax emits EOS on any codebook/frame-stack channel.
             bool shouldFinish = false;
-            SizeType32 const generatedToken = tokensData[static_cast<size_t>(batchIndex) * rowStride];
+            auto const tokenRow = tokensData + static_cast<size_t>(batchIndex) * rowStride;
 
             // Suppress EOS for the first min_generated_frames codec frames.
             // completedSteps = getNumTokens(0) - mPromptLen = n_steps * stacking_factor (in frames).
@@ -456,13 +648,29 @@ void TrtLocalTransformer::updateDecoderStateAfterGeneration(
                 ? 0
                 : (llmReq->getNumTokens(0) - llmReq->mPromptLen);
             bool const tooEarlyForEos = completedSteps < kMinGeneratedFrames;
+            bool const eosAllowedByAttentionPrior = !mModelConfig.useAttentionPrior()
+                || llmReq->isAttentionPriorNearEnd() || llmReq->isAttentionPriorFinished();
 
             // Check if EOS token
             auto const endId = llmReq->mEndId.value();
-            if (!tooEarlyForEos && generatedToken == endId)
+            bool anyCodebookEos = false;
+            for (SizeType32 col = 0; col < rowStride; ++col)
+            {
+                if (tokenRow[col] == endId)
+                {
+                    anyCodebookEos = true;
+                    break;
+                }
+            }
+            if (!tooEarlyForEos && eosAllowedByAttentionPrior && anyCodebookEos)
             {
                 shouldFinish = true;
                 TLLM_LOG_DEBUG("Request %lu hit EOS token", llmReq->mRequestId);
+            }
+            else if (!tooEarlyForEos && !eosAllowedByAttentionPrior && anyCodebookEos)
+            {
+                TLLM_LOG_DEBUG("Request %lu generated EOS before attention prior finished; suppressing finish",
+                    llmReq->mRequestId);
             }
             
             // Check if max sequence length reached

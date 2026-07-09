@@ -55,6 +55,8 @@ public:
     using TensorMap = runtime::ITensor::TensorMap;
 
     static constexpr auto kInHiddenStatesTensorName = "hidden_states";
+    static constexpr auto kRandUniformTensorName = "rand_uniform";
+    static constexpr auto kEosPolicyTensorName = "eos_policy";
     static constexpr auto kOutLogitsTensorName = "logits";
 
     TrtLocalTransformer(
@@ -113,10 +115,13 @@ private:
     int hiddenSize;
     int numTokens;
     int vocabSize;
-    int mstackingFactor;
 
     TensorPtr inHiddenStates;  // [batch x dim]
     TensorPtr inHiddenStatesHost;  // [batch x dim]
+    TensorPtr inRandUniform;  // [numTokens x batch]
+    TensorPtr inRandUniformHost;  // [numTokens x batch]
+    TensorPtr inEosPolicy;  // [batch]
+    TensorPtr inEosPolicyHost;  // [batch]
     TensorPtr inTokens;  // [8 x batch']
     TensorPtr inTokensSliceHost;  // [batch']
     TensorPtr outLogitsHost;  // [batch' x VocabSize]
@@ -126,10 +131,15 @@ private:
 
     // Static engine descriptors cached at construction to avoid per-step engine queries.
     nvinfer1::DataType mHiddenStatesType{nvinfer1::DataType::kFLOAT};
+    nvinfer1::DataType mRandUniformType{nvinfer1::DataType::kFLOAT};
+    nvinfer1::DataType mEosPolicyType{nvinfer1::DataType::kFLOAT};
+    bool mHasEosPolicyInput{false};
 
     // Pre-allocated GPU/CPU buffers at max-batch size to avoid per-step allocations in run().
     // Sized for maxBatchSize*2 rows (CFG doubles the batch).
     TensorPtr mInHiddenStatesBuf;
+    TensorPtr mInEosPolicyBuf;
+    TensorPtr mInEosPolicyHostBuf;
     TensorPtr mOutLogitsBuf;
     TensorPtr mOutLogitsHostBuf;
     TensorPtr mReorderedStatesBuf;

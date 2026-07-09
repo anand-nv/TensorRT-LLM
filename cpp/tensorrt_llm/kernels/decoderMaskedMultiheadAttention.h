@@ -220,10 +220,9 @@ struct Multihead_attention_params_base
     int attention_prior_lookahead = 5;
     int attention_prior_window_left = 1;
     int attention_prior_window_right = 5;
-    // Multiplier for positions BEHIND the focus window (history). NeMo's construct_multi_chunk_prior
-    // suppresses history to eps² (0.01) / hard-0 to stop the attention snapping back to the chunk
-    // start (the repeat); the legacy value was 0.1 (too weak). Set via TRT_ATTN_PRIOR_HISTORY_MULT.
-    float attention_prior_history_mult = 0.1f;
+    // Multiplier for strongly suppressed prior positions. Current Magpie/NeMo prior uses
+    // eps^2=0.01 for history before focus-1 and far future after focus+5.
+    float attention_prior_history_mult = 0.01f;
 };
 
 template <typename T, bool USE_CROSS_ATTENTION = false>

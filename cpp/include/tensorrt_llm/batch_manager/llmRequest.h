@@ -1274,18 +1274,17 @@ public:
         auto const encoderOutputLen = getEncoderOutputLen();
         TLLM_CHECK_WITH_INFO(encoderOutputLen > 0, "Encoder output len should be positive for attention prior ");
 
-        auto const leftOffset = std::min(getLeftOffset(), encoderOutputLen - 1);
-        // Focus must reach the final tokens (the byt5 </s> + EOS anchor) so the decoder locks onto
-        // the end and emits a clean EOS, matching NeMo (focus -> encLen-1). The previous
+        auto const leftOffset = getLeftOffset();
+        // Focus must reach the final token so the decoder locks onto the end and emits a clean EOS,
+        // matching NeMo's fallback path (focus -> encLen-1). The previous
         // `encoderOutputLen - rightWindow - 1` stopped focus rightWindow(=5) tokens short of the end
         // (e.g. 90 of 96), so the </s> anchor at ~encLen-2 was never the focus -> end-of-utterance
         // dwell/repetition, worst for byte-tokenizer langs (vi/fr/it/ko). The kernel masking still
-        // uses attention_prior_window_right; only the focus end-stop is decoupled to a 1-token
-        // margin so focus can advance to the </s> (EOS is covered by the masking window).
-        auto const endMargin = 1;
-        auto const lastIdx = encoderOutputLen > endMargin + 1
-            ? std::max(leftOffset, encoderOutputLen - endMargin - 1)
-            : leftOffset;
+        // uses attention_prior_window_right; only the focus end-stop is decoupled from that right
+        // window so focus can advance to NeMo's final fallback index.
+        auto const lastIdx = leftOffset + encoderOutputLen - 1;
+        auto const nearEndIdx = leftOffset + (encoderOutputLen > 3 ? encoderOutputLen - 3 : 0);
+        auto const forceEndIdx = leftOffset + (encoderOutputLen > 2 ? encoderOutputLen - 2 : 0);
 
         if (attentionPriorIdx < leftOffset)
         {
@@ -1304,22 +1303,23 @@ public:
             // runtime::ITensor::SharedPtr and at::Tensor
             mAttentionPriorCounters.resize(getEncoderOutputLen(), 0);
         }
-        mAttentionPriorCounters[attentionPriorIdx]++;
-        if (attentionPriorIdx >= lastIdx)
+        auto const localAttentionPriorIdx = attentionPriorIdx - leftOffset;
+        if (static_cast<size_t>(localAttentionPriorIdx) < mAttentionPriorCounters.size())
+        {
+            mAttentionPriorCounters[localAttentionPriorIdx]++;
+        }
+        if (attentionPriorIdx >= nearEndIdx)
+        {
+            mAttentionPriorNearEnd = true;
+        }
+        if (attentionPriorIdx >= forceEndIdx)
         {
             mAttentionPriorCounterCloseToEnd++;
         }
-        else if (mAttentionPriorCounters[attentionPriorIdx] >= getMaxAttendCount())
-        {
-            // increment to avoid getting stuck in the same encoder output
-            // [ATTN_PRIOR] dwell/sink-escape: focus held a position >= max_attend_count steps, force-advance.
-            // NeMo's analogue advances at counter>=8 and additionally epsilon-suppresses the prefix at >=10
-            // (construct_inference_prior); TRT only advances and never suppresses history -> compare grep.
-            TLLM_LOG_DEBUG("[ATTN_PRIOR] sink-advance reqId=%lu focus=%d count=%d >= maxAttend=%d -> focus=%d",
-                mRequestId, attentionPriorIdx, mAttentionPriorCounters[attentionPriorIdx], getMaxAttendCount(),
-                attentionPriorIdx + 1);
-            setAttentionPriorIdx(attentionPriorIdx + 1, modelConfig);
-        }
+        // NeMo applies the sink escape at the beginning of the next attention-prior
+        // update, before selecting the next attended timestep. Keep setAttentionPriorIdx
+        // as a pure "record attended timestep" operation so we do not move focus one
+        // decoder step earlier than NeMo.
     }
 
     bool isAttentionPriorFinished() const
@@ -1327,14 +1327,24 @@ public:
         return mAttentionPriorCounterCloseToEnd >= getMaxEndAttendCount();
     }
 
+    bool isAttentionPriorNearEnd() const
+    {
+        return mAttentionPriorNearEnd;
+    }
+
+    [[nodiscard]] SizeType32 getAttentionPriorEndAttendCount() const
+    {
+        return mAttentionPriorCounterCloseToEnd;
+    }
+
     [[nodiscard]] SizeType32 getAttentionPriorIdx(runtime::ModelConfig const& modelConfig)
     {
         if (!mAttentionPriorIdx.has_value())
         {
-            setAttentionPriorIdx(1, modelConfig);
+            setAttentionPriorIdx(std::max<SizeType32>(1, getLeftOffset()), modelConfig);
         }
-        // `setAttentionPriorIdx` takes care to avoid getting stuck in the same encoder output,
-        // it is expected that `mAttentionPriorCounters[mAttentionPriorIdx]` is always < 8
+        // RuntimeBuffers::processAttentionPriorScores applies the NeMo-style sink
+        // bump before the next lookahead argmax when this counter reaches max_attend_count.
         return mAttentionPriorIdx.value();
     }
 
@@ -1348,11 +1358,16 @@ public:
             return 0;
         }
         auto const idx = mAttentionPriorIdx.value();
-        if (idx < 0 || static_cast<size_t>(idx) >= mAttentionPriorCounters.size())
+        if (idx < getLeftOffset())
         {
             return 0;
         }
-        return mAttentionPriorCounters[idx];
+        auto const localIdx = idx - getLeftOffset();
+        if (static_cast<size_t>(localIdx) >= mAttentionPriorCounters.size())
+        {
+            return 0;
+        }
+        return mAttentionPriorCounters[localIdx];
     }
 
     // Non-mutating check: has setAttentionPriorIdx been called yet?
@@ -2194,6 +2209,7 @@ protected:
     std::vector<SizeType32> mAttentionPriorCounters;
     // counts how many times attention prior idx is close to the end of sequence
     SizeType32 mAttentionPriorCounterCloseToEnd{0};
+    bool mAttentionPriorNearEnd{false};
 
     bool mReturnEncoderOutput;
 

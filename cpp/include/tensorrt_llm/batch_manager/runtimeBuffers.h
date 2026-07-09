@@ -306,8 +306,8 @@ public:
         runtime::EagleBuffers::Inputs const& eagleBuffers, runtime::TllmRuntime const& runtime,
         runtime::ModelConfig const& modelConfig, runtime::WorldConfig const& worldConfig);
 
-    void processAttentionPriorScores(
-        RequestVector const& genRequests, runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig);
+    void processAttentionPriorScores(RequestVector const& contextRequests, RequestVector const& genRequests,
+        runtime::TllmRuntime const& runtime, runtime::ModelConfig const& modelConfig);
 
 private:
     void create(SizeType32 maxBatchSize, SizeType32 maxBeamWidth, std::vector<SizeType32> const& maxAttentionWindowVec,

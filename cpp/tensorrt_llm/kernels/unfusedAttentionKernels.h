@@ -270,6 +270,11 @@ template <typename T, typename T_IN>
 void invokeMaskedSoftmax(MaskedSoftmaxParam<T, T_IN>& param, cudaStream_t stream);
 
 template <typename T>
+void invokeStoreContextAttentionPriorScores(T const* attention_score, float* attention_prior_scores,
+    int const* attention_prior_focus, int const* context_lengths, int batch_size, int num_heads, int q_length,
+    int k_length, int attention_prior_lookahead, cudaStream_t stream);
+
+template <typename T>
 void invokeTransposeQKV(T* dst, T* src, int const batch_size, int const seq_len, int const head_num,
     int const size_per_head, float const* scale, int const int8_mode, cudaStream_t stream);
 

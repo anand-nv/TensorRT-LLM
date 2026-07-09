@@ -518,6 +518,9 @@ class T5TTSDecoderLayer(Module):
             tp_rank=mapping.tp_rank,
             dtype=dtype,
             cross_attention=True,
+            # Match NeMo CrossAttention: attention scores use QK^T / sqrt(d_head).
+            # TensorRT-LLM's plugin computes scale as 1 / (sqrt(d_head) * q_scaling).
+            q_scaling=1.0,
             compute_attention_prior=self.compute_attention_prior,
             apply_attention_prior=apply_attention_prior,
             attention_prior_lookahead=attention_prior_lookahead,
