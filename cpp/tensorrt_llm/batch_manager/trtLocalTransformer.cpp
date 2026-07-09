@@ -371,7 +371,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
             static constexpr SizeType32 kMinGeneratedFrames = 4;
             static bool const ignoreFinishedSentenceTracking = []() {
                 char const* env = std::getenv("TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING");
-                return env == nullptr || env[0] == '\0' || std::atoi(env) != 0;
+                return env != nullptr && env[0] != '\0' && std::atoi(env) != 0;
             }();
             SizeType32 const completedSteps = isContextRequest
                 ? 0
@@ -385,11 +385,11 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
             {
                 return 0.0F;
             }
-            // NeMo's default inference sets ignore_finished_sentence_tracking=True.
-            // In that mode unfinished_items and finished_items are both empty, so
-            // audio EOS is not gated by text-focus tracking after the minimum frame
-            // guard. Keep the older prior-gated behavior available with
-            // TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING=0 for A/B validation.
+            // Keep EOS suppressed inside localtransformer.plan until the cross-attention
+            // tracker reaches the end of the current text chunk. The Python backend treats
+            // an emitted audio EOS token as terminal immediately, before the host-side finish
+            // suppression below can help, so allowing EOS early can silently truncate a chunk.
+            // Set TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING=1 only for A/B validation.
             if (ignoreFinishedSentenceTracking)
             {
                 return 0.0F;
@@ -416,7 +416,7 @@ void TrtLocalTransformer::run(TensorPtr const& hiddenStates,
             static constexpr SizeType32 kMinGeneratedFrames = 4;
             static bool const ignoreFinishedSentenceTracking = []() {
                 char const* env = std::getenv("TRT_EOS_IGNORE_FINISHED_SENTENCE_TRACKING");
-                return env == nullptr || env[0] == '\0' || std::atoi(env) != 0;
+                return env != nullptr && env[0] != '\0' && std::atoi(env) != 0;
             }();
             SizeType32 const completedSteps = isContextRequest
                 ? 0
